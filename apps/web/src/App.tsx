@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import {
@@ -12,8 +13,8 @@ import {
   FileCode2,
   GitBranch,
   Network,
-  Play,
   Radar,
+  RefreshCw,
   SearchCode,
   ShieldCheck,
   Sparkles,
@@ -21,15 +22,21 @@ import {
   Workflow,
   XCircle
 } from "lucide-react";
-import type { JobStatus } from "@ai-jsunpack/shared";
+import type { Artifact, CloudMode, Job, JobStatus } from "@ai-jsunpack/shared";
+import { CLOUD_MODES, JOB_STATUSES } from "@ai-jsunpack/shared";
+import { API_BASE_URL, createJob, fetchJobSummary, uploadSource } from "./api";
+import type { JobSummary } from "./api";
 
 gsap.registerPlugin(useGSAP);
 
-type StageState = "done" | "active" | "pending" | "warning";
+type StageState = "done" | "active" | "pending" | "warning" | "fail";
 
-interface StageItem {
+interface StageDefinition {
   status: JobStatus;
   label: string;
+}
+
+interface StageItem extends StageDefinition {
   state: StageState;
 }
 
@@ -54,14 +61,18 @@ interface WorkbenchData {
   runtimeMetrics: RuntimeMetric[];
 }
 
-const stageItems: StageItem[] = [
-  { status: "intake", label: "Input inventory", state: "done" },
-  { status: "indexing", label: "AST and resource index", state: "done" },
-  { status: "agent_pass", label: "Agent inference", state: "active" },
-  { status: "reconstructing", label: "Project writer", state: "pending" },
-  { status: "runtime_smoke", label: "Browser validation", state: "pending" },
-  { status: "reviewing", label: "Review and repair", state: "warning" }
+const stageDefinitions: StageDefinition[] = [
+  { status: "queued", label: "Job created" },
+  { status: "intake", label: "Input inventory" },
+  { status: "indexing", label: "AST and resource index" },
+  { status: "agent_pass", label: "Agent inference" },
+  { status: "reconstructing", label: "Project writer" },
+  { status: "runtime_smoke", label: "Browser validation" },
+  { status: "reviewing", label: "Review and repair" },
+  { status: "completed", label: "Package ready" }
 ];
+
+const statusOrder = new Map<JobStatus, number>(JOB_STATUSES.map((status, index) => [status, index]));
 
 const projectFiles = [
   "src/main.tsx",
@@ -104,10 +115,10 @@ const auditRows: AuditRow[] = [
 ];
 
 const runtimeMetrics: RuntimeMetric[] = [
-  { label: "Entry load", value: "1.2s", status: "pass" },
-  { label: "Console errors", value: "0", status: "pass" },
-  { label: "Failed requests", value: "2", status: "warn" },
-  { label: "Screenshot diff", value: "6.8%", status: "warn" }
+  { label: "Entry load", value: "Pending", status: "warn" },
+  { label: "Console errors", value: "Pending", status: "warn" },
+  { label: "Failed requests", value: "Pending", status: "warn" },
+  { label: "Screenshot diff", value: "Pending", status: "warn" }
 ];
 
 const codePreview = `export function calculateDiscount(cart: CartState) {
@@ -123,27 +134,154 @@ const codePreview = `export function calculateDiscount(cart: CartState) {
 
 export function AppContainer() {
   const [selectedFile, setSelectedFile] = useState(projectFiles[0]);
+  const [selectedCloudMode, setSelectedCloudMode] = useState<CloudMode>("local_only");
+  const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
+  const [jobSummary, setJobSummary] = useState<JobSummary | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+
+  const currentJob = jobSummary?.job ?? null;
+  const artifacts = jobSummary?.artifacts ?? [];
   const data = useMemo<WorkbenchData>(
     () => ({
-      stages: stageItems,
+      stages: buildStageItems(currentJob?.status),
       files: projectFiles,
       auditRows,
       runtimeMetrics
     }),
-    []
+    [currentJob?.status]
   );
 
-  return <AppView data={data} selectedFile={selectedFile} onSelectFile={setSelectedFile} />;
+  useEffect(() => {
+    if (!currentJob?.id) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollJob = async () => {
+      try {
+        const summary = await fetchJobSummary(currentJob.id);
+        if (!cancelled) {
+          setJobSummary(summary);
+          setPollError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPollError(errorMessage(error));
+        }
+      }
+    };
+
+    const intervalId = window.setInterval(pollJob, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [currentJob?.id]);
+
+  const handleSubmitJob = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (isSubmitting) {
+      return;
+    }
+    if (!selectedUploadFile) {
+      setUploadError("Select an input artifact before creating a job.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setUploadError(null);
+    setPollError(null);
+    try {
+      const created = await createJob(selectedCloudMode);
+      setJobSummary(created);
+      const uploaded = await uploadSource(created.job.id, selectedUploadFile);
+      setJobSummary(uploaded);
+    } catch (error) {
+      setUploadError(errorMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRefreshJob = async () => {
+    if (!currentJob?.id || isRefreshing) {
+      return;
+    }
+    setIsRefreshing(true);
+    setPollError(null);
+    try {
+      setJobSummary(await fetchJobSummary(currentJob.id));
+    } catch (error) {
+      setPollError(errorMessage(error));
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  return (
+    <AppView
+      apiBaseUrl={API_BASE_URL}
+      artifacts={artifacts}
+      currentJob={currentJob}
+      data={data}
+      isRefreshing={isRefreshing}
+      isSubmitting={isSubmitting}
+      onFileChange={setSelectedUploadFile}
+      onRefreshJob={handleRefreshJob}
+      onSelectCloudMode={setSelectedCloudMode}
+      onSelectFile={setSelectedFile}
+      onSubmitJob={handleSubmitJob}
+      pollError={pollError}
+      selectedCloudMode={selectedCloudMode}
+      selectedFile={selectedFile}
+      selectedUploadFile={selectedUploadFile}
+      uploadError={uploadError}
+    />
+  );
 }
 
 interface AppViewProps {
+  apiBaseUrl: string;
+  artifacts: Artifact[];
+  currentJob: Job | null;
   data: WorkbenchData;
-  selectedFile: string;
+  isRefreshing: boolean;
+  isSubmitting: boolean;
+  onFileChange: (file: File | null) => void;
+  onRefreshJob: () => void;
+  onSelectCloudMode: (mode: CloudMode) => void;
   onSelectFile: (file: string) => void;
+  onSubmitJob: (event: FormEvent<HTMLFormElement>) => void;
+  pollError: string | null;
+  selectedCloudMode: CloudMode;
+  selectedFile: string;
+  selectedUploadFile: File | null;
+  uploadError: string | null;
 }
 
-function AppView({ data, selectedFile, onSelectFile }: AppViewProps) {
+function AppView({
+  apiBaseUrl,
+  artifacts,
+  currentJob,
+  data,
+  isRefreshing,
+  isSubmitting,
+  onFileChange,
+  onRefreshJob,
+  onSelectCloudMode,
+  onSelectFile,
+  onSubmitJob,
+  pollError,
+  selectedCloudMode,
+  selectedFile,
+  selectedUploadFile,
+  uploadError
+}: AppViewProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useGSAP(
     () => {
@@ -201,19 +339,19 @@ function AppView({ data, selectedFile, onSelectFile }: AppViewProps) {
               a controlled browser runtime.
             </p>
             <div className="entry-actions">
-              <button className="primary-action" type="button">
+              <button className="primary-action" type="button" onClick={() => fileInputRef.current?.click()}>
                 <Upload size={18} aria-hidden="true" />
                 Upload build
               </button>
-              <button className="secondary-action" type="button">
-                <Play size={18} aria-hidden="true" />
-                Run sample job
+              <button className="secondary-action" type="button" onClick={onRefreshJob} disabled={!currentJob || isRefreshing}>
+                <RefreshCw size={18} aria-hidden="true" />
+                Refresh job
               </button>
             </div>
           </div>
 
           <div className="entry-visual motion-item" aria-label="Pipeline overview">
-            <PipelineMap />
+            <PipelineMap currentJob={currentJob} artifacts={artifacts} />
           </div>
         </section>
 
@@ -226,32 +364,64 @@ function AppView({ data, selectedFile, onSelectFile }: AppViewProps) {
               </div>
               <ShieldCheck size={22} aria-hidden="true" />
             </div>
-            <div className="dropzone" role="button" tabIndex={0}>
-              <Archive size={24} aria-hidden="true" />
-              <div>
-                <strong>dist.zip</strong>
-                <span>HTML, chunks, CSS, assets, sourcemaps</span>
+            <form className="upload-form" onSubmit={onSubmitJob}>
+              <label className="dropzone" htmlFor="source-upload">
+                <Archive size={24} aria-hidden="true" />
+                <div>
+                  <strong>{selectedUploadFile?.name ?? "Select build artifact"}</strong>
+                  <span>{selectedUploadFile ? formatBytes(selectedUploadFile.size) : "HTML, chunks, CSS, assets, sourcemaps"}</span>
+                </div>
+              </label>
+              <input
+                ref={fileInputRef}
+                className="visually-hidden"
+                id="source-upload"
+                type="file"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => onFileChange(event.currentTarget.files?.[0] ?? null)}
+              />
+              <div className="mode-grid" aria-label="Processing modes">
+                {CLOUD_MODES.map((mode) => (
+                  <ModePill
+                    active={mode === selectedCloudMode}
+                    key={mode}
+                    label={mode}
+                    onClick={() => onSelectCloudMode(mode)}
+                  />
+                ))}
               </div>
-            </div>
-            <div className="mode-grid" aria-label="Processing modes">
-              <ModePill label="local_only" active />
-              <ModePill label="desensitized" />
-              <ModePill label="cloud_allowed" />
-            </div>
+              <div className="upload-actions">
+                <button className="primary-action compact" type="submit" disabled={isSubmitting}>
+                  <Upload size={16} aria-hidden="true" />
+                  {isSubmitting ? "Uploading" : "Create job"}
+                </button>
+                <button
+                  className="secondary-action compact"
+                  type="button"
+                  onClick={onRefreshJob}
+                  disabled={!currentJob || isRefreshing}
+                >
+                  <RefreshCw size={16} aria-hidden="true" />
+                  {isRefreshing ? "Refreshing" : "Refresh"}
+                </button>
+              </div>
+            </form>
+            <JobSummaryPanel apiBaseUrl={apiBaseUrl} artifacts={artifacts} currentJob={currentJob} />
+            {uploadError ? <StatusBanner tone="error" message={uploadError} /> : null}
+            {pollError ? <StatusBanner tone="warning" message={pollError} /> : null}
           </section>
 
           <section className="workbench-panel timeline-panel motion-item">
             <div className="panel-heading">
               <div>
                 <p className="panel-kicker">Job state</p>
-                <h2>Pipeline timeline</h2>
+                <h2>{currentJob ? currentJob.status : "No job"}</h2>
               </div>
               <Workflow size={22} aria-hidden="true" />
             </div>
             <ol className="stage-list">
               {data.stages.map((stage) => (
                 <li className={`stage-step stage-${stage.state}`} key={stage.status}>
-                  <span className="stage-icon">{stage.state === "done" ? <CheckCircle2 size={16} /> : <Activity size={16} />}</span>
+                  <span className="stage-icon">{stageIcon(stage.state)}</span>
                   <span>{stage.label}</span>
                   <small>{stage.status}</small>
                 </li>
@@ -338,11 +508,11 @@ function AppView({ data, selectedFile, onSelectFile }: AppViewProps) {
               ))}
             </div>
             <div className="runtime-actions">
-              <button className="secondary-action compact" type="button">
+              <button className="secondary-action compact" type="button" disabled>
                 <Network size={16} aria-hidden="true" />
                 Network log
               </button>
-              <button className="primary-action compact" type="button">
+              <button className="primary-action compact" type="button" disabled>
                 <Download size={16} aria-hidden="true" />
                 Download package
               </button>
@@ -354,15 +524,72 @@ function AppView({ data, selectedFile, onSelectFile }: AppViewProps) {
   );
 }
 
-function ModePill({ label, active = false }: { label: string; active?: boolean }) {
+function ModePill({
+  active = false,
+  label,
+  onClick
+}: {
+  active?: boolean;
+  label: CloudMode;
+  onClick: () => void;
+}) {
   return (
-    <button className={active ? "mode-pill mode-pill-active" : "mode-pill"} type="button">
+    <button
+      aria-pressed={active}
+      className={active ? "mode-pill mode-pill-active" : "mode-pill"}
+      type="button"
+      onClick={onClick}
+    >
       {label}
     </button>
   );
 }
 
-function PipelineMap() {
+function JobSummaryPanel({
+  apiBaseUrl,
+  artifacts,
+  currentJob
+}: {
+  apiBaseUrl: string;
+  artifacts: Artifact[];
+  currentJob: Job | null;
+}) {
+  if (!currentJob) {
+    return (
+      <div className="job-summary">
+        <span>API</span>
+        <strong>{apiBaseUrl}</strong>
+      </div>
+    );
+  }
+
+  return (
+    <div className="job-summary">
+      <span>Job</span>
+      <strong>{currentJob.id}</strong>
+      <span>Updated</span>
+      <strong>{formatTimestamp(currentJob.updatedAt)}</strong>
+      <span>Artifacts</span>
+      <strong>{artifacts.length}</strong>
+      {artifacts.length > 0 ? (
+        <div className="artifact-list" aria-label="Artifact summary">
+          {artifacts.slice(0, 3).map((artifact) => (
+            <div className="artifact-row" key={artifact.id}>
+              <span>{artifact.kind}</span>
+              <small>{formatBytes(artifact.size)}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StatusBanner({ message, tone }: { message: string; tone: "error" | "warning" }) {
+  return <div className={`status-banner status-${tone}`}>{message}</div>;
+}
+
+function PipelineMap({ artifacts, currentJob }: { artifacts: Artifact[]; currentJob: Job | null }) {
   const nodes = [
     { label: "Input", icon: Upload },
     { label: "AST", icon: GitBranch },
@@ -387,12 +614,87 @@ function PipelineMap() {
       })}
       <div className="pipeline-status">
         <CheckCircle2 size={18} aria-hidden="true" />
-        <span>Traceable artifacts</span>
+        <span>{currentJob ? currentJob.status : "Awaiting job"}</span>
       </div>
-      <div className="pipeline-status warning">
-        <XCircle size={18} aria-hidden="true" />
-        <span>Runtime diffs retained</span>
+      <div className={artifacts.length > 0 ? "pipeline-status" : "pipeline-status warning"}>
+        <Archive size={18} aria-hidden="true" />
+        <span>{artifacts.length} artifacts</span>
       </div>
     </div>
   );
+}
+
+function buildStageItems(currentStatus: JobStatus | undefined): StageItem[] {
+  const activeStatus = visibleStageFor(currentStatus);
+  const activeIndex = activeStatus ? statusIndex(activeStatus) : -1;
+  const failed = currentStatus === "failed" || currentStatus === "cancelled";
+
+  return stageDefinitions.map((stage) => {
+    const stageIndex = statusIndex(stage.status);
+    let state: StageState = "pending";
+    if (failed && stage.status === activeStatus) {
+      state = "fail";
+    } else if (currentStatus === "completed_best_effort" && stage.status === "completed") {
+      state = "warning";
+    } else if (stage.status === activeStatus) {
+      state = "active";
+    } else if (activeIndex >= 0 && stageIndex < activeIndex) {
+      state = "done";
+    }
+    return { ...stage, state };
+  });
+}
+
+function visibleStageFor(status: JobStatus | undefined): JobStatus | undefined {
+  if (!status) {
+    return undefined;
+  }
+  if (status === "failed" || status === "cancelled") {
+    return "reviewing";
+  }
+  if (status === "completed_best_effort") {
+    return "completed";
+  }
+  const currentIndex = statusIndex(status);
+  return stageDefinitions.find((stage) => statusIndex(stage.status) >= currentIndex)?.status ?? "completed";
+}
+
+function statusIndex(status: JobStatus): number {
+  return statusOrder.get(status) ?? Number.MAX_SAFE_INTEGER;
+}
+
+function stageIcon(state: StageState) {
+  if (state === "done") {
+    return <CheckCircle2 size={16} aria-hidden="true" />;
+  }
+  if (state === "fail") {
+    return <XCircle size={16} aria-hidden="true" />;
+  }
+  return <Activity size={16} aria-hidden="true" />;
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  const kib = size / 1024;
+  if (kib < 1024) {
+    return `${kib.toFixed(1)} KiB`;
+  }
+  return `${(kib / 1024).toFixed(1)} MiB`;
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "Request failed.";
 }

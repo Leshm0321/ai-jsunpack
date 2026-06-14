@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 from .models import CreateJobRequest, JobSummary
 from .store import store
 
 app = FastAPI(title="AI JS Unpack API", version="0.1.0")
+
+DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"]
+CORS_ORIGINS_ENV = "AI_JSUNPACK_CORS_ORIGINS"
+
+
+def configured_cors_origins() -> list[str]:
+    configured = os.getenv(CORS_ORIGINS_ENV)
+    if not configured:
+        return DEFAULT_CORS_ORIGINS
+    return [origin.strip() for origin in configured.split(",") if origin.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
