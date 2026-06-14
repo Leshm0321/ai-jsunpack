@@ -137,19 +137,49 @@ class DatabaseStore:
             raise KeyError(f"Job not found: {job_id}")
         return updated_job
 
-    def list_artifacts(self, job_id: str) -> list[ArtifactRecord]:
+    def list_artifacts(
+        self,
+        job_id: str,
+        *,
+        kind: ArtifactKind | None = None,
+        stage: JobStatus | None = None,
+    ) -> list[ArtifactRecord]:
         self.initialize()
+        query = select(artifacts_table).where(artifacts_table.c.job_id == job_id)
+        if kind is not None:
+            query = query.where(artifacts_table.c.kind == kind)
+        if stage is not None:
+            query = query.where(artifacts_table.c.stage == stage)
         with self.engine.begin() as connection:
             rows = (
                 connection.execute(
-                    select(artifacts_table)
-                    .where(artifacts_table.c.job_id == job_id)
-                    .order_by(artifacts_table.c.created_at, artifacts_table.c.id)
+                    query.order_by(artifacts_table.c.created_at, artifacts_table.c.id)
                 )
                 .mappings()
                 .all()
             )
         return [self._artifact_from_row(row) for row in rows]
+
+    def get_artifact(self, job_id: str, artifact_id: str) -> ArtifactRecord | None:
+        self.initialize()
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(artifacts_table).where(
+                        artifacts_table.c.job_id == job_id,
+                        artifacts_table.c.id == artifact_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return self._artifact_from_row(row) if row else None
+
+    def read_artifact(self, job_id: str, artifact_id: str) -> bytes:
+        artifact = self.get_artifact(job_id, artifact_id)
+        if artifact is None:
+            raise KeyError(f"Artifact not found: {artifact_id}")
+        return Path(artifact.storage_uri).read_bytes()
 
     def write_artifact(
         self,

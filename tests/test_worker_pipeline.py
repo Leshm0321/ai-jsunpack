@@ -8,9 +8,16 @@ from pathlib import Path
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import create_store
 from apps.worker.worker.pipeline import WorkerPipeline
+from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest, RuntimeSmokeRunner
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeBrowserAdapter:
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nworker-runtime")
+        return BrowserSmokeCapture()
 
 
 class WorkerPipelineTest(unittest.TestCase):
@@ -62,7 +69,8 @@ class WorkerPipelineTest(unittest.TestCase):
             )
             try:
                 job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
-                run = WorkerPipeline().run(job.id, input_path=input_root, store=store)
+                runner = RuntimeSmokeRunner(browser_adapter=FakeBrowserAdapter())
+                run = WorkerPipeline(runtime_smoke_runner=runner).run(job.id, input_path=input_root, store=store)
                 artifacts = store.list_artifacts(job.id)
                 artifact_by_kind = {artifact.kind: artifact for artifact in artifacts}
                 persisted_job = store.get_job(job.id)
@@ -70,10 +78,14 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(run.events[0].status, "leased")
                 self.assertTrue(any(event.status == "intake" for event in run.events))
                 self.assertTrue(any(event.status == "indexing" for event in run.events))
+                self.assertTrue(any(event.status == "runtime_smoke" for event in run.events))
                 self.assertIsNotNone(persisted_job)
-                self.assertEqual(persisted_job.status, "indexing")
+                self.assertEqual(persisted_job.status, "runtime_smoke")
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
+                self.assertIn("runtime_validation", artifact_by_kind)
+                self.assertIn("runtime_trace", artifact_by_kind)
+                self.assertIn("runtime_screenshot", artifact_by_kind)
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
@@ -88,6 +100,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(
                     any(symbol["name"] == "boot" for symbol in ast_index_payload["astIndexes"][0]["symbols"])
                 )
+                runtime_payload = json.loads(
+                    Path(artifact_by_kind["runtime_validation"].storage_uri).read_text(encoding="utf-8")
+                )
+                self.assertEqual(runtime_payload["status"], "pass")
+                self.assertEqual(runtime_payload["screenshotArtifactIds"], [artifact_by_kind["runtime_screenshot"].id])
             finally:
                 store.close()
 

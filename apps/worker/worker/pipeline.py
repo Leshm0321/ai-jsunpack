@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from .core_bridge import CoreBridge, CoreBridgeError
+from .runtime_smoke import RuntimeSmokeRunner
 
 
 PipelineStatus = Literal[
@@ -71,8 +72,13 @@ class PipelineRun:
 class WorkerPipeline:
     """Deterministic pipeline shell that later hosts core, Agent, and sandbox calls."""
 
-    def __init__(self, core_bridge: CoreBridge | None = None) -> None:
+    def __init__(
+        self,
+        core_bridge: CoreBridge | None = None,
+        runtime_smoke_runner: RuntimeSmokeRunner | None = None,
+    ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
+        self.runtime_smoke_runner = runtime_smoke_runner or RuntimeSmokeRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
         run = PipelineRun(job_id=job_id)
@@ -102,7 +108,7 @@ class WorkerPipeline:
 
             store.update_status(job_id, "indexing")
             run.transition("indexing", "Core AST index generation completed.")
-            store.write_artifact(
+            ast_artifact = store.write_artifact(
                 job_id,
                 kind="ast_index",
                 stage="indexing",
@@ -112,6 +118,13 @@ class WorkerPipeline:
                 producer="worker.core",
                 parent_artifact_ids=[inventory_artifact.id],
             )
+            runtime_result = self.runtime_smoke_runner.run(
+                job_id=job_id,
+                input_path=input_path,
+                store=store,
+                parent_artifact_ids=[inventory_artifact.id, ast_artifact.id],
+            )
+            run.transition("runtime_smoke", runtime_result.message)
         except CoreBridgeError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="parse_error")
             run.transition("failed", str(error))

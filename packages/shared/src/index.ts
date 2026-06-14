@@ -38,6 +38,8 @@ export const ARTIFACT_KINDS = [
   "generated_project",
   "build_log",
   "runtime_validation",
+  "runtime_trace",
+  "runtime_screenshot",
   "review_run",
   "repair_instruction",
   "result_package",

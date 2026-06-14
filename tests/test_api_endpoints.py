@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,6 +75,56 @@ class ApiEndpointTest(unittest.TestCase):
 
         self.assertEqual(fetched.status_code, 404)
         self.assertEqual(uploaded.status_code, 404)
+
+    def test_runtime_validation_report_and_artifact_download_endpoints(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        payload = {
+            "id": "runtime_api_test",
+            "jobId": job_id,
+            "attempt": 0,
+            "target": "reconstructed",
+            "entryUrl": "http://127.0.0.1:5173/",
+            "status": "pass",
+            "consoleErrors": [],
+            "pageErrors": [],
+            "failedRequests": [],
+            "screenshotArtifactIds": [],
+            "traceArtifactId": None,
+            "comparisonArtifactId": None,
+        }
+        report_artifact = self.store.write_artifact(
+            job_id,
+            kind="runtime_validation",
+            stage="runtime_smoke",
+            filename="runtime-validation.json",
+            content=json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+            producer="test.api",
+        )
+
+        listed = self.client.get(f"/jobs/{job_id}/runtime-validations")
+        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest")
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{report_artifact.id}/download")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(latest.status_code, 200)
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(listed.json(), [payload])
+        self.assertEqual(latest.json(), payload)
+        self.assertEqual(downloaded.json(), payload)
+
+    def test_missing_runtime_validation_and_artifact_download_return_404(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+
+        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest")
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/artifact_missing/download")
+
+        self.assertEqual(latest.status_code, 404)
+        self.assertEqual(downloaded.status_code, 404)
 
     def test_local_vite_origin_is_allowed_for_development(self):
         response = self.client.options(
