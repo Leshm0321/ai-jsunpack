@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
+
+from .core_bridge import CoreBridge, CoreBridgeError
 
 
 PipelineStatus = Literal[
@@ -67,11 +71,53 @@ class PipelineRun:
 class WorkerPipeline:
     """Deterministic pipeline shell that later hosts core, Agent, and sandbox calls."""
 
-    def run(self, job_id: str) -> PipelineRun:
+    def __init__(self, core_bridge: CoreBridge | None = None) -> None:
+        self.core_bridge = core_bridge or CoreBridge()
+
+    def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
         run = PipelineRun(job_id=job_id)
+        if input_path is not None and store is not None:
+            self._run_core_analysis(job_id=job_id, input_path=input_path, store=store, run=run)
+            return run
+
         for status in PIPELINE_ORDER:
             run.transition(status, self._message_for(status))
         return run
+
+    def _run_core_analysis(self, *, job_id: str, input_path: Path | str, store, run: PipelineRun) -> None:
+        run.transition("leased", self._message_for("leased"))
+        try:
+            store.update_status(job_id, "intake")
+            run.transition("intake", "Core input inventory generation started.")
+            result = self.core_bridge.analyze_input_package(job_id=job_id, input_path=input_path)
+            inventory_artifact = store.write_artifact(
+                job_id,
+                kind="input_inventory",
+                stage="intake",
+                filename="input-inventory.json",
+                content=self._json_bytes(result.inventory_artifact_payload),
+                content_type="application/json",
+                producer="worker.core",
+            )
+
+            store.update_status(job_id, "indexing")
+            run.transition("indexing", "Core AST index generation completed.")
+            store.write_artifact(
+                job_id,
+                kind="ast_index",
+                stage="indexing",
+                filename="ast-index.json",
+                content=self._json_bytes(result.ast_index_artifact_payload),
+                content_type="application/json",
+                producer="worker.core",
+                parent_artifact_ids=[inventory_artifact.id],
+            )
+        except CoreBridgeError as error:
+            store.update_status(job_id, "failed", failure_reason=str(error), failure_class="parse_error")
+            run.transition("failed", str(error))
+
+    def _json_bytes(self, payload: dict) -> bytes:
+        return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
 
     def _message_for(self, status: PipelineStatus) -> str:
         messages = {
@@ -93,4 +139,3 @@ class WorkerPipeline:
             "completed": "Pipeline completed.",
         }
         return messages.get(status, status)
-

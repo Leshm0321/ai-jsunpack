@@ -20,7 +20,7 @@ class DatabaseStoreTest(unittest.TestCase):
                 updated = store.update_status(job.id, "intake")
                 artifact = store.write_artifact(
                     job.id,
-                    kind="input_inventory",
+                    kind="source_input",
                     stage="intake",
                     filename="../input.json",
                     content=b'{"ok":true}',

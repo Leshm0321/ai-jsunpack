@@ -195,7 +195,7 @@ class DatabaseStore:
         }
         with self.engine.begin() as connection:
             connection.execute(insert(artifacts_table).values(**row))
-            if kind == "input_inventory" and not job_row.input_artifact_id:
+            if kind == "source_input" and not job_row.input_artifact_id:
                 connection.execute(
                     update(jobs_table)
                     .where(jobs_table.c.id == job_id)

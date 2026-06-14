@@ -28,6 +28,7 @@ export const CLOUD_MODES = ["cloud_allowed", "local_only", "desensitized"] as co
 export type CloudMode = (typeof CLOUD_MODES)[number];
 
 export const ARTIFACT_KINDS = [
+  "source_input",
   "input_inventory",
   "source_index",
   "ast_index",

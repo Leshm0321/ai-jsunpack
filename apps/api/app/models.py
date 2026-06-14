@@ -33,6 +33,7 @@ JobStatus = Literal[
 
 CloudMode = Literal["cloud_allowed", "local_only", "desensitized"]
 ArtifactKind = Literal[
+    "source_input",
     "input_inventory",
     "source_index",
     "ast_index",

@@ -28,7 +28,7 @@ async def upload_source(job_id: str, file: UploadFile = File(...)) -> JobSummary
     content = await file.read()
     artifact = store.write_artifact(
         job_id,
-        kind="input_inventory",
+        kind="source_input",
         stage="intake",
         filename=file.filename or "input.bin",
         content=content,
