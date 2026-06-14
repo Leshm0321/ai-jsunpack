@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .models import ArtifactRecord, CreateJobRequest, JobRecord, utc_now
+from .models import ArtifactKind, ArtifactRecord, CreateJobRequest, JobRecord, JobStatus, new_artifact_id, new_job_id, utc_now
 
 
 class InMemoryStore:
@@ -14,11 +14,21 @@ class InMemoryStore:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
+        now = utc_now()
         job = JobRecord(
+            id=new_job_id(),
+            status="queued",
             owner_id=request.owner_id,
             project_id=request.project_id,
-            cloud_mode=request.cloud_mode,
+            input_artifact_id=None,
             config=request.config,
+            cloud_mode=request.cloud_mode,
+            review_attempt=0,
+            worker_lease=None,
+            failure_class="none",
+            failure_reason=None,
+            created_at=now,
+            updated_at=now,
         )
         self.jobs[job.id] = job
         return job
@@ -26,9 +36,9 @@ class InMemoryStore:
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.jobs.get(job_id)
 
-    def update_status(self, job_id: str, status: str, failure_reason: str | None = None) -> JobRecord:
+    def update_status(self, job_id: str, status: JobStatus, failure_reason: str | None = None) -> JobRecord:
         job = self.jobs[job_id]
-        job.status = status  # type: ignore[assignment]
+        job.status = status
         job.updated_at = utc_now()
         if failure_reason:
             job.failure_reason = failure_reason
@@ -42,8 +52,8 @@ class InMemoryStore:
         self,
         job_id: str,
         *,
-        kind: str,
-        stage: str,
+        kind: ArtifactKind,
+        stage: JobStatus,
         filename: str,
         content: bytes,
         content_type: str,
@@ -56,15 +66,21 @@ class InMemoryStore:
         target.write_bytes(content)
         digest = hashlib.sha256(content).hexdigest()
         artifact = ArtifactRecord(
+            id=new_artifact_id(),
             job_id=job_id,
             kind=kind,
-            stage=stage,  # type: ignore[arg-type]
+            stage=stage,
+            attempt=0,
+            schema_version="2026-06-14",
             content_type=content_type,
             hash=digest,
             size=len(content),
             storage_uri=str(target),
             parent_artifact_ids=parent_artifact_ids or [],
             producer=producer,
+            sensitivity_class="source_sensitive",
+            retention_class="project",
+            created_at=utc_now(),
         )
         self.artifacts[artifact.id] = artifact
         job = self.jobs[job_id]
@@ -75,4 +91,3 @@ class InMemoryStore:
 
 
 store = InMemoryStore()
-
