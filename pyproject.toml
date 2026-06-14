@@ -1,0 +1,16 @@
+[project]
+name = "ai-jsunpack"
+version = "0.1.0"
+description = "AI and Agent assisted JavaScript unpacking and runtime restoration platform"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.111.0",
+  "pydantic>=2.7.0",
+  "uvicorn>=0.30.0",
+  "python-multipart>=0.0.9"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["apps/api", "apps/worker", "packages"]
+testpaths = ["tests"]
+

@@ -1,0 +1,23 @@
+{
+  "name": "ai-jsunpack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/shared packages/core apps/web",
+    "check": "tsc -b packages/shared packages/core apps/web --pretty false",
+    "test:core": "npm run build --workspace @ai-jsunpack/shared && npm run build --workspace @ai-jsunpack/core && node --test packages/core/dist/*.test.js",
+    "dev:web": "npm run dev --workspace @ai-jsunpack/web",
+    "build:web": "npm run build --workspace @ai-jsunpack/web"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.4"
+  }
+}
