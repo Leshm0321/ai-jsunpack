@@ -35,8 +35,7 @@ async def upload_source(job_id: str, file: UploadFile = File(...)) -> JobSummary
         content_type=file.content_type or "application/octet-stream",
         producer="api.upload",
     )
-    job.input_artifact_id = artifact.id
-    store.update_status(job_id, "intake")
+    job = store.update_status(job_id, "intake")
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
 
@@ -46,4 +45,3 @@ def get_job(job_id: str) -> JobSummary:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
-
