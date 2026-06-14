@@ -7,7 +7,15 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .models import ArtifactRecord, CreateJobRequest, JobSummary, RuntimeValidationRun
+from .models import (
+    ArtifactRecord,
+    CreateJobRequest,
+    InferenceRecord,
+    JobSummary,
+    ReviewRun,
+    RuntimeValidationRun,
+    ToolCall,
+)
 from .store import store
 
 app = FastAPI(title="AI JS Unpack API", version="0.1.0")
@@ -78,6 +86,27 @@ def list_runtime_validations(job_id: str) -> list[RuntimeValidationRun]:
     return [runtime_validation_from_artifact(job_id, artifact) for artifact in artifacts]
 
 
+@app.get("/jobs/{job_id}/inference-records", response_model=list[InferenceRecord])
+def list_inference_records(job_id: str) -> list[InferenceRecord]:
+    require_job(job_id)
+    artifacts = store.list_artifacts(job_id, kind="inference_record")
+    return [inference_record_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
+@app.get("/jobs/{job_id}/review-runs", response_model=list[ReviewRun])
+def list_review_runs(job_id: str) -> list[ReviewRun]:
+    require_job(job_id)
+    artifacts = store.list_artifacts(job_id, kind="review_run")
+    return [review_run_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
+@app.get("/jobs/{job_id}/tool-calls", response_model=list[ToolCall])
+def list_tool_calls(job_id: str) -> list[ToolCall]:
+    require_job(job_id)
+    artifacts = store.list_artifacts(job_id, kind="tool_call")
+    return [tool_call_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
 @app.get("/jobs/{job_id}/runtime-validations/latest", response_model=RuntimeValidationRun)
 def get_latest_runtime_validation(job_id: str) -> RuntimeValidationRun:
     validations = list_runtime_validations(job_id)
@@ -112,3 +141,24 @@ def runtime_validation_from_artifact(job_id: str, artifact: ArtifactRecord) -> R
         return RuntimeValidationRun.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Invalid runtime validation artifact: {artifact.id}") from error
+
+
+def inference_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> InferenceRecord:
+    try:
+        return InferenceRecord.model_validate_json(store.read_artifact(job_id, artifact.id))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Invalid inference record artifact: {artifact.id}") from error
+
+
+def review_run_from_artifact(job_id: str, artifact: ArtifactRecord) -> ReviewRun:
+    try:
+        return ReviewRun.model_validate_json(store.read_artifact(job_id, artifact.id))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Invalid review run artifact: {artifact.id}") from error
+
+
+def tool_call_from_artifact(job_id: str, artifact: ArtifactRecord) -> ToolCall:
+    try:
+        return ToolCall.model_validate_json(store.read_artifact(job_id, artifact.id))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Invalid tool call artifact: {artifact.id}") from error

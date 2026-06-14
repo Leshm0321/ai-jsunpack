@@ -83,14 +83,26 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(persisted_job.status, "runtime_smoke")
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
+                self.assertIn("agent_plan", artifact_by_kind)
+                self.assertIn("review_run", artifact_by_kind)
+                self.assertIn("tool_call", artifact_by_kind)
                 self.assertIn("runtime_validation", artifact_by_kind)
                 self.assertIn("runtime_trace", artifact_by_kind)
                 self.assertIn("runtime_screenshot", artifact_by_kind)
+                inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
+                self.assertGreaterEqual(len(inference_artifacts), 1)
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
+                agent_plan_artifact = artifact_by_kind["agent_plan"]
+                review_artifact = artifact_by_kind["review_run"]
+                tool_call_artifact = artifact_by_kind["tool_call"]
                 inventory_payload = json.loads(Path(inventory_artifact.storage_uri).read_text(encoding="utf-8"))
                 ast_index_payload = json.loads(Path(ast_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                agent_plan_payload = json.loads(Path(agent_plan_artifact.storage_uri).read_text(encoding="utf-8"))
+                inference_payload = json.loads(Path(inference_artifacts[0].storage_uri).read_text(encoding="utf-8"))
+                review_payload = json.loads(Path(review_artifact.storage_uri).read_text(encoding="utf-8"))
+                tool_call_payload = json.loads(Path(tool_call_artifact.storage_uri).read_text(encoding="utf-8"))
 
                 self.assertEqual(inventory_payload["kind"], "input_inventory")
                 self.assertEqual(inventory_payload["inventory"]["entries"], ["index.html"])
@@ -100,6 +112,17 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(
                     any(symbol["name"] == "boot" for symbol in ast_index_payload["astIndexes"][0]["symbols"])
                 )
+                self.assertEqual(agent_plan_payload["kind"], "agent_plan")
+                self.assertEqual(agent_plan_payload["provider"], "crewai_stub")
+                self.assertEqual(agent_plan_artifact.parent_artifact_ids, [inventory_artifact.id, ast_index_artifact.id])
+                self.assertEqual(inference_payload["modelProvider"], "crewai_stub")
+                self.assertEqual(inference_payload["inputArtifactIds"], [inventory_artifact.id, ast_index_artifact.id])
+                self.assertEqual(inference_payload["outputArtifactIds"], [agent_plan_artifact.id])
+                self.assertEqual(review_payload["reviewType"], "agent_review")
+                self.assertEqual(review_payload["status"], "best_effort")
+                self.assertEqual(tool_call_payload["toolName"], "crewai_stub.agent_pass")
+                self.assertEqual(tool_call_payload["status"], "pass")
+                self.assertIn(review_artifact.id, tool_call_payload["outputArtifactIds"])
                 runtime_payload = json.loads(
                     Path(artifact_by_kind["runtime_validation"].storage_uri).read_text(encoding="utf-8")
                 )

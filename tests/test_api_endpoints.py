@@ -115,6 +115,96 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(latest.json(), payload)
         self.assertEqual(downloaded.json(), payload)
 
+    def test_agent_audit_record_endpoints(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        evidence_ref = {
+            "artifactId": "artifact_input",
+            "label": "Core input inventory",
+            "locator": "artifact:input_inventory",
+            "excerpt": "entries=['index.html']",
+        }
+        inference_payload = {
+            "id": "inference_api_test",
+            "jobId": job_id,
+            "type": "module_split",
+            "agentName": "AnalysisAgent",
+            "modelProvider": "crewai_stub",
+            "modelName": "stub-v0",
+            "promptVersion": "agent-stub-v1",
+            "inputArtifactIds": ["artifact_inventory", "artifact_ast"],
+            "outputArtifactIds": ["artifact_plan"],
+            "evidenceRefs": [evidence_ref],
+            "confidence": 0.35,
+            "uncertaintyReasons": ["stub output"],
+            "alternatives": ["real provider"],
+            "validationStatus": "needs_review",
+            "rollbackRef": None,
+        }
+        review_payload = {
+            "id": "review_api_test",
+            "jobId": job_id,
+            "attempt": 0,
+            "reviewType": "agent_review",
+            "status": "best_effort",
+            "decision": "stub accepted",
+            "failureClass": "none",
+            "evidenceRefs": [evidence_ref],
+            "repairInstructionIds": [],
+            "logsArtifactId": None,
+        }
+        tool_call_payload = {
+            "id": "tool_call_api_test",
+            "jobId": job_id,
+            "caller": "WorkerPipeline",
+            "toolName": "crewai_stub.agent_pass",
+            "toolVersion": "0.1.0",
+            "inputArtifactIds": ["artifact_inventory", "artifact_ast"],
+            "outputArtifactIds": ["artifact_plan", "artifact_inference", "artifact_review"],
+            "status": "pass",
+            "duration": 3.25,
+            "failureClass": "none",
+        }
+        self.store.write_artifact(
+            job_id,
+            kind="inference_record",
+            stage="agent_pass",
+            filename="inference-record.json",
+            content=json.dumps(inference_payload).encode("utf-8"),
+            content_type="application/json",
+            producer="test.api",
+        )
+        self.store.write_artifact(
+            job_id,
+            kind="review_run",
+            stage="agent_pass",
+            filename="review-run.json",
+            content=json.dumps(review_payload).encode("utf-8"),
+            content_type="application/json",
+            producer="test.api",
+        )
+        self.store.write_artifact(
+            job_id,
+            kind="tool_call",
+            stage="agent_pass",
+            filename="tool-call.json",
+            content=json.dumps(tool_call_payload).encode("utf-8"),
+            content_type="application/json",
+            producer="test.api",
+        )
+
+        inference_response = self.client.get(f"/jobs/{job_id}/inference-records")
+        review_response = self.client.get(f"/jobs/{job_id}/review-runs")
+        tool_call_response = self.client.get(f"/jobs/{job_id}/tool-calls")
+
+        self.assertEqual(inference_response.status_code, 200)
+        self.assertEqual(review_response.status_code, 200)
+        self.assertEqual(tool_call_response.status_code, 200)
+        self.assertEqual(inference_response.json(), [inference_payload])
+        self.assertEqual(review_response.json(), [review_payload])
+        self.assertEqual(tool_call_response.json(), [tool_call_payload])
+
     def test_missing_runtime_validation_and_artifact_download_return_404(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
         self.assertEqual(created.status_code, 200)
@@ -122,9 +212,15 @@ class ApiEndpointTest(unittest.TestCase):
 
         latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest")
         downloaded = self.client.get(f"/jobs/{job_id}/artifacts/artifact_missing/download")
+        missing_inferences = self.client.get("/jobs/job_missing/inference-records")
+        missing_reviews = self.client.get("/jobs/job_missing/review-runs")
+        missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls")
 
         self.assertEqual(latest.status_code, 404)
         self.assertEqual(downloaded.status_code, 404)
+        self.assertEqual(missing_inferences.status_code, 404)
+        self.assertEqual(missing_reviews.status_code, 404)
+        self.assertEqual(missing_tool_calls.status_code, 404)
 
     def test_local_vite_origin_is_allowed_for_development(self):
         response = self.client.options(
