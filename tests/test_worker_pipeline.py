@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from apps.api.app.models import CreateJobRequest
@@ -82,8 +83,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(any(event.status == "building" for event in run.events))
                 self.assertTrue(any(event.status == "typechecking" for event in run.events))
                 self.assertTrue(any(event.status == "runtime_smoke" for event in run.events))
+                self.assertTrue(any(event.status == "packaging" for event in run.events))
+                self.assertEqual(run.events[-1].status, "completed_best_effort")
                 self.assertIsNotNone(persisted_job)
-                self.assertEqual(persisted_job.status, "runtime_smoke")
+                self.assertEqual(persisted_job.status, "completed_best_effort")
+                self.assertEqual(persisted_job.failure_class, "policy_denied")
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
                 self.assertIn("agent_plan", artifact_by_kind)
@@ -98,6 +102,8 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("runtime_validation", artifact_by_kind)
                 self.assertIn("runtime_trace", artifact_by_kind)
                 self.assertIn("runtime_screenshot", artifact_by_kind)
+                self.assertIn("audit_report", artifact_by_kind)
+                self.assertIn("result_package", artifact_by_kind)
                 inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
                 build_log_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_log"]
                 build_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_artifact"]
@@ -230,6 +236,18 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(typecheck_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                audit_report = Path(artifact_by_kind["audit_report"].storage_uri).read_text(encoding="utf-8")
+                self.assertIn("# AI JS Unpack Audit Report", audit_report)
+                self.assertIn("completed_best_effort", audit_report)
+                with zipfile.ZipFile(artifact_by_kind["result_package"].storage_uri) as archive:
+                    names = set(archive.namelist())
+                self.assertIn("audit-report.md", names)
+                self.assertIn("audit.json", names)
+                self.assertIn("artifact-manifest.json", names)
+                self.assertIn("runtime-report.json", names)
+                self.assertIn("review-runs.json", names)
+                self.assertIn("generated_project/src/main.ts", names)
+                self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
             finally:
                 store.close()
 

@@ -1,6 +1,8 @@
 import json
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -205,6 +207,66 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(review_response.json(), [review_payload])
         self.assertEqual(tool_call_response.json(), [tool_call_payload])
 
+    def test_report_package_download_and_rerun_endpoints(self):
+        created = self.client.post(
+            "/jobs",
+            json={
+                "projectId": "proj",
+                "ownerId": "owner",
+                "cloudMode": "local_only",
+                "config": {"source": "api-test", "nested": {"enabled": True}},
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        uploaded = self.client.post(
+            f"/jobs/{job_id}/upload",
+            files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        audit_artifact = self.store.write_artifact(
+            job_id,
+            kind="audit_report",
+            stage="packaging",
+            filename="audit-report.md",
+            content=b"# Audit\n",
+            content_type="text/markdown; charset=utf-8",
+            producer="test.api",
+        )
+        package_buffer = BytesIO()
+        with zipfile.ZipFile(package_buffer, "w") as archive:
+            archive.writestr("audit-report.md", "# Audit\n")
+        package_artifact = self.store.write_artifact(
+            job_id,
+            kind="result_package",
+            stage="packaging",
+            filename="result-package.zip",
+            content=package_buffer.getvalue(),
+            content_type="application/zip",
+            producer="test.api",
+            parent_artifact_ids=[audit_artifact.id],
+        )
+
+        audit_download = self.client.get(f"/jobs/{job_id}/reports/audit")
+        package_download = self.client.get(f"/jobs/{job_id}/result-package")
+        rerun = self.client.post(f"/jobs/{job_id}/rerun")
+
+        self.assertEqual(audit_download.status_code, 200)
+        self.assertEqual(package_download.status_code, 200)
+        self.assertEqual(audit_download.text, "# Audit\n")
+        self.assertEqual(package_download.content, Path(package_artifact.storage_uri).read_bytes())
+        self.assertEqual(rerun.status_code, 200)
+        rerun_body = rerun.json()
+        rerun_job = rerun_body["job"]
+        rerun_artifact = rerun_body["artifacts"][0]
+        self.assertNotEqual(rerun_job["id"], job_id)
+        self.assertEqual(rerun_job["status"], "intake")
+        self.assertEqual(rerun_job["projectId"], "proj")
+        self.assertEqual(rerun_job["config"]["rerunOfJobId"], job_id)
+        self.assertEqual(rerun_job["config"]["nested"], {"enabled": True})
+        self.assertEqual(rerun_artifact["kind"], "source_input")
+        self.assertEqual(Path(rerun_artifact["storageUri"]).read_bytes(), b"zip-bytes")
+
     def test_missing_runtime_validation_and_artifact_download_return_404(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
         self.assertEqual(created.status_code, 200)
@@ -215,12 +277,27 @@ class ApiEndpointTest(unittest.TestCase):
         missing_inferences = self.client.get("/jobs/job_missing/inference-records")
         missing_reviews = self.client.get("/jobs/job_missing/review-runs")
         missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls")
+        missing_audit = self.client.get("/jobs/job_missing/reports/audit")
+        missing_package = self.client.get("/jobs/job_missing/result-package")
+        missing_rerun = self.client.post("/jobs/job_missing/rerun")
 
         self.assertEqual(latest.status_code, 404)
         self.assertEqual(downloaded.status_code, 404)
         self.assertEqual(missing_inferences.status_code, 404)
         self.assertEqual(missing_reviews.status_code, 404)
         self.assertEqual(missing_tool_calls.status_code, 404)
+        self.assertEqual(missing_audit.status_code, 404)
+        self.assertEqual(missing_package.status_code, 404)
+        self.assertEqual(missing_rerun.status_code, 404)
+
+    def test_rerun_without_source_input_returns_400(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+
+        rerun = self.client.post(f"/jobs/{job_id}/rerun")
+
+        self.assertEqual(rerun.status_code, 400)
 
     def test_directory_artifact_download_returns_400_until_packaged(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})

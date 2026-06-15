@@ -57,6 +57,12 @@ export async function fetchToolCalls(jobId: string): Promise<ToolCall[]> {
   return requestJson<ToolCall[]>(`/jobs/${encodeURIComponent(jobId)}/tool-calls`);
 }
 
+export async function rerunJob(jobId: string): Promise<JobSummary> {
+  return requestJson<JobSummary>(`/jobs/${encodeURIComponent(jobId)}/rerun`, {
+    method: "POST"
+  });
+}
+
 export async function fetchArtifactText(jobId: string, artifactId: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(
     `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`,

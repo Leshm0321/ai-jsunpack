@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 from pathlib import Path
 
@@ -115,12 +116,76 @@ def get_latest_runtime_validation(job_id: str) -> RuntimeValidationRun:
     return validations[-1]
 
 
+@app.get("/jobs/{job_id}/reports/audit")
+def download_latest_audit_report(job_id: str) -> FileResponse:
+    artifact = latest_artifact_or_404(job_id, "audit_report", "Audit report not found")
+    return file_response_for_artifact(artifact, filename="audit-report.md")
+
+
+@app.get("/jobs/{job_id}/result-package")
+def download_latest_result_package(job_id: str) -> FileResponse:
+    artifact = latest_artifact_or_404(job_id, "result_package", "Result package not found")
+    return file_response_for_artifact(artifact, filename="result-package.zip")
+
+
+@app.post("/jobs/{job_id}/rerun", response_model=JobSummary)
+def rerun_job(job_id: str) -> JobSummary:
+    source_job = store.get_job(job_id)
+    if source_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if source_job.input_artifact_id is None:
+        raise HTTPException(status_code=400, detail="Job has no source input artifact to rerun")
+
+    source_artifact = store.get_artifact(job_id, source_job.input_artifact_id)
+    if source_artifact is None:
+        raise HTTPException(status_code=404, detail="Source input artifact not found")
+    source_path = Path(source_artifact.storage_uri)
+    if not source_path.exists() or source_path.is_dir():
+        raise HTTPException(status_code=400, detail="Source input artifact is not a downloadable file")
+
+    rerun_config = deepcopy(source_job.config)
+    rerun_config["rerunOfJobId"] = source_job.id
+    rerun_config["rerunOfArtifactId"] = source_artifact.id
+    rerun_config["source"] = "api-rerun"
+    created = store.create_job(
+        CreateJobRequest(
+            project_id=source_job.project_id,
+            owner_id=source_job.owner_id,
+            cloud_mode=source_job.cloud_mode,
+            config=rerun_config,
+        )
+    )
+    store.write_artifact(
+        created.id,
+        kind="source_input",
+        stage="intake",
+        filename=source_filename(source_path),
+        content=source_path.read_bytes(),
+        content_type=source_artifact.content_type,
+        producer="api.rerun",
+    )
+    job = store.update_status(created.id, "intake")
+    return JobSummary(job=job, artifacts=store.list_artifacts(created.id))
+
+
 @app.get("/jobs/{job_id}/artifacts/{artifact_id}/download")
 def download_artifact(job_id: str, artifact_id: str) -> FileResponse:
     require_job(job_id)
     artifact = store.get_artifact(job_id, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    return file_response_for_artifact(artifact)
+
+
+def latest_artifact_or_404(job_id: str, kind: str, detail: str) -> ArtifactRecord:
+    require_job(job_id)
+    artifacts = store.list_artifacts(job_id, kind=kind)
+    if not artifacts:
+        raise HTTPException(status_code=404, detail=detail)
+    return artifacts[-1]
+
+
+def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = None) -> FileResponse:
     artifact_path = Path(artifact.storage_uri)
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact content not found")
@@ -129,8 +194,13 @@ def download_artifact(job_id: str, artifact_id: str) -> FileResponse:
     return FileResponse(
         artifact_path,
         media_type=artifact.content_type,
-        filename=artifact_path.name,
+        filename=filename or artifact_path.name,
     )
+
+
+def source_filename(source_path: Path) -> str:
+    suffix = source_path.suffix
+    return f"rerun-source-input{suffix}" if suffix else "rerun-source-input"
 
 
 def require_job(job_id: str) -> None:

@@ -10,6 +10,7 @@ from .build_validation import BuildValidationError, BuildValidationRunner
 from .core_bridge import CoreBridge, CoreBridgeError
 from .reconstruction import ReconstructionError, ReconstructionRunner
 from .runtime_smoke import RuntimeSmokeRunner
+from .packaging import PackagingError, PackagingRunner
 
 
 PipelineStatus = Literal[
@@ -82,12 +83,14 @@ class WorkerPipeline:
         reconstruction_runner: ReconstructionRunner | None = None,
         build_validation_runner: BuildValidationRunner | None = None,
         runtime_smoke_runner: RuntimeSmokeRunner | None = None,
+        packaging_runner: PackagingRunner | None = None,
     ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
         self.agent_runtime = agent_runtime or AgentRuntime()
         self.reconstruction_runner = reconstruction_runner or ReconstructionRunner(self.core_bridge)
         self.build_validation_runner = build_validation_runner or BuildValidationRunner()
         self.runtime_smoke_runner = runtime_smoke_runner or RuntimeSmokeRunner()
+        self.packaging_runner = packaging_runner or PackagingRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
         run = PipelineRun(job_id=job_id)
@@ -180,6 +183,27 @@ class WorkerPipeline:
                 parent_artifact_ids=[*validation_parent_ids, *build_validation_result.artifact_ids],
             )
             run.transition("runtime_smoke", runtime_result.message)
+            packaging_parent_ids = [
+                *validation_parent_ids,
+                *build_validation_result.artifact_ids,
+                runtime_result.trace_artifact.id,
+                runtime_result.report_artifact.id,
+            ]
+            if runtime_result.screenshot_artifact is not None:
+                packaging_parent_ids.append(runtime_result.screenshot_artifact.id)
+            packaging_result = self.packaging_runner.run(
+                job_id=job_id,
+                store=store,
+                parent_artifact_ids=packaging_parent_ids,
+            )
+            run.transition("packaging", packaging_result.message)
+            store.update_status(
+                job_id,
+                packaging_result.final_status,
+                failure_reason=packaging_result.failure_reason,
+                failure_class=packaging_result.failure_class,
+            )
+            run.transition(packaging_result.final_status, self._message_for(packaging_result.final_status))
         except CoreBridgeError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="parse_error")
             run.transition("failed", str(error))
@@ -191,6 +215,9 @@ class WorkerPipeline:
             run.transition("failed", str(error))
         except BuildValidationError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="build_error")
+            run.transition("failed", str(error))
+        except PackagingError as error:
+            store.update_status(job_id, "failed", failure_reason=str(error), failure_class="unknown")
             run.transition("failed", str(error))
 
     def _json_bytes(self, payload: dict) -> bytes:
@@ -214,5 +241,6 @@ class WorkerPipeline:
             "reviewing": "Review Agent scheduled.",
             "packaging": "Result package and audit report scheduled.",
             "completed": "Pipeline completed.",
+            "completed_best_effort": "Pipeline completed with best-effort limitations.",
         }
         return messages.get(status, status)

@@ -49,6 +49,7 @@ import {
   fetchReviewRuns,
   fetchRuntimeValidations,
   fetchToolCalls,
+  rerunJob,
   uploadSource
 } from "./api";
 import type { JobSummary } from "./api";
@@ -202,6 +203,7 @@ export function AppContainer() {
   const [evidence, setEvidence] = useState<JobEvidence>(() => emptyEvidence());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isRerunning, setIsRerunning] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
 
@@ -348,6 +350,26 @@ export function AppContainer() {
     }
   };
 
+  const handleRerunJob = async () => {
+    if (!currentJob?.id || isRerunning) {
+      return;
+    }
+    setIsRerunning(true);
+    setUploadError(null);
+    setPollError(null);
+    setSelectedArtifactId(null);
+    setEvidence(emptyEvidence());
+    try {
+      const rerun = await rerunJob(currentJob.id);
+      setJobSummary(rerun);
+      setEvidence(await fetchJobEvidence(rerun.job.id));
+    } catch (error) {
+      setPollError(errorMessage(error));
+    } finally {
+      setIsRerunning(false);
+    }
+  };
+
   const handleArtifactEvidenceSelect = (artifactId: string) => {
     setSelectedArtifactId(artifactId);
     window.requestAnimationFrame(() => {
@@ -367,11 +389,13 @@ export function AppContainer() {
       data={data}
       evidence={evidence}
       isRefreshing={isRefreshing}
+      isRerunning={isRerunning}
       isSubmitting={isSubmitting}
       onArtifactSelect={setSelectedArtifactId}
       onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
       onFileChange={setSelectedUploadFile}
       onRefreshJob={handleRefreshJob}
+      onRerunJob={handleRerunJob}
       onSelectCloudMode={setSelectedCloudMode}
       onSubmitJob={handleSubmitJob}
       pollError={pollError}
@@ -391,11 +415,13 @@ interface AppViewProps {
   data: WorkbenchData;
   evidence: JobEvidence;
   isRefreshing: boolean;
+  isRerunning: boolean;
   isSubmitting: boolean;
   onArtifactSelect: (artifactId: string) => void;
   onEvidenceArtifactSelect: (artifactId: string) => void;
   onFileChange: (file: File | null) => void;
   onRefreshJob: () => void;
+  onRerunJob: () => void;
   onSelectCloudMode: (mode: CloudMode) => void;
   onSubmitJob: (event: FormEvent<HTMLFormElement>) => void;
   pollError: string | null;
@@ -413,11 +439,13 @@ function AppView({
   data,
   evidence,
   isRefreshing,
+  isRerunning,
   isSubmitting,
   onArtifactSelect,
   onEvidenceArtifactSelect,
   onFileChange,
   onRefreshJob,
+  onRerunJob,
   onSelectCloudMode,
   onSubmitJob,
   pollError,
@@ -552,7 +580,13 @@ function AppView({
               </div>
             </form>
             <JobSummaryPanel apiBaseUrl={apiBaseUrl} artifacts={artifacts} currentJob={currentJob} evidence={evidence} />
-            <WorkspaceActions artifacts={artifacts} currentJob={currentJob} evidence={evidence} />
+            <WorkspaceActions
+              artifacts={artifacts}
+              currentJob={currentJob}
+              evidence={evidence}
+              isRerunning={isRerunning}
+              onRerunJob={onRerunJob}
+            />
             {uploadError ? <StatusBanner tone="error" message={uploadError} /> : null}
             {pollError ? <StatusBanner tone="warning" message={pollError} /> : null}
           </section>
@@ -722,12 +756,17 @@ function JobSummaryPanel({
 function WorkspaceActions({
   artifacts,
   currentJob,
-  evidence
+  evidence,
+  isRerunning,
+  onRerunJob
 }: {
   artifacts: Artifact[];
   currentJob: Job | null;
   evidence: JobEvidence;
+  isRerunning: boolean;
+  onRerunJob: () => void;
 }) {
+  const canRerun = Boolean(currentJob && artifacts.some((artifact) => artifact.kind === "source_input"));
   return (
     <div className="workspace-actions" aria-label="Workspace actions">
       <button
@@ -751,11 +790,12 @@ function WorkspaceActions({
       <button
         className="secondary-action compact"
         type="button"
-        disabled
-        title="Rerun requires a backend rerun endpoint that is not available yet."
+        disabled={!canRerun || isRerunning}
+        onClick={onRerunJob}
+        title={canRerun ? "Create a new job from the current source input." : "Rerun requires a source input artifact."}
       >
         <RotateCcw size={16} aria-hidden="true" />
-        Rerun
+        {isRerunning ? "Rerunning" : "Rerun"}
       </button>
     </div>
   );
@@ -1469,7 +1509,7 @@ async function fetchJobEvidence(jobId: string): Promise<JobEvidence> {
 
 function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
   if (artifact.kind === "generated_project") {
-    return { supported: false, reason: "Directory artifacts are previewed through a packaged result once packaging is available." };
+    return { supported: false, reason: "Directory artifacts are available through the packaged result download." };
   }
   if (artifact.kind === "result_package") {
     return { supported: false, reason: "Result packages are binary downloads and are not rendered inline." };
