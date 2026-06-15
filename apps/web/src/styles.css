@@ -279,6 +279,10 @@ button:focus-visible,
   overflow: hidden;
 }
 
+.report-panel {
+  padding: 18px;
+}
+
 .panel-heading {
   display: flex;
   align-items: flex-start;
@@ -292,6 +296,10 @@ button:focus-visible,
   margin: 0;
   font-size: 20px;
   color: var(--ink);
+}
+
+.padded-heading {
+  padding: 18px 18px 16px;
 }
 
 .upload-form {
@@ -511,11 +519,236 @@ button:focus-visible,
   text-align: left;
 }
 
+.file-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.file-row small {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .file-row:hover,
 .file-row-active {
   color: var(--primary);
   border-color: rgba(3, 105, 161, 0.22);
   background: rgba(14, 165, 233, 0.08);
+}
+
+.detail-surface {
+  display: grid;
+  gap: 14px;
+  padding: 0 18px 18px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detail-item,
+.detail-block,
+.issue-list,
+.history-row {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.detail-item {
+  min-height: 74px;
+  padding: 12px;
+}
+
+.detail-item span,
+.detail-block span,
+.issue-list span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.detail-item strong,
+.detail-block code,
+.issue-list code,
+.issue-list strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--ink);
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.detail-block {
+  padding: 12px;
+}
+
+.detail-actions,
+.evidence-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(3, 105, 161, 0.26);
+  border-radius: 8px;
+  color: var(--primary);
+  background: #ffffff;
+  font-size: 13px;
+  text-decoration: none;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.download-link:hover {
+  border-color: var(--primary);
+  background: rgba(14, 165, 233, 0.08);
+  box-shadow: 0 8px 22px rgba(3, 105, 161, 0.1);
+}
+
+.report-list,
+.audit-sections,
+.runtime-detail,
+.runtime-history {
+  display: grid;
+  gap: 12px;
+}
+
+.report-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.report-row div {
+  min-width: 0;
+}
+
+.report-row strong,
+.section-heading h3 {
+  display: block;
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.report-row span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.audit-sections {
+  padding: 0 18px 18px;
+}
+
+.audit-section {
+  min-width: 0;
+  border-top: 1px solid rgba(203, 213, 225, 0.75);
+  padding-top: 14px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.section-heading span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 28px;
+  border: 1px solid rgba(3, 105, 161, 0.22);
+  border-radius: 8px;
+  color: var(--primary);
+  background: rgba(14, 165, 233, 0.08);
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+}
+
+.table-shell {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.data-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.75);
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: var(--primary);
+  background: #f8fafc;
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.data-table td {
+  overflow-wrap: anywhere;
+}
+
+.data-table td:nth-child(1),
+.data-table td:nth-child(3),
+.data-table td:nth-child(4) {
+  color: var(--ink);
+  font-family: "Fira Code", monospace;
+}
+
+.empty-state {
+  display: grid;
+  gap: 6px;
+  min-height: 90px;
+  align-content: center;
+  padding: 16px;
+  border: 1px dashed rgba(3, 105, 161, 0.32);
+  border-radius: 8px;
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.empty-state strong {
+  color: var(--ink);
 }
 
 .code-preview {
@@ -603,6 +836,59 @@ button:focus-visible,
   border-color: rgba(220, 38, 38, 0.45);
 }
 
+.runtime-detail {
+  margin-top: 14px;
+}
+
+.runtime-detail .detail-item {
+  min-height: 62px;
+}
+
+.issue-list {
+  padding: 12px;
+}
+
+.issue-list code + code {
+  margin-top: 6px;
+}
+
+.runtime-history {
+  margin-top: 14px;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 92px 130px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 10px;
+  color: var(--muted);
+}
+
+.history-row span,
+.history-row strong,
+.history-row small {
+  min-width: 0;
+  font-family: "Fira Code", monospace;
+  overflow-wrap: anywhere;
+}
+
+.history-row span {
+  color: var(--primary);
+  font-size: 12px;
+}
+
+.history-row strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.history-row small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 @media (max-width: 1100px) {
   .entry-band,
   .workbench {
@@ -612,6 +898,10 @@ button:focus-visible,
   .code-panel,
   .audit-panel {
     grid-column: span 1;
+  }
+
+  .detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -631,6 +921,20 @@ button:focus-visible,
   .mode-grid,
   .runtime-grid {
     grid-template-columns: 1fr;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .report-row,
+  .history-row {
+    align-items: flex-start;
+    grid-template-columns: 1fr;
+  }
+
+  .report-row {
+    flex-direction: column;
   }
 
   .audit-row {

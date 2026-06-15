@@ -1,4 +1,4 @@
-import type { Artifact, CloudMode, Job } from "@ai-jsunpack/shared";
+import type { Artifact, CloudMode, InferenceRecord, Job, ReviewRun, RuntimeValidationRun, ToolCall } from "@ai-jsunpack/shared";
 
 export interface JobSummary {
   job: Job;
@@ -39,6 +39,22 @@ export async function uploadSource(jobId: string, file: File): Promise<JobSummar
 
 export async function fetchJobSummary(jobId: string): Promise<JobSummary> {
   return requestJson<JobSummary>(`/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function fetchRuntimeValidations(jobId: string): Promise<RuntimeValidationRun[]> {
+  return requestJson<RuntimeValidationRun[]>(`/jobs/${encodeURIComponent(jobId)}/runtime-validations`);
+}
+
+export async function fetchInferenceRecords(jobId: string): Promise<InferenceRecord[]> {
+  return requestJson<InferenceRecord[]>(`/jobs/${encodeURIComponent(jobId)}/inference-records`);
+}
+
+export async function fetchReviewRuns(jobId: string): Promise<ReviewRun[]> {
+  return requestJson<ReviewRun[]>(`/jobs/${encodeURIComponent(jobId)}/review-runs`);
+}
+
+export async function fetchToolCalls(jobId: string): Promise<ToolCall[]> {
+  return requestJson<ToolCall[]>(`/jobs/${encodeURIComponent(jobId)}/tool-calls`);
 }
 
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
