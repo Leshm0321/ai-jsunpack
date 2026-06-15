@@ -33,9 +33,13 @@ class BuildValidationRunnerTest(unittest.TestCase):
         )
 
         log_artifacts = self.store.list_artifacts(self.job.id, kind="build_log")
+        build_artifacts = self.store.list_artifacts(self.job.id, kind="build_artifact")
         review_artifacts = self.store.list_artifacts(self.job.id, kind="review_run")
         log_payloads = [
             json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")) for artifact in log_artifacts
+        ]
+        build_payloads = [
+            json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")) for artifact in build_artifacts
         ]
         review_payloads = [
             json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")) for artifact in review_artifacts
@@ -43,6 +47,10 @@ class BuildValidationRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.build.review_run.status, "best_effort")
         self.assertEqual(result.typecheck.review_run.status, "best_effort")
+        self.assertEqual({payload["reviewType"] for payload in build_payloads}, {"build", "typecheck"})
+        self.assertTrue(all(payload["status"] == "best_effort" for payload in build_payloads))
+        self.assertTrue(all(payload["resourcePolicy"]["enforcement"] == "local_best_effort" for payload in build_payloads))
+        self.assertTrue(all(payload["logsArtifactId"] for payload in build_payloads))
         self.assertEqual({payload["reviewType"] for payload in log_payloads}, {"build", "typecheck"})
         self.assertTrue(all(payload["status"] == "best_effort" for payload in log_payloads))
         self.assertTrue(all(payload["failureClass"] == "none" for payload in review_payloads))
@@ -62,6 +70,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
         result = runner.run(job_id=self.job.id, store=self.store, project_path=project_root)
 
         build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        build_artifact = json.loads(Path(result.build.build_artifact.storage_uri).read_text(encoding="utf-8"))
         typecheck_log = json.loads(Path(result.typecheck.log_artifact.storage_uri).read_text(encoding="utf-8"))
         self.assertEqual(result.build.review_run.status, "fail")
         self.assertEqual(result.build.review_run.failure_class, "build_error")
@@ -69,8 +78,40 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(result.typecheck.review_run.failure_class, "none")
         self.assertEqual(build_log["exitCode"], 7)
         self.assertIn("build bad", build_log["stdout"])
+        self.assertEqual(build_artifact["logsArtifactId"], result.build.log_artifact.id)
+        self.assertEqual(build_artifact["failureClass"], "build_error")
+        self.assertEqual(result.build.review_run.evidence_refs[0].artifact_id, result.build.build_artifact.id)
         self.assertEqual(typecheck_log["status"], "pass")
         self.assertIn("type ok", typecheck_log["stdout"])
+
+    def test_extracts_typescript_diagnostics_into_build_artifact(self):
+        project_root = self.root / "generated"
+        project_root.mkdir()
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        runner = BuildValidationRunner(
+            sandbox_runner=LocalSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),))),
+            build_command=(sys.executable, "-c", "print('build ok')"),
+            typecheck_command=(
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stderr.write(\"src/index.ts(4,7): error TS2322: "
+                    "Type 'str' is not assignable to type 'number'.\\n\"); "
+                    "sys.exit(2)"
+                ),
+            ),
+        )
+
+        result = runner.run(job_id=self.job.id, store=self.store, project_path=project_root)
+
+        typecheck_artifact = json.loads(Path(result.typecheck.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        self.assertEqual(result.typecheck.review_run.status, "fail")
+        self.assertEqual(typecheck_artifact["failureClass"], "type_error")
+        self.assertEqual(typecheck_artifact["diagnostics"][0]["code"], "TS2322")
+        self.assertEqual(typecheck_artifact["diagnostics"][0]["filePath"], "src/index.ts")
+        self.assertEqual(typecheck_artifact["diagnostics"][0]["line"], 4)
+        self.assertEqual(typecheck_artifact["diagnostics"][0]["column"], 7)
 
     def test_skips_dependency_install_without_policy(self):
         project_root = self.root / "generated"
@@ -160,6 +201,11 @@ class BuildValidationRunnerTest(unittest.TestCase):
         build_attempt_zero_review = next(
             payload for payload in review_payloads if payload["reviewType"] == "build" and payload["attempt"] == 0
         )
+        build_attempt_zero_artifact = next(
+            json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+            for artifact in self.store.list_artifacts(self.job.id, kind="build_artifact")
+            if artifact.attempt == 0 and artifact.stage == "building"
+        )
 
         self.assertEqual(result.build.review_run.attempt, 1)
         self.assertEqual(result.build.review_run.status, "fail")
@@ -169,6 +215,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(generated_project_artifacts[0].attempt, 1)
         self.assertEqual(repaired_package["scripts"]["build"], "node scripts/build.mjs")
         self.assertEqual(build_attempt_zero_review["repairInstructionIds"], [repair_artifacts[0].id])
+        self.assertEqual(build_attempt_zero_artifact["repairInstructionIds"], [repair_artifacts[0].id])
 
 
 if __name__ == "__main__":

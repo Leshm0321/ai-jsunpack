@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from packages.sandbox import LocalSandboxRunner, SandboxCommand, SandboxPolicy
+from packages.sandbox import LocalSandboxRunner, SandboxCommand, SandboxPolicy, SandboxResourcePolicy
 
 
 class LocalSandboxRunnerTest(unittest.TestCase):
@@ -104,6 +104,25 @@ class LocalSandboxRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.failure_class, "sandbox_denied")
         self.assertIn("relative", result.stderr)
+
+    def test_records_resource_policy_for_audit(self):
+        runner = LocalSandboxRunner(
+            SandboxPolicy(
+                allowed_commands=((sys.executable,),),
+                resource_policy=SandboxResourcePolicy(
+                    process_limit=8,
+                    cpu_time_limit_ms=1000,
+                    memory_limit_bytes=64 * 1024 * 1024,
+                ),
+            )
+        )
+
+        result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('policy')")))
+
+        self.assertEqual(result.failure_class, "none")
+        self.assertEqual(result.resource_policy.enforcement, "local_best_effort")
+        self.assertEqual(result.resource_policy.process_limit, 8)
+        self.assertIn("does not enforce", result.resource_policy.limitations[0])
 
 
 if __name__ == "__main__":

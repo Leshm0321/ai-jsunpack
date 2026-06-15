@@ -37,6 +37,7 @@ export const ARTIFACT_KINDS = [
   "reconstruction_plan",
   "generated_project",
   "build_log",
+  "build_artifact",
   "runtime_validation",
   "runtime_trace",
   "runtime_screenshot",
@@ -149,6 +150,51 @@ export interface ReviewRun {
   evidenceRefs: EvidenceRef[];
   repairInstructionIds: string[];
   logsArtifactId?: string;
+}
+
+export interface TypeScriptDiagnostic {
+  source: "stdout" | "stderr";
+  category: "error" | "warning" | "message" | "suggestion" | "unknown";
+  code?: string | null;
+  message: string;
+  filePath?: string | null;
+  line?: number | null;
+  column?: number | null;
+}
+
+export interface SandboxResourcePolicy {
+  processLimit?: number | null;
+  cpuTimeLimitMs?: number | null;
+  memoryLimitBytes?: number | null;
+  enforcement: "local_best_effort";
+  limitations: string[];
+}
+
+export interface BuildArtifact {
+  id: string;
+  jobId: string;
+  stage: "building" | "typechecking";
+  reviewType: "build" | "typecheck" | "runtime_smoke" | "runtime_compare" | "agent_review";
+  phase: "install" | "build" | "typecheck";
+  attempt: number;
+  status: "pass" | "retry" | "best_effort" | "fail";
+  decision: string;
+  command: string[];
+  commandSource: "configured" | "npm_script" | "fallback_shim" | "npm_install" | "missing";
+  scriptName?: string | null;
+  packageManager?: string | null;
+  exitCode?: number | null;
+  durationMs: number;
+  failureClass: FailureClass;
+  timedOut: boolean;
+  outputTruncated: boolean;
+  workingDirectory?: string | null;
+  networkPolicy: "deny" | "allow";
+  resourcePolicy: SandboxResourcePolicy;
+  diagnostics: TypeScriptDiagnostic[];
+  logsArtifactId?: string | null;
+  repairInstructionIds: string[];
+  limitations: string[];
 }
 
 export interface RuntimeValidationRun {
@@ -299,6 +345,35 @@ const repairActionsSchema = {
       reason: stringSchema
     },
     required: ["action", "path", "value", "reason"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const sandboxResourcePolicySchema = {
+  type: "object",
+  properties: {
+    processLimit: { type: "integer", minimum: 1 },
+    cpuTimeLimitMs: { type: "integer", minimum: 1 },
+    memoryLimitBytes: { type: "integer", minimum: 1 },
+    enforcement: { type: "string", enum: ["local_best_effort"] },
+    limitations: stringArraySchema
+  },
+  required: ["enforcement", "limitations"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const typeScriptDiagnosticsSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      source: { type: "string", enum: ["stdout", "stderr"] },
+      category: { type: "string", enum: ["error", "warning", "message", "suggestion", "unknown"] },
+      code: stringSchema,
+      message: stringSchema,
+      filePath: stringSchema,
+      line: { type: "integer", minimum: 1 },
+      column: { type: "integer", minimum: 1 }
+    },
+    required: ["source", "category", "message"],
     additionalProperties: false
   }
 } as const satisfies JsonSchema;
@@ -480,6 +555,60 @@ export const SHARED_JSON_SCHEMAS = {
       "failureClass",
       "evidenceRefs",
       "repairInstructionIds"
+    ],
+    additionalProperties: false
+  },
+  buildArtifact: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/build-artifact.json",
+    title: "BuildArtifact",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      stage: { type: "string", enum: ["building", "typechecking"] },
+      reviewType: { type: "string", enum: ["build", "typecheck", "runtime_smoke", "runtime_compare", "agent_review"] },
+      phase: { type: "string", enum: ["install", "build", "typecheck"] },
+      attempt: { type: "integer", minimum: 0 },
+      status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+      decision: stringSchema,
+      command: stringArraySchema,
+      commandSource: { type: "string", enum: ["configured", "npm_script", "fallback_shim", "npm_install", "missing"] },
+      scriptName: stringSchema,
+      packageManager: stringSchema,
+      exitCode: { type: "integer" },
+      durationMs: { type: "integer", minimum: 0 },
+      failureClass: { type: "string", enum: FAILURE_CLASSES },
+      timedOut: { type: "boolean" },
+      outputTruncated: { type: "boolean" },
+      workingDirectory: stringSchema,
+      networkPolicy: { type: "string", enum: ["deny", "allow"] },
+      resourcePolicy: sandboxResourcePolicySchema,
+      diagnostics: typeScriptDiagnosticsSchema,
+      logsArtifactId: stringSchema,
+      repairInstructionIds: stringArraySchema,
+      limitations: stringArraySchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "stage",
+      "reviewType",
+      "phase",
+      "attempt",
+      "status",
+      "decision",
+      "command",
+      "commandSource",
+      "durationMs",
+      "failureClass",
+      "timedOut",
+      "outputTruncated",
+      "networkPolicy",
+      "resourcePolicy",
+      "diagnostics",
+      "repairInstructionIds",
+      "limitations"
     ],
     additionalProperties: false
   },
@@ -689,6 +818,51 @@ export const EXAMPLE_REVIEW_RUN = {
   logsArtifactId: "artifact_logs_example"
 } as const satisfies ReviewRun;
 
+export const EXAMPLE_BUILD_ARTIFACT = {
+  id: "build_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  stage: "typechecking",
+  reviewType: "typecheck",
+  phase: "typecheck",
+  attempt: 0,
+  status: "fail",
+  decision: "TypeScript validation found one contract fixture diagnostic.",
+  command: ["npm", "run", "--ignore-scripts", "typecheck"],
+  commandSource: "npm_script",
+  scriptName: "typecheck",
+  packageManager: "npm",
+  exitCode: 2,
+  durationMs: 42,
+  failureClass: "type_error",
+  timedOut: false,
+  outputTruncated: false,
+  workingDirectory: "project",
+  networkPolicy: "deny",
+  resourcePolicy: {
+    processLimit: null,
+    cpuTimeLimitMs: null,
+    memoryLimitBytes: null,
+    enforcement: "local_best_effort",
+    limitations: [
+      "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation."
+    ]
+  },
+  diagnostics: [
+    {
+      source: "stderr",
+      category: "error",
+      code: "TS2322",
+      message: "Type 'string' is not assignable to type 'number'.",
+      filePath: "src/index.ts",
+      line: 4,
+      column: 7
+    }
+  ],
+  logsArtifactId: "artifact_logs_example",
+  repairInstructionIds: ["repair_contract_example"],
+  limitations: []
+} as const satisfies BuildArtifact;
+
 export const EXAMPLE_RUNTIME_VALIDATION_RUN = {
   id: "runtime_contract_example",
   jobId: EXAMPLE_JOB.id,
@@ -756,6 +930,7 @@ export const SHARED_CONTRACT_EXAMPLES = {
   evidenceRef: EXAMPLE_EVIDENCE_REF,
   inferenceRecord: EXAMPLE_INFERENCE_RECORD,
   reviewRun: EXAMPLE_REVIEW_RUN,
+  buildArtifact: EXAMPLE_BUILD_ARTIFACT,
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,

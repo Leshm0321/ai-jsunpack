@@ -13,7 +13,19 @@ from apps.api.app.models import FailureClass
 
 
 NetworkPolicy = Literal["deny", "allow"]
+ResourcePolicyEnforcement = Literal["local_best_effort"]
 AllowedCommand = str | Sequence[str]
+
+
+@dataclass(frozen=True)
+class SandboxResourcePolicy:
+    process_limit: int | None = None
+    cpu_time_limit_ms: int | None = None
+    memory_limit_bytes: int | None = None
+    enforcement: ResourcePolicyEnforcement = "local_best_effort"
+    limitations: tuple[str, ...] = (
+        "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation.",
+    )
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,7 @@ class SandboxPolicy:
     timeout_ms: int = 30_000
     output_limit_bytes: int = 64 * 1024
     network_policy: NetworkPolicy = "deny"
+    resource_policy: SandboxResourcePolicy = field(default_factory=SandboxResourcePolicy)
     allowed_environment: tuple[str, ...] = (
         "PATH",
         "PATHEXT",
@@ -66,6 +79,7 @@ class SandboxResult:
     output_truncated: bool
     working_directory: str
     network_policy: NetworkPolicy
+    resource_policy: SandboxResourcePolicy
     denied_reason: str | None = None
 
 
@@ -119,6 +133,7 @@ class LocalSandboxRunner:
                 output_truncated=False,
                 working_directory=str(working_directory),
                 network_policy=self.policy.network_policy,
+                resource_policy=self.policy.resource_policy,
             )
         timed_out = False
         try:
@@ -149,6 +164,7 @@ class LocalSandboxRunner:
             output_truncated=output_truncated,
             working_directory=str(working_directory),
             network_policy=self.policy.network_policy,
+            resource_policy=self.policy.resource_policy,
         )
 
     def _denied_reason(self, command: SandboxCommand, workspace: Path) -> str | None:
@@ -184,6 +200,7 @@ class LocalSandboxRunner:
             output_truncated=False,
             working_directory=str(workspace),
             network_policy=self.policy.network_policy,
+            resource_policy=self.policy.resource_policy,
             denied_reason=denied_reason,
         )
 

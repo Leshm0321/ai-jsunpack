@@ -42,6 +42,7 @@ ArtifactKind = Literal[
     "reconstruction_plan",
     "generated_project",
     "build_log",
+    "build_artifact",
     "runtime_validation",
     "runtime_trace",
     "runtime_screenshot",
@@ -83,6 +84,13 @@ RepairTargetStage = Literal["building", "typechecking", "runtime_smoke", "runtim
 RepairInstructionStatus = Literal["planned", "applied", "skipped"]
 RepairRiskLevel = Literal["low", "medium", "high"]
 RepairActionName = Literal["add_package_script"]
+BuildValidationStage = Literal["building", "typechecking"]
+BuildPhase = Literal["install", "build", "typecheck"]
+CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
+NetworkPolicy = Literal["deny", "allow"]
+SandboxResourceEnforcement = Literal["local_best_effort"]
+DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
+DiagnosticSource = Literal["stdout", "stderr"]
 
 
 def to_camel(value: str) -> str:
@@ -194,6 +202,51 @@ class ReviewRun(ContractModel):
     evidence_refs: list[EvidenceRef]
     repair_instruction_ids: list[str]
     logs_artifact_id: str | None = None
+
+
+class TypeScriptDiagnostic(ContractModel):
+    source: DiagnosticSource
+    category: DiagnosticCategory
+    code: str | None = None
+    message: str
+    file_path: str | None = None
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+
+
+class SandboxResourcePolicy(ContractModel):
+    process_limit: int | None = Field(default=None, ge=1)
+    cpu_time_limit_ms: int | None = Field(default=None, ge=1)
+    memory_limit_bytes: int | None = Field(default=None, ge=1)
+    enforcement: SandboxResourceEnforcement
+    limitations: list[str]
+
+
+class BuildArtifact(ContractModel):
+    id: str
+    job_id: str
+    stage: BuildValidationStage
+    review_type: ReviewType
+    phase: BuildPhase
+    attempt: int = Field(ge=0)
+    status: RunStatus
+    decision: str
+    command: list[str]
+    command_source: CommandSource
+    script_name: str | None = None
+    package_manager: str | None = None
+    exit_code: int | None = None
+    duration_ms: int = Field(ge=0)
+    failure_class: FailureClass
+    timed_out: bool
+    output_truncated: bool
+    working_directory: str | None = None
+    network_policy: NetworkPolicy
+    resource_policy: SandboxResourcePolicy
+    diagnostics: list[TypeScriptDiagnostic]
+    logs_artifact_id: str | None = None
+    repair_instruction_ids: list[str]
+    limitations: list[str]
 
 
 class RuntimeValidationRun(ContractModel):

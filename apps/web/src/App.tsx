@@ -147,6 +147,7 @@ const reportArtifactKinds = new Set<Artifact["kind"]>([
   "runtime_trace",
   "runtime_screenshot",
   "review_run",
+  "build_artifact",
   "tool_call",
   "inference_record",
   "build_log"
@@ -160,6 +161,7 @@ const textualArtifactKinds = new Set<Artifact["kind"]>([
   "inference_record",
   "reconstruction_plan",
   "build_log",
+  "build_artifact",
   "runtime_validation",
   "runtime_trace",
   "review_run",

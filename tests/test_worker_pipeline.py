@@ -92,6 +92,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("memory_record", artifact_by_kind)
                 self.assertIn("knowledge_evidence", artifact_by_kind)
                 self.assertIn("build_log", artifact_by_kind)
+                self.assertIn("build_artifact", artifact_by_kind)
                 self.assertIn("review_run", artifact_by_kind)
                 self.assertIn("tool_call", artifact_by_kind)
                 self.assertIn("runtime_validation", artifact_by_kind)
@@ -99,9 +100,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("runtime_screenshot", artifact_by_kind)
                 inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
                 build_log_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_log"]
+                build_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_artifact"]
                 review_artifacts = [artifact for artifact in artifacts if artifact.kind == "review_run"]
                 self.assertGreaterEqual(len(inference_artifacts), 1)
                 self.assertEqual(len(build_log_artifacts), 2)
+                self.assertEqual(len(build_artifacts), 2)
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
@@ -128,6 +131,10 @@ class WorkerPipelineTest(unittest.TestCase):
                     (artifact, json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")))
                     for artifact in build_log_artifacts
                 ]
+                build_artifact_payloads = [
+                    (artifact, json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")))
+                    for artifact in build_artifacts
+                ]
                 review_artifact, review_payload = next(
                     (artifact, payload) for artifact, payload in review_payloads if payload["reviewType"] == "agent_review"
                 )
@@ -142,6 +149,14 @@ class WorkerPipelineTest(unittest.TestCase):
                 )
                 typecheck_log_artifact, typecheck_log_payload = next(
                     (artifact, payload) for artifact, payload in build_log_payloads if payload["reviewType"] == "typecheck"
+                )
+                build_artifact, build_artifact_payload = next(
+                    (artifact, payload) for artifact, payload in build_artifact_payloads if payload["reviewType"] == "build"
+                )
+                typecheck_artifact, typecheck_artifact_payload = next(
+                    (artifact, payload)
+                    for artifact, payload in build_artifact_payloads
+                    if payload["reviewType"] == "typecheck"
                 )
                 tool_call_payload = json.loads(Path(tool_call_artifact.storage_uri).read_text(encoding="utf-8"))
 
@@ -187,10 +202,18 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(typecheck_log_payload["status"], "pass")
                 self.assertEqual(build_log_payload["limitations"], [])
                 self.assertEqual(typecheck_log_payload["limitations"], [])
+                self.assertEqual(build_artifact_payload["logsArtifactId"], build_log_artifact.id)
+                self.assertEqual(typecheck_artifact_payload["logsArtifactId"], typecheck_log_artifact.id)
+                self.assertEqual(build_artifact_payload["resourcePolicy"]["enforcement"], "local_best_effort")
+                self.assertEqual(typecheck_artifact_payload["diagnostics"], [])
                 self.assertEqual(build_review_payload["logsArtifactId"], build_log_artifact.id)
                 self.assertEqual(typecheck_review_payload["logsArtifactId"], typecheck_log_artifact.id)
+                self.assertEqual(build_review_payload["evidenceRefs"][0]["artifactId"], build_artifact.id)
+                self.assertEqual(typecheck_review_payload["evidenceRefs"][0]["artifactId"], typecheck_artifact.id)
                 self.assertIn(generated_project_artifact.id, build_log_artifact.parent_artifact_ids)
                 self.assertIn(generated_project_artifact.id, typecheck_log_artifact.parent_artifact_ids)
+                self.assertIn(build_log_artifact.id, build_artifact.parent_artifact_ids)
+                self.assertIn(typecheck_log_artifact.id, typecheck_artifact.parent_artifact_ids)
                 self.assertEqual(tool_call_payload["toolName"], "crewai.agent_pass")
                 self.assertEqual(tool_call_payload["status"], "fail")
                 self.assertEqual(tool_call_payload["failureClass"], "policy_denied")
@@ -201,9 +224,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(runtime_payload["status"], "pass")
                 self.assertEqual(runtime_payload["screenshotArtifactIds"], [artifact_by_kind["runtime_screenshot"].id])
                 self.assertIn(build_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(build_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(generated_project_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(build_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(typecheck_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
             finally:
                 store.close()

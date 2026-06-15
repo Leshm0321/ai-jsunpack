@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence
 from uuid import uuid4
 
 from apps.api.app.models import (
     ArtifactRecord,
+    BuildArtifact,
     EvidenceRef,
     FailureClass,
     JobStatus,
@@ -17,6 +19,8 @@ from apps.api.app.models import (
     ReviewRun,
     ReviewType,
     RunStatus,
+    SandboxResourcePolicy as SandboxResourcePolicyModel,
+    TypeScriptDiagnostic,
 )
 from packages.sandbox import LocalSandboxRunner, SandboxCommand, SandboxPolicy, SandboxResult
 
@@ -35,6 +39,20 @@ DEFAULT_NPM_INSTALL_COMMAND = (
 DEFAULT_NPM_BUILD_COMMAND = (DEFAULT_NPM_EXECUTABLE, "run", "--ignore-scripts", "build")
 DEFAULT_NPM_TYPECHECK_COMMAND = (DEFAULT_NPM_EXECUTABLE, "run", "--ignore-scripts", "typecheck")
 DEFAULT_NPM_CHECK_COMMAND = (DEFAULT_NPM_EXECUTABLE, "run", "--ignore-scripts", "check")
+TSC_PAREN_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<path>.+?)\((?P<line>\d+),(?P<column>\d+)\):\s*"
+    r"(?P<category>error|warning|message|suggestion)\s+(?P<code>TS\d+):\s*(?P<message>.*)$",
+    re.IGNORECASE,
+)
+TSC_COLON_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+)\s+-\s*"
+    r"(?P<category>error|warning|message|suggestion)\s+(?P<code>TS\d+):\s*(?P<message>.*)$",
+    re.IGNORECASE,
+)
+TSC_GLOBAL_DIAGNOSTIC_RE = re.compile(
+    r"^(?P<category>error|warning|message|suggestion)\s+(?P<code>TS\d+):\s*(?P<message>.*)$",
+    re.IGNORECASE,
+)
 
 
 BuildStage = Literal["building", "typechecking"]
@@ -67,13 +85,14 @@ class BuildValidationLogResult:
 @dataclass(frozen=True)
 class BuildValidationStageResult:
     log_artifact: ArtifactRecord
+    build_artifact: ArtifactRecord
     review_artifact: ArtifactRecord
     review_run: ReviewRun
     message: str
 
     @property
     def artifact_ids(self) -> list[str]:
-        return [self.log_artifact.id, self.review_artifact.id]
+        return [self.log_artifact.id, self.build_artifact.id, self.review_artifact.id]
 
 
 @dataclass(frozen=True)
@@ -539,6 +558,23 @@ class BuildValidationRunner:
             payload=log_payload,
             parent_artifact_ids=parent_artifact_ids,
         )
+        build_artifact_payload = self._build_artifact(
+            job_id=job_id,
+            observation=observation,
+            decision=decision,
+            log_artifact=log_artifact,
+            repair_instruction_ids=repair_instruction_ids,
+        )
+        build_artifact = self._write_build_artifact(
+            job_id=job_id,
+            store=store,
+            stage=observation.stage,
+            review_type=observation.review_type,
+            phase=observation.plan.phase,
+            attempt=observation.attempt,
+            build_artifact=build_artifact_payload,
+            parent_artifact_ids=[*parent_artifact_ids, log_artifact.id, *repair_instruction_ids],
+        )
         review_run = self._review_run(
             job_id=job_id,
             review_type=observation.review_type,
@@ -547,6 +583,7 @@ class BuildValidationRunner:
             decision=decision,
             failure_class=observation.failure_class,
             log_artifact=log_artifact,
+            build_artifact=build_artifact,
             repair_instruction_ids=repair_instruction_ids,
         )
         review_artifact = self._write_review_artifact(
@@ -556,10 +593,11 @@ class BuildValidationRunner:
             review_type=observation.review_type,
             attempt=observation.attempt,
             review_run=review_run,
-            parent_artifact_ids=[*parent_artifact_ids, log_artifact.id, *repair_instruction_ids],
+            parent_artifact_ids=[*parent_artifact_ids, log_artifact.id, build_artifact.id, *repair_instruction_ids],
         )
         return BuildValidationStageResult(
             log_artifact=log_artifact,
+            build_artifact=build_artifact,
             review_artifact=review_artifact,
             review_run=review_run,
             message=decision,
@@ -861,6 +899,99 @@ class BuildValidationRunner:
             "repairInstructionIds": repair_instruction_ids,
         }
 
+    def _build_artifact(
+        self,
+        *,
+        job_id: str,
+        observation: StageObservation,
+        decision: str,
+        log_artifact: ArtifactRecord,
+        repair_instruction_ids: list[str],
+    ) -> BuildArtifact:
+        result = observation.result
+        command_source = observation.plan.command_source
+        return BuildArtifact(
+            id=f"build_{uuid4().hex[:12]}",
+            job_id=job_id,
+            stage=observation.stage,
+            review_type=observation.review_type,
+            phase=observation.plan.phase,
+            attempt=observation.attempt,
+            status=observation.status,
+            decision=decision,
+            command=list(observation.plan.command or []),
+            command_source=command_source,
+            script_name=observation.plan.script_name,
+            package_manager="npm" if command_source in {"npm_script", "npm_install"} else None,
+            exit_code=result.exit_code if result is not None else None,
+            duration_ms=result.duration_ms if result is not None else 0,
+            failure_class=observation.failure_class,
+            timed_out=result.timed_out if result is not None else False,
+            output_truncated=result.output_truncated if result is not None else False,
+            working_directory=result.working_directory if result is not None else None,
+            network_policy=result.network_policy if result is not None else self.sandbox_runner.policy.network_policy,
+            resource_policy=self._resource_policy_for_result(result),
+            diagnostics=self._diagnostics_for_observation(observation),
+            logs_artifact_id=log_artifact.id,
+            repair_instruction_ids=repair_instruction_ids,
+            limitations=observation.limitations,
+        )
+
+    def _resource_policy_for_result(self, result: SandboxResult | None) -> SandboxResourcePolicyModel:
+        resource_policy = result.resource_policy if result is not None else self.sandbox_runner.policy.resource_policy
+        payload = asdict(resource_policy)
+        payload["limitations"] = list(payload.get("limitations") or [])
+        return SandboxResourcePolicyModel.model_validate(payload)
+
+    def _diagnostics_for_observation(self, observation: StageObservation) -> list[TypeScriptDiagnostic]:
+        if observation.review_type != "typecheck" or observation.result is None:
+            return []
+        diagnostics: list[TypeScriptDiagnostic] = []
+        diagnostics.extend(self._parse_typescript_diagnostics(observation.result.stderr, source="stderr"))
+        diagnostics.extend(self._parse_typescript_diagnostics(observation.result.stdout, source="stdout"))
+        return diagnostics[:100]
+
+    def _parse_typescript_diagnostics(self, text: str, *, source: Literal["stdout", "stderr"]) -> list[TypeScriptDiagnostic]:
+        diagnostics: list[TypeScriptDiagnostic] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            diagnostic = self._parse_typescript_diagnostic_line(stripped, source=source)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+        return diagnostics
+
+    def _parse_typescript_diagnostic_line(
+        self,
+        line: str,
+        *,
+        source: Literal["stdout", "stderr"],
+    ) -> TypeScriptDiagnostic | None:
+        for pattern in (TSC_PAREN_DIAGNOSTIC_RE, TSC_COLON_DIAGNOSTIC_RE):
+            match = pattern.match(line)
+            if match is None:
+                continue
+            return TypeScriptDiagnostic(
+                source=source,
+                category=match.group("category").lower(),
+                code=match.group("code"),
+                message=match.group("message"),
+                file_path=match.group("path"),
+                line=int(match.group("line")),
+                column=int(match.group("column")),
+            )
+
+        match = TSC_GLOBAL_DIAGNOSTIC_RE.match(line)
+        if match is None:
+            return None
+        return TypeScriptDiagnostic(
+            source=source,
+            category=match.group("category").lower(),
+            code=match.group("code"),
+            message=match.group("message"),
+        )
+
     def _write_log_artifact(
         self,
         *,
@@ -879,6 +1010,30 @@ class BuildValidationRunner:
             stage=stage,
             filename=f"{review_type}-{phase}-attempt-{attempt}.json",
             content=self._json_bytes(payload),
+            content_type="application/json",
+            producer="worker.build_validation",
+            parent_artifact_ids=parent_artifact_ids,
+            attempt=attempt,
+        )
+
+    def _write_build_artifact(
+        self,
+        *,
+        job_id: str,
+        store,
+        stage: JobStatus,
+        review_type: ReviewType,
+        phase: BuildPhase,
+        attempt: int,
+        build_artifact: BuildArtifact,
+        parent_artifact_ids: list[str],
+    ) -> ArtifactRecord:
+        return store.write_artifact(
+            job_id,
+            kind="build_artifact",
+            stage=stage,
+            filename=f"{review_type}-{phase}-artifact-attempt-{attempt}.json",
+            content=build_artifact.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.build_validation",
             parent_artifact_ids=parent_artifact_ids,
@@ -918,6 +1073,7 @@ class BuildValidationRunner:
         decision: str,
         failure_class: FailureClass,
         log_artifact: ArtifactRecord,
+        build_artifact: ArtifactRecord,
         repair_instruction_ids: list[str],
     ) -> ReviewRun:
         return ReviewRun(
@@ -929,6 +1085,12 @@ class BuildValidationRunner:
             decision=decision,
             failure_class=failure_class,
             evidence_refs=[
+                EvidenceRef(
+                    artifact_id=build_artifact.id,
+                    label=f"Structured sandbox {review_type} artifact",
+                    locator="artifact:build_artifact",
+                    excerpt=decision[:240],
+                ),
                 EvidenceRef(
                     artifact_id=log_artifact.id,
                     label=f"Sandbox {review_type} log",
