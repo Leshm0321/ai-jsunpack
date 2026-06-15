@@ -42,6 +42,8 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(result.validation.status, "pass")
                 self.assertEqual(len(adapter.requests), 1)
                 self.assertTrue(adapter.requests[0].entry_url.startswith("http://127.0.0.1:"))
+                self.assertIn("ai-jsunpack-sandbox-", str(adapter.requests[0].screenshot_path))
+                self.assertFalse(adapter.requests[0].screenshot_path.exists())
                 self.assertIsNotNone(result.screenshot_artifact)
 
                 runtime_reports = store.list_artifacts(job.id, kind="runtime_validation")

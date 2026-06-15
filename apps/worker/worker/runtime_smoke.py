@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -14,6 +13,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from apps.api.app.models import ArtifactRecord, FailureClass, RunStatus, RuntimeTarget, RuntimeValidationRun
+from packages.sandbox import LocalSandboxRunner
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,15 @@ class RuntimeEntry:
 
 
 class RuntimeSmokeRunner:
-    def __init__(self, browser_adapter: BrowserSmokeAdapter | None = None, timeout_ms: int = 10_000) -> None:
+    def __init__(
+        self,
+        browser_adapter: BrowserSmokeAdapter | None = None,
+        timeout_ms: int = 10_000,
+        sandbox_runner: LocalSandboxRunner | None = None,
+    ) -> None:
         self.browser_adapter = browser_adapter or PlaywrightBrowserAdapter()
         self.timeout_ms = timeout_ms
+        self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
 
     def run(
         self,
@@ -154,8 +160,8 @@ class RuntimeSmokeRunner:
                 message="Runtime smoke skipped because no HTML entry was found.",
             )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            screenshot_path = Path(temp_dir) / "runtime-smoke.png"
+        with self.sandbox_runner.attempt_workspace() as temp_dir:
+            screenshot_path = temp_dir / "runtime-smoke.png"
             resolved_url = entry.entry_url or "about:blank"
             try:
                 with self._entry_url(entry) as resolved_url:
