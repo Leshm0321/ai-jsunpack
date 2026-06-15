@@ -222,6 +222,27 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(missing_reviews.status_code, 404)
         self.assertEqual(missing_tool_calls.status_code, 404)
 
+    def test_directory_artifact_download_returns_400_until_packaged(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        generated = self.root / "generated"
+        generated.mkdir()
+        (generated / "index.html").write_text("<h1>Generated</h1>", encoding="utf-8")
+        artifact = self.store.register_artifact_path(
+            job_id,
+            kind="generated_project",
+            stage="reconstructing",
+            filename="generated-project",
+            source_path=generated,
+            content_type="application/vnd.ai-jsunpack.generated-project+directory",
+            producer="test.api",
+        )
+
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{artifact.id}/download")
+
+        self.assertEqual(downloaded.status_code, 400)
+
     def test_local_vite_origin_is_allowed_for_development(self):
         response = self.client.options(
             "/jobs",

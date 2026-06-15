@@ -11,7 +11,58 @@ export interface AnalyzeInputConfig {
   rootDir?: string;
 }
 
+export interface ReconstructionPlan {
+  kind: "reconstruction_plan";
+  jobId?: string;
+  strategy: "static_host_project";
+  entryHtml: string | null;
+  sourceFiles: string[];
+  scripts: string[];
+  styles: string[];
+  assets: string[];
+  sourceMaps: string[];
+  manifests: string[];
+  detectedRuntime: string[];
+  generatedFiles: string[];
+  evidenceSummary: {
+    astIndexFiles: string[];
+    symbolCount: number;
+  };
+  limitations: string[];
+}
+
+export interface WriteProjectConfig {
+  inputPath: string;
+  outputDir: string;
+  packageName?: string;
+}
+
+export interface GeneratedProjectManifest {
+  kind: "generated_project";
+  jobId?: string;
+  projectPath: string;
+  entrypoint: string;
+  generatedFiles: string[];
+  copiedSourceFiles: string[];
+  sourceRoot: string;
+  limitations: string[];
+}
+
+export interface WriteProjectResult {
+  projectPath: string;
+  manifest: GeneratedProjectManifest;
+}
+
 const TEXT_EXTENSIONS = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".json", ".map"]);
+const GENERATED_PROJECT_FILES = [
+  "package.json",
+  "tsconfig.json",
+  "index.html",
+  "src/main.ts",
+  "src/reconstruction-manifest.json",
+  "scripts/build.mjs",
+  "scripts/typecheck.mjs"
+];
 
 export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
   const rootDir = path.resolve(config.rootDir ?? inputPath);
@@ -213,8 +264,105 @@ export function detectBundleRuntime(inventory: InputInventory, indexes: AstIndex
   return [...detected];
 }
 
+export function planReconstruction(
+  analysis: HeadlessAnalysisResult,
+  config: AnalyzeInputConfig = {}
+): ReconstructionPlan {
+  const limitations = [
+    ...analysis.inventory.warnings,
+    "Generated project is a deterministic static host shell; semantic module recovery remains evidence-bound future work.",
+    "Build and typecheck scripts are offline validation shims until dependency installation policy is implemented."
+  ];
+
+  return {
+    kind: "reconstruction_plan",
+    jobId: config.jobId,
+    strategy: "static_host_project",
+    entryHtml: analysis.inventory.entries[0] ?? null,
+    sourceFiles: analysis.inventory.files.map((file) => file.path),
+    scripts: analysis.inventory.scripts,
+    styles: analysis.inventory.styles,
+    assets: analysis.inventory.assets,
+    sourceMaps: analysis.inventory.sourceMaps,
+    manifests: analysis.inventory.manifests,
+    detectedRuntime: analysis.detectedRuntime,
+    generatedFiles: GENERATED_PROJECT_FILES,
+    evidenceSummary: {
+      astIndexFiles: analysis.astIndexes.map((index) => index.filePath),
+      symbolCount: analysis.astIndexes.reduce((count, index) => count + index.symbols.length, 0)
+    },
+    limitations
+  };
+}
+
+export async function writeProject(plan: ReconstructionPlan, config: WriteProjectConfig): Promise<WriteProjectResult> {
+  const inputRoot = path.resolve(config.inputPath);
+  const projectRoot = assertSafeOutputDir(config.outputDir);
+  await fs.rm(projectRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+  await fs.mkdir(path.join(projectRoot, "scripts"), { recursive: true });
+  await fs.mkdir(path.join(projectRoot, "public", "original"), { recursive: true });
+
+  const copiedSourceFiles: string[] = [];
+  for (const sourceFile of plan.sourceFiles) {
+    const safeRelative = safeRelativePath(sourceFile);
+    const sourcePath = path.join(inputRoot, safeRelative);
+    const targetPath = path.join(projectRoot, "public", "original", safeRelative);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.copyFile(sourcePath, targetPath);
+    copiedSourceFiles.push(`public/original/${toPosix(safeRelative)}`);
+  }
+
+  const manifest: GeneratedProjectManifest = {
+    kind: "generated_project",
+    jobId: plan.jobId,
+    projectPath: ".",
+    entrypoint: "index.html",
+    generatedFiles: GENERATED_PROJECT_FILES,
+    copiedSourceFiles,
+    sourceRoot: "public/original",
+    limitations: plan.limitations
+  };
+
+  await writeJson(path.join(projectRoot, "package.json"), {
+    name: config.packageName ?? "ai-jsunpack-generated-project",
+    version: "0.0.0",
+    private: true,
+    type: "module",
+    scripts: {
+      build: "node scripts/build.mjs",
+      typecheck: "node scripts/typecheck.mjs"
+    }
+  });
+  await writeJson(path.join(projectRoot, "tsconfig.json"), {
+    compilerOptions: {
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      strict: true,
+      noEmit: true,
+      resolveJsonModule: true
+    },
+    include: ["src/**/*.ts"]
+  });
+  await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
+  await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
+  await fs.writeFile(path.join(projectRoot, "index.html"), indexHtmlSource(plan, manifest), "utf8");
+  await fs.writeFile(path.join(projectRoot, "scripts", "build.mjs"), buildScriptSource(), "utf8");
+  await fs.writeFile(path.join(projectRoot, "scripts", "typecheck.mjs"), typecheckScriptSource(), "utf8");
+
+  return {
+    projectPath: projectRoot,
+    manifest
+  };
+}
+
 export async function runHeadlessPipeline(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
   return analyzeInputPackage(inputPath, config);
+}
+
+async function writeJson(filePath: string, value: unknown): Promise<void> {
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 async function listFiles(rootDir: string): Promise<string[]> {
@@ -272,6 +420,144 @@ function formatNodeLoc(node: t.Node): string | undefined {
 
 function sha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+function assertSafeOutputDir(outputDir: string): string {
+  const resolved = path.resolve(outputDir);
+  if (resolved === path.parse(resolved).root) {
+    throw new Error("Refusing to write generated project to a filesystem root.");
+  }
+  return resolved;
+}
+
+function safeRelativePath(filePath: string): string {
+  const normalized = toPosix(filePath);
+  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath) || normalized.startsWith("../") || normalized.includes("/../")) {
+    throw new Error(`Unsafe input file path in inventory: ${filePath}`);
+  }
+  return normalized;
+}
+
+function mainTsSource(manifest: GeneratedProjectManifest): string {
+  return `export interface ReconstructionManifest {
+  kind: "generated_project";
+  jobId?: string;
+  projectPath: string;
+  entrypoint: string;
+  generatedFiles: string[];
+  copiedSourceFiles: string[];
+  sourceRoot: string;
+  limitations: string[];
+}
+
+export const reconstructionManifest: ReconstructionManifest = ${JSON.stringify(manifest, null, 2)};
+
+export function sourceFileCount(): number {
+  return reconstructionManifest.copiedSourceFiles.length;
+}
+`;
+}
+
+function indexHtmlSource(plan: ReconstructionPlan, manifest: GeneratedProjectManifest): string {
+  const runtime = plan.detectedRuntime.length > 0 ? plan.detectedRuntime.join(", ") : "unknown";
+  const entry = plan.entryHtml ?? "generated host page";
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI JS Unpack Generated Project</title>
+    <style>
+      :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; padding: 32px; background: #f7f7f4; color: #1b1d1f; }
+      main { max-width: 960px; margin: 0 auto; }
+      h1 { font-size: 28px; margin: 0 0 12px; }
+      section { border: 1px solid #d8d5cd; border-radius: 6px; padding: 18px; margin-top: 16px; background: #fff; }
+      dl { display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; }
+      dt { color: #62676d; }
+      dd { margin: 0; font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Generated reconstruction shell</h1>
+      <p>This static project preserves input evidence and exposes a buildable audit surface for sandbox validation.</p>
+      <section>
+        <dl>
+          <dt>Original entry</dt>
+          <dd>${escapeHtml(entry)}</dd>
+          <dt>Detected runtime</dt>
+          <dd>${escapeHtml(runtime)}</dd>
+          <dt>Copied source files</dt>
+          <dd>${manifest.copiedSourceFiles.length}</dd>
+          <dt>Manifest</dt>
+          <dd>src/reconstruction-manifest.json</dd>
+        </dl>
+      </section>
+    </main>
+  </body>
+</html>
+`;
+}
+
+function buildScriptSource(): string {
+  return `import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const dist = path.join(root, "dist");
+await rm(dist, { recursive: true, force: true });
+await mkdir(dist, { recursive: true });
+await cp(path.join(root, "index.html"), path.join(dist, "index.html"));
+await cp(path.join(root, "src"), path.join(dist, "src"), { recursive: true });
+const publicDir = path.join(root, "public");
+if (existsSync(publicDir)) {
+  await cp(publicDir, path.join(dist, "public"), { recursive: true });
+}
+const manifest = JSON.parse(await readFile(path.join(root, "src", "reconstruction-manifest.json"), "utf8"));
+await writeFile(
+  path.join(dist, "build-manifest.json"),
+  JSON.stringify({ status: "pass", sourceFiles: manifest.copiedSourceFiles.length }, null, 2) + "\\n"
+);
+console.log("Generated project build copied static artifacts to dist.");
+`;
+}
+
+function typecheckScriptSource(): string {
+  return `import { access, readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const manifest = JSON.parse(await readFile(path.join(root, "src", "reconstruction-manifest.json"), "utf8"));
+const mainSource = await readFile(path.join(root, "src", "main.ts"), "utf8");
+if (manifest.kind !== "generated_project") {
+  throw new Error("Generated project manifest kind is invalid.");
+}
+if (!Array.isArray(manifest.copiedSourceFiles) || !Array.isArray(manifest.generatedFiles)) {
+  throw new Error("Generated project manifest file lists are invalid.");
+}
+if (!mainSource.includes("export interface ReconstructionManifest")) {
+  throw new Error("Generated TypeScript entry contract is missing.");
+}
+for (const filePath of manifest.copiedSourceFiles) {
+  if (path.isAbsolute(filePath) || filePath.includes("..")) {
+    throw new Error(\`Unsafe copied source file path: \${filePath}\`);
+  }
+  await access(path.join(root, filePath));
+}
+console.log("Generated project type contract and copied source manifest validated.");
+`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function toPosix(filePath: string): string {

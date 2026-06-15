@@ -19,8 +19,9 @@ from apps.api.app.models import (
 from packages.sandbox import LocalSandboxRunner, SandboxCommand, SandboxPolicy, SandboxResult
 
 
-DEFAULT_BUILD_COMMAND = ("npm", "run", "build")
-DEFAULT_TYPECHECK_COMMAND = ("npm", "run", "typecheck")
+DEFAULT_NODE_EXECUTABLE = shutil.which("node") or "node"
+DEFAULT_BUILD_COMMAND = (DEFAULT_NODE_EXECUTABLE, "scripts/build.mjs")
+DEFAULT_TYPECHECK_COMMAND = (DEFAULT_NODE_EXECUTABLE, "scripts/typecheck.mjs")
 
 
 BuildStage = Literal["building", "typechecking"]

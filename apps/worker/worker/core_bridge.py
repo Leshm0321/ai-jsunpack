@@ -18,6 +18,13 @@ class CoreAnalysisResult:
     ast_index_artifact_payload: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class CoreReconstructionResult:
+    reconstruction_plan_payload: dict[str, Any]
+    generated_project_manifest_payload: dict[str, Any]
+    generated_project_path: Path
+
+
 class CoreBridgeError(RuntimeError):
     pass
 
@@ -66,6 +73,61 @@ class CoreBridge:
         return CoreAnalysisResult(
             inventory_artifact_payload=inventory_payload,
             ast_index_artifact_payload=ast_index_payload,
+        )
+
+    def reconstruct_input_package(
+        self,
+        *,
+        job_id: str,
+        input_path: Path | str,
+        output_dir: Path | str,
+    ) -> CoreReconstructionResult:
+        if not self.cli_path.exists():
+            raise CoreBridgeError(f"Core CLI is not built: {self.cli_path}")
+
+        command = [
+            self.node_binary,
+            str(self.cli_path),
+            "reconstruct",
+            str(Path(input_path)),
+            "--job-id",
+            job_id,
+            "--output-dir",
+            str(Path(output_dir)),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            raise CoreBridgeError(f"Failed to launch Core CLI: {error}") from error
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "Core CLI reconstruct failed without stderr."
+            raise CoreBridgeError(stderr)
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise CoreBridgeError(f"Core CLI reconstruct returned invalid JSON: {error}") from error
+
+        reconstruction_plan_payload = payload.get("reconstructionPlanPayload")
+        generated_project_manifest_payload = payload.get("generatedProjectManifestPayload")
+        generated_project_path = payload.get("generatedProjectPath")
+        if (
+            not isinstance(reconstruction_plan_payload, dict)
+            or not isinstance(generated_project_manifest_payload, dict)
+            or not isinstance(generated_project_path, str)
+        ):
+            raise CoreBridgeError("Core CLI reconstruct response is missing artifact payloads.")
+
+        return CoreReconstructionResult(
+            reconstruction_plan_payload=reconstruction_plan_payload,
+            generated_project_manifest_payload=generated_project_manifest_payload,
+            generated_project_path=Path(generated_project_path),
         )
 
     def _default_cli_path(self) -> Path:

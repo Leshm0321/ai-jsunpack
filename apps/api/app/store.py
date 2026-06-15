@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +233,77 @@ class DatabaseStore:
                     .values(input_artifact_id=artifact_id, updated_at=utc_now())
                 )
         return self._artifact_from_row(row)
+
+    def register_artifact_path(
+        self,
+        job_id: str,
+        *,
+        kind: ArtifactKind,
+        stage: JobStatus,
+        filename: str,
+        source_path: Path | str,
+        content_type: str,
+        producer: str,
+        parent_artifact_ids: list[str] | None = None,
+    ) -> ArtifactRecord:
+        self.initialize()
+        artifact_id = new_artifact_id()
+        with self.engine.begin() as connection:
+            job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
+        if job_row is None:
+            raise KeyError(f"Job not found: {job_id}")
+
+        source = Path(source_path)
+        if not source.exists():
+            raise FileNotFoundError(f"Artifact source path does not exist: {source}")
+
+        job_dir = self.artifact_root / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        safe_filename = Path(filename).name or source.name or "artifact"
+        target = job_dir / f"{artifact_id}-{safe_filename}"
+        if source.is_dir():
+            shutil.copytree(source, target)
+            digest, size = self._hash_directory(target)
+        else:
+            shutil.copy2(source, target)
+            content = target.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            size = len(content)
+
+        row = {
+            "id": artifact_id,
+            "job_id": job_id,
+            "kind": kind,
+            "stage": stage,
+            "attempt": 0,
+            "schema_version": CONTRACT_SCHEMA_VERSION,
+            "content_type": content_type,
+            "hash": digest,
+            "size": size,
+            "storage_uri": str(target),
+            "parent_artifact_ids": parent_artifact_ids or [],
+            "producer": producer,
+            "sensitivity_class": "source_sensitive",
+            "retention_class": "project",
+            "created_at": utc_now(),
+        }
+        with self.engine.begin() as connection:
+            connection.execute(insert(artifacts_table).values(**row))
+        return self._artifact_from_row(row)
+
+    def _hash_directory(self, directory: Path) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        total_size = 0
+        files = sorted(path for path in directory.rglob("*") if path.is_file())
+        for file_path in files:
+            relative_path = file_path.relative_to(directory).as_posix()
+            content = file_path.read_bytes()
+            total_size += len(content)
+            digest.update(relative_path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(content).hexdigest().encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest(), total_size
 
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)

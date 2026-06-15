@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import { CONTRACT_SCHEMA_VERSION } from "@ai-jsunpack/shared";
-import { analyzeInputPackage } from "./index.js";
+import { analyzeInputPackage, planReconstruction, writeProject } from "./index.js";
 
 interface CliOptions {
   command?: string;
   inputPath?: string;
   jobId?: string;
+  outputDir?: string;
 }
 
 interface ArtifactPayload {
   schemaVersion: string;
   jobId: string;
-  kind: "input_inventory" | "ast_index";
+  kind: "input_inventory" | "ast_index" | "reconstruction_plan" | "generated_project";
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -25,6 +26,11 @@ function parseArgs(args: string[]): CliOptions {
       index += 1;
       continue;
     }
+    if (arg === "--output-dir") {
+      options.outputDir = args[index + 1];
+      index += 1;
+      continue;
+    }
     positional.push(arg);
   }
 
@@ -33,13 +39,60 @@ function parseArgs(args: string[]): CliOptions {
 }
 
 function usage(): string {
-  return "Usage: node packages/core/dist/cli.js analyze <inputPath> --job-id <jobId>";
+  return [
+    "Usage:",
+    "  node packages/core/dist/cli.js analyze <inputPath> --job-id <jobId>",
+    "  node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output-dir <dir>"
+  ].join("\n");
 }
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
-  if (options.command !== "analyze" || !options.inputPath || !options.jobId) {
+  if (!options.inputPath || !options.jobId) {
+    throw new Error(usage());
+  }
+
+  if (options.command === "reconstruct") {
+    if (!options.outputDir) {
+      throw new Error(usage());
+    }
+    const result = await analyzeInputPackage(options.inputPath, { jobId: options.jobId });
+    const plan = planReconstruction(result, { jobId: options.jobId });
+    const generatedProject = await writeProject(plan, {
+      inputPath: options.inputPath,
+      outputDir: options.outputDir
+    });
+    const reconstructionPlanPayload: ArtifactPayload & { plan: typeof plan } = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      jobId: options.jobId,
+      kind: "reconstruction_plan",
+      plan
+    };
+    const generatedProjectManifestPayload: ArtifactPayload & { manifest: typeof generatedProject.manifest } = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      jobId: options.jobId,
+      kind: "generated_project",
+      manifest: generatedProject.manifest
+    };
+    process.stdout.write(
+      JSON.stringify(
+        {
+          jobId: options.jobId,
+          schemaVersion: CONTRACT_SCHEMA_VERSION,
+          generatedProjectPath: generatedProject.projectPath,
+          reconstructionPlanPayload,
+          generatedProjectManifestPayload
+        },
+        null,
+        2
+      )
+    );
+    process.stdout.write("\n");
+    return;
+  }
+
+  if (options.command !== "analyze") {
     throw new Error(usage());
   }
 

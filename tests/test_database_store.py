@@ -48,6 +48,45 @@ class DatabaseStoreTest(unittest.TestCase):
                 if reopened is not None:
                     reopened.close()
 
+    def test_register_artifact_path_persists_directory_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_url = f"sqlite:///{(root / 'metadata.db').as_posix()}"
+            artifact_root = root / "artifacts"
+            source_dir = root / "generated"
+            (source_dir / "src").mkdir(parents=True)
+            (source_dir / "index.html").write_text("<h1>Generated</h1>", encoding="utf-8")
+            (source_dir / "src" / "main.ts").write_text("export const ok = true;", encoding="utf-8")
+
+            store = create_store(database_url=database_url, artifact_root=artifact_root)
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                artifact = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=source_dir,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test.database_store",
+                )
+                repeated = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project-copy",
+                    source_path=source_dir,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test.database_store",
+                )
+
+                self.assertTrue(Path(artifact.storage_uri).is_dir())
+                self.assertTrue((Path(artifact.storage_uri) / "src" / "main.ts").exists())
+                self.assertEqual(artifact.hash, repeated.hash)
+                self.assertEqual(artifact.size, len("<h1>Generated</h1>".encode("utf-8")) + len("export const ok = true;".encode("utf-8")))
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

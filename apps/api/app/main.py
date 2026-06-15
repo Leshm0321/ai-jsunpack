@@ -124,6 +124,8 @@ def download_artifact(job_id: str, artifact_id: str) -> FileResponse:
     artifact_path = Path(artifact.storage_uri)
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact content not found")
+    if artifact_path.is_dir():
+        raise HTTPException(status_code=400, detail="Directory artifact download requires a result package")
     return FileResponse(
         artifact_path,
         media_type=artifact.content_type,
