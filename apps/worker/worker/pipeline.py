@@ -170,6 +170,8 @@ class WorkerPipeline:
             )
             run.transition("building", build_validation_result.build.message)
             run.transition("typechecking", build_validation_result.typecheck.message)
+            if build_validation_result.repair_artifacts:
+                run.transition("repairing", "Build/typecheck review produced repair evidence for validation retry.")
 
             runtime_result = self.runtime_smoke_runner.run(
                 job_id=job_id,

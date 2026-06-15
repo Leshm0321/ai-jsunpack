@@ -193,6 +193,7 @@ class DatabaseStore:
         content_type: str,
         producer: str,
         parent_artifact_ids: list[str] | None = None,
+        attempt: int = 0,
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -212,7 +213,7 @@ class DatabaseStore:
             "job_id": job_id,
             "kind": kind,
             "stage": stage,
-            "attempt": 0,
+            "attempt": attempt,
             "schema_version": CONTRACT_SCHEMA_VERSION,
             "content_type": content_type,
             "hash": digest,
@@ -245,6 +246,7 @@ class DatabaseStore:
         content_type: str,
         producer: str,
         parent_artifact_ids: list[str] | None = None,
+        attempt: int = 0,
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -275,7 +277,7 @@ class DatabaseStore:
             "job_id": job_id,
             "kind": kind,
             "stage": stage,
-            "attempt": 0,
+            "attempt": attempt,
             "schema_version": CONTRACT_SCHEMA_VERSION,
             "content_type": content_type,
             "hash": digest,

@@ -191,6 +191,27 @@ export interface MemoryRecord {
   retentionClass: RetentionClass;
 }
 
+export interface RepairAction {
+  action: "add_package_script";
+  path: string;
+  value: string;
+  reason: string;
+}
+
+export interface RepairInstruction {
+  id: string;
+  jobId: string;
+  attempt: number;
+  targetStage: "building" | "typechecking" | "runtime_smoke" | "runtime_compare";
+  failureClass: FailureClass;
+  inputArtifactIds: string[];
+  evidenceRefs: EvidenceRef[];
+  actions: RepairAction[];
+  status: "planned" | "applied" | "skipped";
+  riskLevel: "low" | "medium" | "high";
+  decision: string;
+}
+
 export interface InputFileRecord {
   path: string;
   kind: "html" | "script" | "style" | "asset" | "source_map" | "manifest" | "unknown";
@@ -264,6 +285,20 @@ const evidenceRefsSchema = {
       excerpt: stringSchema
     },
     required: ["artifactId", "label"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const repairActionsSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["add_package_script"] },
+      path: stringSchema,
+      value: stringSchema,
+      reason: stringSchema
+    },
+    required: ["action", "path", "value", "reason"],
     additionalProperties: false
   }
 } as const satisfies JsonSchema;
@@ -539,6 +574,39 @@ export const SHARED_JSON_SCHEMAS = {
       "retentionClass"
     ],
     additionalProperties: false
+  },
+  repairInstruction: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/repair-instruction.json",
+    title: "RepairInstruction",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      attempt: { type: "integer", minimum: 0 },
+      targetStage: { type: "string", enum: ["building", "typechecking", "runtime_smoke", "runtime_compare"] },
+      failureClass: { type: "string", enum: FAILURE_CLASSES },
+      inputArtifactIds: stringArraySchema,
+      evidenceRefs: evidenceRefsSchema,
+      actions: repairActionsSchema,
+      status: { type: "string", enum: ["planned", "applied", "skipped"] },
+      riskLevel: { type: "string", enum: ["low", "medium", "high"] },
+      decision: stringSchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "attempt",
+      "targetStage",
+      "failureClass",
+      "inputArtifactIds",
+      "evidenceRefs",
+      "actions",
+      "status",
+      "riskLevel",
+      "decision"
+    ],
+    additionalProperties: false
   }
 } as const satisfies Record<string, JsonSchema>;
 
@@ -661,6 +729,27 @@ export const EXAMPLE_MEMORY_RECORD = {
   retentionClass: "project"
 } as const satisfies MemoryRecord;
 
+export const EXAMPLE_REPAIR_INSTRUCTION = {
+  id: "repair_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  attempt: 1,
+  targetStage: "building",
+  failureClass: "build_error",
+  inputArtifactIds: [EXAMPLE_ARTIFACT.id],
+  evidenceRefs: [EXAMPLE_EVIDENCE_REF],
+  actions: [
+    {
+      action: "add_package_script",
+      path: "package.json:scripts.build",
+      value: "node scripts/build.mjs",
+      reason: "A generated validation shim exists and the package script is missing."
+    }
+  ],
+  status: "applied",
+  riskLevel: "low",
+  decision: "Added a deterministic package script for the generated project validation shim."
+} as const satisfies RepairInstruction;
+
 export const SHARED_CONTRACT_EXAMPLES = {
   job: EXAMPLE_JOB,
   artifact: EXAMPLE_ARTIFACT,
@@ -669,5 +758,6 @@ export const SHARED_CONTRACT_EXAMPLES = {
   reviewRun: EXAMPLE_REVIEW_RUN,
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
   toolCall: EXAMPLE_TOOL_CALL,
-  memoryRecord: EXAMPLE_MEMORY_RECORD
+  memoryRecord: EXAMPLE_MEMORY_RECORD,
+  repairInstruction: EXAMPLE_REPAIR_INSTRUCTION
 } as const;

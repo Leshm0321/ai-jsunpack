@@ -68,6 +68,7 @@ class SharedContractAlignmentTest(unittest.TestCase):
             "runtimeValidationRun": models.RuntimeValidationRun,
             "toolCall": models.ToolCall,
             "memoryRecord": models.MemoryRecord,
+            "repairInstruction": models.RepairInstruction,
         }
 
         for example_name, model in model_by_example.items():

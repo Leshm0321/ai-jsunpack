@@ -79,6 +79,10 @@ RuntimeTarget = Literal["original", "reconstructed"]
 ToolCallStatus = Literal["pass", "fail"]
 MemoryScope = Literal["job", "project", "global"]
 MemoryType = Literal["short_term", "long_term", "entity", "scenario"]
+RepairTargetStage = Literal["building", "typechecking", "runtime_smoke", "runtime_compare"]
+RepairInstructionStatus = Literal["planned", "applied", "skipped"]
+RepairRiskLevel = Literal["low", "medium", "high"]
+RepairActionName = Literal["add_package_script"]
 
 
 def to_camel(value: str) -> str:
@@ -230,6 +234,27 @@ class MemoryRecord(ContractModel):
     source_artifact_ids: list[str]
     sensitivity_class: SensitivityClass
     retention_class: RetentionClass
+
+
+class RepairAction(ContractModel):
+    action: RepairActionName
+    path: str
+    value: str
+    reason: str
+
+
+class RepairInstruction(ContractModel):
+    id: str
+    job_id: str
+    attempt: int = Field(ge=0)
+    target_stage: RepairTargetStage
+    failure_class: FailureClass
+    input_artifact_ids: list[str]
+    evidence_refs: list[EvidenceRef]
+    actions: list[RepairAction]
+    status: RepairInstructionStatus
+    risk_level: RepairRiskLevel
+    decision: str
 
 
 class JobSummary(ContractModel):
