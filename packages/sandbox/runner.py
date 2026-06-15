@@ -75,65 +75,75 @@ class LocalSandboxRunner:
     def run(self, command: SandboxCommand) -> SandboxResult:
         started_at = time.perf_counter()
         with self.attempt_workspace() as workspace:
-            denied_reason = self._denied_reason(command, workspace)
-            if denied_reason is not None:
-                return self._denied_result(command, workspace, started_at, denied_reason)
+            return self.run_in_workspace(command, workspace, started_at=started_at)
 
-            working_directory = self._working_directory(command, workspace)
-            working_directory.mkdir(parents=True, exist_ok=True)
-            try:
-                process = subprocess.Popen(
-                    command.argv,
-                    cwd=working_directory,
-                    env=self._environment(command),
-                    stdin=subprocess.PIPE if command.stdin is not None else None,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    shell=False,
-                )
-            except OSError as error:
-                return SandboxResult(
-                    command=command.argv,
-                    stdout="",
-                    stderr=str(error),
-                    exit_code=None,
-                    duration_ms=self._duration_ms(started_at),
-                    failure_class=command.failure_class,
-                    timed_out=False,
-                    output_truncated=False,
-                    working_directory=str(working_directory),
-                    network_policy=self.policy.network_policy,
-                )
-            timed_out = False
-            try:
-                stdout_bytes, stderr_bytes = process.communicate(
-                    input=command.stdin,
-                    timeout=max(self.policy.timeout_ms, 1) / 1000,
-                )
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                process.kill()
-                stdout_bytes, stderr_bytes = process.communicate()
+    def run_in_workspace(
+        self,
+        command: SandboxCommand,
+        workspace: Path,
+        *,
+        started_at: float | None = None,
+    ) -> SandboxResult:
+        started = started_at if started_at is not None else time.perf_counter()
+        denied_reason = self._denied_reason(command, workspace)
+        if denied_reason is not None:
+            return self._denied_result(command, workspace, started, denied_reason)
 
-            stdout, stderr, output_truncated = self._decode_limited_output(stdout_bytes, stderr_bytes)
-            failure_class = self._failure_class(
-                exit_code=process.returncode,
-                timed_out=timed_out,
-                output_truncated=output_truncated,
-                command_failure_class=command.failure_class,
+        working_directory = self._working_directory(command, workspace)
+        working_directory.mkdir(parents=True, exist_ok=True)
+        try:
+            process = subprocess.Popen(
+                command.argv,
+                cwd=working_directory,
+                env=self._environment(command),
+                stdin=subprocess.PIPE if command.stdin is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
             )
+        except OSError as error:
             return SandboxResult(
                 command=command.argv,
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=process.returncode,
-                duration_ms=self._duration_ms(started_at),
-                failure_class=failure_class,
-                timed_out=timed_out,
-                output_truncated=output_truncated,
+                stdout="",
+                stderr=str(error),
+                exit_code=None,
+                duration_ms=self._duration_ms(started),
+                failure_class=command.failure_class,
+                timed_out=False,
+                output_truncated=False,
                 working_directory=str(working_directory),
                 network_policy=self.policy.network_policy,
             )
+        timed_out = False
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(
+                input=command.stdin,
+                timeout=max(self.policy.timeout_ms, 1) / 1000,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            stdout_bytes, stderr_bytes = process.communicate()
+
+        stdout, stderr, output_truncated = self._decode_limited_output(stdout_bytes, stderr_bytes)
+        failure_class = self._failure_class(
+            exit_code=process.returncode,
+            timed_out=timed_out,
+            output_truncated=output_truncated,
+            command_failure_class=command.failure_class,
+        )
+        return SandboxResult(
+            command=command.argv,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode,
+            duration_ms=self._duration_ms(started),
+            failure_class=failure_class,
+            timed_out=timed_out,
+            output_truncated=output_truncated,
+            working_directory=str(working_directory),
+            network_policy=self.policy.network_policy,
+        )
 
     def _denied_reason(self, command: SandboxCommand, workspace: Path) -> str | None:
         if not self._is_allowed(command.argv):

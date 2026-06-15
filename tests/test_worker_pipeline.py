@@ -78,30 +78,57 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(run.events[0].status, "leased")
                 self.assertTrue(any(event.status == "intake" for event in run.events))
                 self.assertTrue(any(event.status == "indexing" for event in run.events))
+                self.assertTrue(any(event.status == "building" for event in run.events))
+                self.assertTrue(any(event.status == "typechecking" for event in run.events))
                 self.assertTrue(any(event.status == "runtime_smoke" for event in run.events))
                 self.assertIsNotNone(persisted_job)
                 self.assertEqual(persisted_job.status, "runtime_smoke")
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
                 self.assertIn("agent_plan", artifact_by_kind)
+                self.assertIn("build_log", artifact_by_kind)
                 self.assertIn("review_run", artifact_by_kind)
                 self.assertIn("tool_call", artifact_by_kind)
                 self.assertIn("runtime_validation", artifact_by_kind)
                 self.assertIn("runtime_trace", artifact_by_kind)
                 self.assertIn("runtime_screenshot", artifact_by_kind)
                 inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
+                build_log_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_log"]
+                review_artifacts = [artifact for artifact in artifacts if artifact.kind == "review_run"]
                 self.assertGreaterEqual(len(inference_artifacts), 1)
+                self.assertEqual(len(build_log_artifacts), 2)
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
                 agent_plan_artifact = artifact_by_kind["agent_plan"]
-                review_artifact = artifact_by_kind["review_run"]
                 tool_call_artifact = artifact_by_kind["tool_call"]
                 inventory_payload = json.loads(Path(inventory_artifact.storage_uri).read_text(encoding="utf-8"))
                 ast_index_payload = json.loads(Path(ast_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 agent_plan_payload = json.loads(Path(agent_plan_artifact.storage_uri).read_text(encoding="utf-8"))
                 inference_payload = json.loads(Path(inference_artifacts[0].storage_uri).read_text(encoding="utf-8"))
-                review_payload = json.loads(Path(review_artifact.storage_uri).read_text(encoding="utf-8"))
+                review_payloads = [
+                    (artifact, json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")))
+                    for artifact in review_artifacts
+                ]
+                build_log_payloads = [
+                    (artifact, json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")))
+                    for artifact in build_log_artifacts
+                ]
+                review_artifact, review_payload = next(
+                    (artifact, payload) for artifact, payload in review_payloads if payload["reviewType"] == "agent_review"
+                )
+                build_review_artifact, build_review_payload = next(
+                    (artifact, payload) for artifact, payload in review_payloads if payload["reviewType"] == "build"
+                )
+                typecheck_review_artifact, typecheck_review_payload = next(
+                    (artifact, payload) for artifact, payload in review_payloads if payload["reviewType"] == "typecheck"
+                )
+                build_log_artifact, build_log_payload = next(
+                    (artifact, payload) for artifact, payload in build_log_payloads if payload["reviewType"] == "build"
+                )
+                typecheck_log_artifact, typecheck_log_payload = next(
+                    (artifact, payload) for artifact, payload in build_log_payloads if payload["reviewType"] == "typecheck"
+                )
                 tool_call_payload = json.loads(Path(tool_call_artifact.storage_uri).read_text(encoding="utf-8"))
 
                 self.assertEqual(inventory_payload["kind"], "input_inventory")
@@ -120,6 +147,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(inference_payload["outputArtifactIds"], [agent_plan_artifact.id])
                 self.assertEqual(review_payload["reviewType"], "agent_review")
                 self.assertEqual(review_payload["status"], "best_effort")
+                self.assertEqual(build_log_payload["status"], "best_effort")
+                self.assertEqual(typecheck_log_payload["status"], "best_effort")
+                self.assertIn("generated_project", build_log_payload["limitations"][0])
+                self.assertEqual(build_review_payload["logsArtifactId"], build_log_artifact.id)
+                self.assertEqual(typecheck_review_payload["logsArtifactId"], typecheck_log_artifact.id)
                 self.assertEqual(tool_call_payload["toolName"], "crewai_stub.agent_pass")
                 self.assertEqual(tool_call_payload["status"], "pass")
                 self.assertIn(review_artifact.id, tool_call_payload["outputArtifactIds"])
@@ -128,6 +160,10 @@ class WorkerPipelineTest(unittest.TestCase):
                 )
                 self.assertEqual(runtime_payload["status"], "pass")
                 self.assertEqual(runtime_payload["screenshotArtifactIds"], [artifact_by_kind["runtime_screenshot"].id])
+                self.assertIn(build_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(build_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(typecheck_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(typecheck_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
             finally:
                 store.close()
 

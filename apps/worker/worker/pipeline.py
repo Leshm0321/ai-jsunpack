@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from .agent_runtime import AgentRuntime, AgentRuntimeError, AgentRuntimeRequest
+from .build_validation import BuildValidationError, BuildValidationRunner
 from .core_bridge import CoreBridge, CoreBridgeError
 from .runtime_smoke import RuntimeSmokeRunner
 
@@ -77,10 +78,12 @@ class WorkerPipeline:
         self,
         core_bridge: CoreBridge | None = None,
         agent_runtime: AgentRuntime | None = None,
+        build_validation_runner: BuildValidationRunner | None = None,
         runtime_smoke_runner: RuntimeSmokeRunner | None = None,
     ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
         self.agent_runtime = agent_runtime or AgentRuntime()
+        self.build_validation_runner = build_validation_runner or BuildValidationRunner()
         self.runtime_smoke_runner = runtime_smoke_runner or RuntimeSmokeRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
@@ -132,18 +135,27 @@ class WorkerPipeline:
             run.transition("agent_planning", "CrewAI stub planner context persisted.")
             run.transition("agent_pass", agent_result.message)
 
+            evidence_parent_ids = [
+                inventory_artifact.id,
+                ast_artifact.id,
+                agent_result.plan_artifact.id,
+                *[artifact.id for artifact in agent_result.inference_artifacts],
+                agent_result.review_artifact.id,
+                agent_result.tool_call_artifact.id,
+            ]
+            build_validation_result = self.build_validation_runner.run(
+                job_id=job_id,
+                store=store,
+                parent_artifact_ids=evidence_parent_ids,
+            )
+            run.transition("building", build_validation_result.build.message)
+            run.transition("typechecking", build_validation_result.typecheck.message)
+
             runtime_result = self.runtime_smoke_runner.run(
                 job_id=job_id,
                 input_path=input_path,
                 store=store,
-                parent_artifact_ids=[
-                    inventory_artifact.id,
-                    ast_artifact.id,
-                    agent_result.plan_artifact.id,
-                    *[artifact.id for artifact in agent_result.inference_artifacts],
-                    agent_result.review_artifact.id,
-                    agent_result.tool_call_artifact.id,
-                ],
+                parent_artifact_ids=[*evidence_parent_ids, *build_validation_result.artifact_ids],
             )
             run.transition("runtime_smoke", runtime_result.message)
         except CoreBridgeError as error:
@@ -151,6 +163,9 @@ class WorkerPipeline:
             run.transition("failed", str(error))
         except AgentRuntimeError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="agent_failed")
+            run.transition("failed", str(error))
+        except BuildValidationError as error:
+            store.update_status(job_id, "failed", failure_reason=str(error), failure_class="build_error")
             run.transition("failed", str(error))
 
     def _json_bytes(self, payload: dict) -> bytes:
