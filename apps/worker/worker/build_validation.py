@@ -22,6 +22,7 @@ from apps.api.app.models import (
     RunStatus,
     SandboxResourcePolicy as SandboxResourcePolicyModel,
     TypeScriptDiagnostic,
+    TypeScriptRelatedInformation,
 )
 from packages.sandbox import (
     DEFAULT_CONTAINER_IMAGE,
@@ -61,6 +62,23 @@ TSC_GLOBAL_DIAGNOSTIC_RE = re.compile(
     r"^(?P<category>error|warning|message|suggestion)\s+(?P<code>TS\d+):\s*(?P<message>.*)$",
     re.IGNORECASE,
 )
+TSC_RELATED_PAREN_RE = re.compile(
+    r"^(?P<path>.+?)\((?P<line>\d+),(?P<column>\d+)\):\s*(?P<message>.+)$",
+    re.IGNORECASE,
+)
+TSC_RELATED_COLON_RE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+)\s+-\s*(?P<message>.+)$",
+    re.IGNORECASE,
+)
+VITE_DIAGNOSTIC_RE = re.compile(r"^\[vite(?::[^\]]+)?\]:?\s*(?P<message>.+)$", re.IGNORECASE)
+VITE_IMPORT_SOURCE_RE = re.compile(r"\bfrom\s+[\"'](?P<path>[^\"']+)[\"']")
+ESBUILD_DIAGNOSTIC_RE = re.compile(
+    r"^(?:✘|x)\s+\[(?P<category>ERROR|WARNING)\]\s*(?P<message>.+)$",
+    re.IGNORECASE,
+)
+ESBUILD_LOCATION_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+):\s*$")
+MAX_DIAGNOSTICS = 100
+MAX_DIAGNOSTIC_CONTEXT_LINES = 30
 
 
 BuildStage = Literal["building", "typechecking"]
@@ -999,17 +1017,43 @@ class BuildValidationRunner:
         diagnostics: list[TypeScriptDiagnostic] = []
         diagnostics.extend(self._parse_typescript_diagnostics(observation.result.stderr, source="stderr"))
         diagnostics.extend(self._parse_typescript_diagnostics(observation.result.stdout, source="stdout"))
-        return diagnostics[:100]
+        return diagnostics[:MAX_DIAGNOSTICS]
 
     def _parse_typescript_diagnostics(self, text: str, *, source: Literal["stdout", "stderr"]) -> list[TypeScriptDiagnostic]:
         diagnostics: list[TypeScriptDiagnostic] = []
-        for line in text.splitlines():
+        current: TypeScriptDiagnostic | None = None
+        for raw_line in text.splitlines():
+            if len(diagnostics) >= MAX_DIAGNOSTICS:
+                break
+            line = raw_line.rstrip()
             stripped = line.strip()
             if not stripped:
                 continue
             diagnostic = self._parse_typescript_diagnostic_line(stripped, source=source)
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
+                current = diagnostic
+                continue
+            diagnostic = self._parse_build_tool_diagnostic_line(stripped, source=source)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+                current = diagnostic
+                continue
+            if current is None:
+                continue
+            related = self._parse_typescript_related_information(stripped)
+            if related is not None:
+                current.related_information.append(related)
+                continue
+            esbuild_location = ESBUILD_LOCATION_RE.match(stripped)
+            if esbuild_location is not None and current.tool == "esbuild" and current.file_path is None:
+                current.file_path = esbuild_location.group("path")
+                current.line = int(esbuild_location.group("line"))
+                current.column = int(esbuild_location.group("column"))
+                self._append_diagnostic_context(current, line)
+                continue
+            if self._is_diagnostic_context_line(raw_line):
+                self._append_diagnostic_context(current, line)
         return diagnostics
 
     def _parse_typescript_diagnostic_line(
@@ -1024,6 +1068,7 @@ class BuildValidationRunner:
                 continue
             return TypeScriptDiagnostic(
                 source=source,
+                tool="tsc",
                 category=match.group("category").lower(),
                 code=match.group("code"),
                 message=match.group("message"),
@@ -1037,10 +1082,79 @@ class BuildValidationRunner:
             return None
         return TypeScriptDiagnostic(
             source=source,
+            tool="tsc",
             category=match.group("category").lower(),
             code=match.group("code"),
             message=match.group("message"),
         )
+
+    def _parse_build_tool_diagnostic_line(
+        self,
+        line: str,
+        *,
+        source: Literal["stdout", "stderr"],
+    ) -> TypeScriptDiagnostic | None:
+        esbuild_match = ESBUILD_DIAGNOSTIC_RE.match(line)
+        if esbuild_match is not None:
+            return TypeScriptDiagnostic(
+                source=source,
+                tool="esbuild",
+                category=self._diagnostic_category(esbuild_match.group("category")),
+                code=None,
+                message=esbuild_match.group("message").strip(),
+            )
+
+        vite_match = VITE_DIAGNOSTIC_RE.match(line)
+        if vite_match is None:
+            return None
+        message = vite_match.group("message").strip()
+        source_match = VITE_IMPORT_SOURCE_RE.search(message)
+        return TypeScriptDiagnostic(
+            source=source,
+            tool="vite",
+            category="error" if self._message_reads_as_error(message) else "unknown",
+            code=None,
+            message=message,
+            file_path=source_match.group("path") if source_match is not None else None,
+        )
+
+    def _parse_typescript_related_information(self, line: str) -> TypeScriptRelatedInformation | None:
+        for pattern in (TSC_RELATED_PAREN_RE, TSC_RELATED_COLON_RE):
+            match = pattern.match(line)
+            if match is None:
+                continue
+            message = match.group("message").strip()
+            if not message:
+                return None
+            code_match = re.search(r"\b(TS\d+)\b", message)
+            return TypeScriptRelatedInformation(
+                message=message,
+                file_path=match.group("path"),
+                line=int(match.group("line")),
+                column=int(match.group("column")),
+                code=code_match.group(1) if code_match is not None else None,
+            )
+        return None
+
+    def _append_diagnostic_context(self, diagnostic: TypeScriptDiagnostic, line: str) -> None:
+        if len(diagnostic.context_lines) < MAX_DIAGNOSTIC_CONTEXT_LINES:
+            diagnostic.context_lines.append(line)
+
+    def _is_diagnostic_context_line(self, line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        return bool(line[:1].isspace()) or stripped.startswith((">", "|", "│", "╵", "~", "^"))
+
+    def _diagnostic_category(self, value: str) -> Literal["error", "warning", "message", "suggestion", "unknown"]:
+        normalized = value.strip().lower()
+        if normalized in {"error", "warning", "message", "suggestion"}:
+            return normalized
+        return "unknown"
+
+    def _message_reads_as_error(self, message: str) -> bool:
+        normalized = message.lower()
+        return any(token in normalized for token in ("error", "failed", "cannot", "could not", "rollup"))
 
     def _write_log_artifact(
         self,

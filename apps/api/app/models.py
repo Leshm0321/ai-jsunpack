@@ -91,6 +91,7 @@ NetworkPolicy = Literal["deny", "allow"]
 SandboxResourceEnforcement = Literal["local_best_effort", "container_enforced"]
 DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
 DiagnosticSource = Literal["stdout", "stderr"]
+DiagnosticTool = Literal["tsc", "vite", "esbuild", "unknown"]
 
 
 def to_camel(value: str) -> str:
@@ -204,14 +205,25 @@ class ReviewRun(ContractModel):
     logs_artifact_id: str | None = None
 
 
+class TypeScriptRelatedInformation(ContractModel):
+    message: str
+    file_path: str | None = None
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    code: str | None = None
+
+
 class TypeScriptDiagnostic(ContractModel):
     source: DiagnosticSource
+    tool: DiagnosticTool = "tsc"
     category: DiagnosticCategory
     code: str | None = None
     message: str
     file_path: str | None = None
     line: int | None = Field(default=None, ge=1)
     column: int | None = Field(default=None, ge=1)
+    context_lines: list[str] = Field(default_factory=list)
+    related_information: list[TypeScriptRelatedInformation] = Field(default_factory=list)
 
 
 class SandboxResourcePolicy(ContractModel):

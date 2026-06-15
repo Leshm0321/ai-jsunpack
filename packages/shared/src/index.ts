@@ -152,14 +152,25 @@ export interface ReviewRun {
   logsArtifactId?: string;
 }
 
+export interface TypeScriptRelatedInformation {
+  message: string;
+  filePath?: string | null;
+  line?: number | null;
+  column?: number | null;
+  code?: string | null;
+}
+
 export interface TypeScriptDiagnostic {
   source: "stdout" | "stderr";
+  tool?: "tsc" | "vite" | "esbuild" | "unknown";
   category: "error" | "warning" | "message" | "suggestion" | "unknown";
   code?: string | null;
   message: string;
   filePath?: string | null;
   line?: number | null;
   column?: number | null;
+  contextLines?: string[];
+  relatedInformation?: TypeScriptRelatedInformation[];
 }
 
 export interface SandboxResourcePolicy {
@@ -360,18 +371,36 @@ const sandboxResourcePolicySchema = {
   required: ["enforcement", "limitations"],
   additionalProperties: false
 } as const satisfies JsonSchema;
+const typeScriptRelatedInformationSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      message: stringSchema,
+      filePath: stringSchema,
+      line: { type: "integer", minimum: 1 },
+      column: { type: "integer", minimum: 1 },
+      code: stringSchema
+    },
+    required: ["message"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
 const typeScriptDiagnosticsSchema = {
   type: "array",
   items: {
     type: "object",
     properties: {
       source: { type: "string", enum: ["stdout", "stderr"] },
+      tool: { type: "string", enum: ["tsc", "vite", "esbuild", "unknown"] },
       category: { type: "string", enum: ["error", "warning", "message", "suggestion", "unknown"] },
       code: stringSchema,
       message: stringSchema,
       filePath: stringSchema,
       line: { type: "integer", minimum: 1 },
-      column: { type: "integer", minimum: 1 }
+      column: { type: "integer", minimum: 1 },
+      contextLines: stringArraySchema,
+      relatedInformation: typeScriptRelatedInformationSchema
     },
     required: ["source", "category", "message"],
     additionalProperties: false
@@ -850,12 +879,23 @@ export const EXAMPLE_BUILD_ARTIFACT = {
   diagnostics: [
     {
       source: "stderr",
+      tool: "tsc",
       category: "error",
       code: "TS2322",
       message: "Type 'string' is not assignable to type 'number'.",
       filePath: "src/index.ts",
       line: 4,
-      column: 7
+      column: 7,
+      contextLines: ["  4 const value: number = \"text\";", "        ~~~~~"],
+      relatedInformation: [
+        {
+          message: "The expected type comes from this declaration.",
+          filePath: "src/types.ts",
+          line: 1,
+          column: 14,
+          code: null
+        }
+      ]
     }
   ],
   logsArtifactId: "artifact_logs_example",

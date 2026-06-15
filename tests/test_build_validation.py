@@ -113,6 +113,70 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(typecheck_artifact["diagnostics"][0]["line"], 4)
         self.assertEqual(typecheck_artifact["diagnostics"][0]["column"], 7)
 
+    def test_extracts_multiline_and_related_typescript_diagnostics(self):
+        project_root = self.root / "generated"
+        project_root.mkdir()
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        diagnostic_output = (
+            "src/index.ts(4,7): error TS2322: Type 'str' is not assignable to type 'number'.\n"
+            "  4 const value: number = 'str';\n"
+            "        ~~~~~\n"
+            "src/types.ts(1,14): The expected type comes from this declaration.\n"
+        )
+        runner = BuildValidationRunner(
+            sandbox_runner=LocalSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),))),
+            build_command=(sys.executable, "-c", "print('build ok')"),
+            typecheck_command=(
+                sys.executable,
+                "-c",
+                f"import sys; sys.stderr.write({diagnostic_output!r}); sys.exit(2)",
+            ),
+        )
+
+        result = runner.run(job_id=self.job.id, store=self.store, project_path=project_root)
+
+        typecheck_artifact = json.loads(Path(result.typecheck.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        diagnostic = typecheck_artifact["diagnostics"][0]
+        self.assertEqual(diagnostic["tool"], "tsc")
+        self.assertEqual(diagnostic["contextLines"], ["  4 const value: number = 'str';", "        ~~~~~"])
+        self.assertEqual(diagnostic["relatedInformation"][0]["filePath"], "src/types.ts")
+        self.assertEqual(diagnostic["relatedInformation"][0]["line"], 1)
+        self.assertEqual(diagnostic["relatedInformation"][0]["column"], 14)
+        self.assertIn("expected type", diagnostic["relatedInformation"][0]["message"])
+
+    def test_extracts_build_tool_specific_diagnostics(self):
+        project_root = self.root / "generated"
+        project_root.mkdir()
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        diagnostic_output = (
+            "[vite]: Rollup failed to resolve import './missing' from \"src/App.tsx\".\n"
+            "x [ERROR] Could not resolve \"react\"\n"
+            "    src/main.tsx:1:19:\n"
+            "      1 | import React from \"react\";\n"
+            "        |                   ~~~~~~~\n"
+        )
+        runner = BuildValidationRunner(
+            sandbox_runner=LocalSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),))),
+            build_command=(sys.executable, "-c", "print('build ok')"),
+            typecheck_command=(
+                sys.executable,
+                "-c",
+                f"import sys; sys.stderr.write({diagnostic_output!r}); sys.exit(2)",
+            ),
+        )
+
+        result = runner.run(job_id=self.job.id, store=self.store, project_path=project_root)
+
+        typecheck_artifact = json.loads(Path(result.typecheck.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        diagnostics = typecheck_artifact["diagnostics"]
+        self.assertEqual([diagnostic["tool"] for diagnostic in diagnostics], ["vite", "esbuild"])
+        self.assertEqual(diagnostics[0]["filePath"], "src/App.tsx")
+        self.assertIn("Rollup failed", diagnostics[0]["message"])
+        self.assertEqual(diagnostics[1]["filePath"], "src/main.tsx")
+        self.assertEqual(diagnostics[1]["line"], 1)
+        self.assertEqual(diagnostics[1]["column"], 19)
+        self.assertIn("Could not resolve", diagnostics[1]["message"])
+
     def test_skips_dependency_install_without_policy(self):
         project_root = self.root / "generated"
         project_root.mkdir()
