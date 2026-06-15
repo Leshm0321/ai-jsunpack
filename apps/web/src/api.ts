@@ -57,6 +57,17 @@ export async function fetchToolCalls(jobId: string): Promise<ToolCall[]> {
   return requestJson<ToolCall[]>(`/jobs/${encodeURIComponent(jobId)}/tool-calls`);
 }
 
+export async function fetchArtifactText(jobId: string, artifactId: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(
+    `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+    { signal }
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  return response.text();
+}
+
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, options);
   if (!response.ok) {

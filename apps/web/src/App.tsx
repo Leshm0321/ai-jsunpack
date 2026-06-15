@@ -4,17 +4,23 @@ import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import {
   Activity,
+  AlertCircle,
   Archive,
   Binary,
   Braces,
   CheckCircle2,
   ChevronRight,
   Download,
+  Eye,
   FileCode2,
+  FileText,
+  Filter,
   GitBranch,
+  Link2,
   Network,
   Radar,
   RefreshCw,
+  RotateCcw,
   SearchCode,
   ShieldCheck,
   Sparkles,
@@ -37,6 +43,7 @@ import { CLOUD_MODES, JOB_STATUSES } from "@ai-jsunpack/shared";
 import {
   API_BASE_URL,
   createJob,
+  fetchArtifactText,
   fetchInferenceRecords,
   fetchJobSummary,
   fetchReviewRuns,
@@ -85,6 +92,43 @@ interface JobWorkspace {
   evidence: JobEvidence;
 }
 
+type ArtifactPreviewStatus = "idle" | "loading" | "ready" | "unsupported" | "error";
+type AuditCategory = "all" | "inference" | "review" | "tool";
+type AuditStatusFilter = "all" | "attention" | "pass" | "fail";
+
+interface ArtifactPreview {
+  artifactId: string | null;
+  error: string | null;
+  reason: string | null;
+  status: ArtifactPreviewStatus;
+  text: string | null;
+}
+
+interface ArtifactPreviewSupport {
+  reason: string | null;
+  supported: boolean;
+}
+
+interface AuditFilterState {
+  category: AuditCategory;
+  query: string;
+  status: AuditStatusFilter;
+}
+
+interface NormalizedAuditRecord {
+  artifactIds: string[];
+  category: Exclude<AuditCategory, "all">;
+  detail: string;
+  evidenceRefs: EvidenceRef[];
+  failureClass: string;
+  id: string;
+  label: string;
+  secondary: string;
+  status: string;
+}
+
+const previewMaxBytes = 256 * 1024;
+
 const stageDefinitions: StageDefinition[] = [
   { status: "queued", label: "Job created" },
   { status: "intake", label: "Input inventory" },
@@ -108,6 +152,24 @@ const reportArtifactKinds = new Set<Artifact["kind"]>([
   "build_log"
 ]);
 
+const textualArtifactKinds = new Set<Artifact["kind"]>([
+  "input_inventory",
+  "source_index",
+  "ast_index",
+  "agent_plan",
+  "inference_record",
+  "reconstruction_plan",
+  "build_log",
+  "runtime_validation",
+  "runtime_trace",
+  "review_run",
+  "tool_call",
+  "memory_record",
+  "knowledge_evidence",
+  "repair_instruction",
+  "audit_report"
+]);
+
 const statusOrder = new Map<JobStatus, number>(JOB_STATUSES.map((status, index) => [status, index]));
 
 function emptyEvidence(): JobEvidence {
@@ -119,8 +181,19 @@ function emptyEvidence(): JobEvidence {
   };
 }
 
+function emptyArtifactPreview(): ArtifactPreview {
+  return {
+    artifactId: null,
+    error: null,
+    reason: null,
+    status: "idle",
+    text: null
+  };
+}
+
 export function AppContainer() {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview>(() => emptyArtifactPreview());
   const [selectedCloudMode, setSelectedCloudMode] = useState<CloudMode>("local_only");
   const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
   const [jobSummary, setJobSummary] = useState<JobSummary | null>(null);
@@ -146,6 +219,59 @@ export function AppContainer() {
     }),
     [artifacts, currentJob?.status, evidence.runtimeValidations.length, latestRuntime]
   );
+
+  useEffect(() => {
+    if (!currentJob?.id || !selectedArtifact) {
+      setArtifactPreview(emptyArtifactPreview());
+      return;
+    }
+
+    const previewSupport = artifactPreviewSupport(selectedArtifact);
+    if (!previewSupport.supported) {
+      setArtifactPreview({
+        artifactId: selectedArtifact.id,
+        error: null,
+        reason: previewSupport.reason,
+        status: "unsupported",
+        text: null
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    setArtifactPreview({
+      artifactId: selectedArtifact.id,
+      error: null,
+      reason: null,
+      status: "loading",
+      text: null
+    });
+
+    fetchArtifactText(currentJob.id, selectedArtifact.id, controller.signal)
+      .then((text) => {
+        setArtifactPreview({
+          artifactId: selectedArtifact.id,
+          error: null,
+          reason: null,
+          status: "ready",
+          text: formatArtifactPreviewText(selectedArtifact, text)
+        });
+      })
+      .catch((error) => {
+        if (error instanceof Error && error.name === "AbortError") {
+          return;
+        }
+        setArtifactPreview({
+          artifactId: selectedArtifact.id,
+          error: errorMessage(error),
+          reason: null,
+          status: "error",
+          text: null
+        });
+      });
+
+    return () => controller.abort();
+  }, [currentJob?.id, selectedArtifact]);
 
   useEffect(() => {
     if (!currentJob?.id) {
@@ -220,9 +346,20 @@ export function AppContainer() {
     }
   };
 
+  const handleArtifactEvidenceSelect = (artifactId: string) => {
+    setSelectedArtifactId(artifactId);
+    window.requestAnimationFrame(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document
+        .getElementById("artifact-detail")
+        ?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    });
+  };
+
   return (
     <AppView
       apiBaseUrl={API_BASE_URL}
+      artifactPreview={artifactPreview}
       artifacts={artifacts}
       currentJob={currentJob}
       data={data}
@@ -230,6 +367,7 @@ export function AppContainer() {
       isRefreshing={isRefreshing}
       isSubmitting={isSubmitting}
       onArtifactSelect={setSelectedArtifactId}
+      onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
       onFileChange={setSelectedUploadFile}
       onRefreshJob={handleRefreshJob}
       onSelectCloudMode={setSelectedCloudMode}
@@ -245,6 +383,7 @@ export function AppContainer() {
 
 interface AppViewProps {
   apiBaseUrl: string;
+  artifactPreview: ArtifactPreview;
   artifacts: Artifact[];
   currentJob: Job | null;
   data: WorkbenchData;
@@ -252,6 +391,7 @@ interface AppViewProps {
   isRefreshing: boolean;
   isSubmitting: boolean;
   onArtifactSelect: (artifactId: string) => void;
+  onEvidenceArtifactSelect: (artifactId: string) => void;
   onFileChange: (file: File | null) => void;
   onRefreshJob: () => void;
   onSelectCloudMode: (mode: CloudMode) => void;
@@ -265,6 +405,7 @@ interface AppViewProps {
 
 function AppView({
   apiBaseUrl,
+  artifactPreview,
   artifacts,
   currentJob,
   data,
@@ -272,6 +413,7 @@ function AppView({
   isRefreshing,
   isSubmitting,
   onArtifactSelect,
+  onEvidenceArtifactSelect,
   onFileChange,
   onRefreshJob,
   onSelectCloudMode,
@@ -408,6 +550,7 @@ function AppView({
               </div>
             </form>
             <JobSummaryPanel apiBaseUrl={apiBaseUrl} artifacts={artifacts} currentJob={currentJob} evidence={evidence} />
+            <WorkspaceActions artifacts={artifacts} currentJob={currentJob} evidence={evidence} />
             {uploadError ? <StatusBanner tone="error" message={uploadError} /> : null}
             {pollError ? <StatusBanner tone="warning" message={pollError} /> : null}
           </section>
@@ -442,7 +585,7 @@ function AppView({
             <ArtifactList artifacts={artifacts} selectedArtifact={selectedArtifact} onArtifactSelect={onArtifactSelect} />
           </section>
 
-          <section className="workbench-panel code-panel motion-item">
+          <section className="workbench-panel code-panel motion-item" id="artifact-detail">
             <div className="panel-heading padded-heading">
               <div>
                 <p className="panel-kicker">Artifact detail</p>
@@ -450,7 +593,14 @@ function AppView({
               </div>
               <Braces size={22} aria-hidden="true" />
             </div>
-            <ArtifactDetail apiBaseUrl={apiBaseUrl} artifact={selectedArtifact} currentJob={currentJob} />
+            <ArtifactDetail
+              apiBaseUrl={apiBaseUrl}
+              artifact={selectedArtifact}
+              artifactPreview={artifactPreview}
+              artifacts={artifacts}
+              currentJob={currentJob}
+              onArtifactSelect={onArtifactSelect}
+            />
           </section>
 
           <section className="workbench-panel report-panel motion-item">
@@ -472,7 +622,12 @@ function AppView({
               </div>
               <SearchCode size={22} aria-hidden="true" />
             </div>
-            <AuditPanel evidence={evidence} />
+            <AuditPanel
+              artifacts={artifacts}
+              currentJob={currentJob}
+              evidence={evidence}
+              onArtifactSelect={onEvidenceArtifactSelect}
+            />
           </section>
 
           <section className="workbench-panel runtime-panel motion-item" id="runtime">
@@ -488,6 +643,7 @@ function AppView({
               artifacts={artifacts}
               currentJob={currentJob}
               latestRuntime={data.latestRuntime}
+              onArtifactSelect={onEvidenceArtifactSelect}
               runtimeMetrics={data.runtimeMetrics}
               runtimeValidations={evidence.runtimeValidations}
             />
@@ -561,6 +717,48 @@ function JobSummaryPanel({
   );
 }
 
+function WorkspaceActions({
+  artifacts,
+  currentJob,
+  evidence
+}: {
+  artifacts: Artifact[];
+  currentJob: Job | null;
+  evidence: JobEvidence;
+}) {
+  return (
+    <div className="workspace-actions" aria-label="Workspace actions">
+      <button
+        className="secondary-action compact"
+        type="button"
+        disabled={!currentJob}
+        onClick={() =>
+          currentJob
+            ? downloadJsonFile(`ai-jsunpack-${currentJob.id}-workspace.json`, {
+                exportedAt: new Date().toISOString(),
+                job: currentJob,
+                artifacts,
+                evidence
+              })
+            : undefined
+        }
+      >
+        <Download size={16} aria-hidden="true" />
+        Export JSON
+      </button>
+      <button
+        className="secondary-action compact"
+        type="button"
+        disabled
+        title="Rerun requires a backend rerun endpoint that is not available yet."
+      >
+        <RotateCcw size={16} aria-hidden="true" />
+        Rerun
+      </button>
+    </div>
+  );
+}
+
 function ArtifactList({
   artifacts,
   onArtifactSelect,
@@ -595,11 +793,17 @@ function ArtifactList({
 function ArtifactDetail({
   apiBaseUrl,
   artifact,
+  artifactPreview,
+  artifacts,
+  onArtifactSelect,
   currentJob
 }: {
   apiBaseUrl: string;
   artifact: Artifact | null;
+  artifactPreview: ArtifactPreview;
+  artifacts: Artifact[];
   currentJob: Job | null;
+  onArtifactSelect: (artifactId: string) => void;
 }) {
   if (!artifact) {
     return (
@@ -633,9 +837,120 @@ function ArtifactDetail({
         <span>Parent artifacts</span>
         <code>{formatIdList(artifact.parentArtifactIds)}</code>
       </div>
+      <ArtifactLineage artifact={artifact} artifacts={artifacts} onArtifactSelect={onArtifactSelect} />
+      <ArtifactPreviewPane artifact={artifact} preview={artifactPreview} />
       <div className="detail-actions">
         <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download artifact" />
       </div>
+    </div>
+  );
+}
+
+function ArtifactLineage({
+  artifact,
+  artifacts,
+  onArtifactSelect
+}: {
+  artifact: Artifact;
+  artifacts: Artifact[];
+  onArtifactSelect: (artifactId: string) => void;
+}) {
+  const parents = artifact.parentArtifactIds
+    .map((artifactId) => artifacts.find((candidate) => candidate.id === artifactId))
+    .filter((candidate): candidate is Artifact => Boolean(candidate));
+  const children = artifacts.filter((candidate) => candidate.parentArtifactIds.includes(artifact.id));
+
+  if (parents.length === 0 && children.length === 0) {
+    return (
+      <div className="lineage-panel">
+        <div className="lineage-heading">
+          <Link2 size={16} aria-hidden="true" />
+          <strong>Lineage</strong>
+        </div>
+        <EmptyState title="No linked artifacts" detail="Parent and child artifact relationships appear when lineage is recorded." />
+      </div>
+    );
+  }
+
+  return (
+    <div className="lineage-panel">
+      <div className="lineage-heading">
+        <Link2 size={16} aria-hidden="true" />
+        <strong>Lineage</strong>
+      </div>
+      <ArtifactLineageGroup label="Parents" artifacts={parents} onArtifactSelect={onArtifactSelect} />
+      <ArtifactLineageGroup label="Children" artifacts={children} onArtifactSelect={onArtifactSelect} />
+    </div>
+  );
+}
+
+function ArtifactLineageGroup({
+  artifacts,
+  label,
+  onArtifactSelect
+}: {
+  artifacts: Artifact[];
+  label: string;
+  onArtifactSelect: (artifactId: string) => void;
+}) {
+  return (
+    <div className="lineage-group">
+      <span>{label}</span>
+      {artifacts.length > 0 ? (
+        <div className="lineage-links">
+          {artifacts.map((artifact) => (
+            <button className="lineage-chip" key={artifact.id} type="button" onClick={() => onArtifactSelect(artifact.id)}>
+              <FileCode2 size={14} aria-hidden="true" />
+              {artifact.kind}
+              <small>{artifact.id}</small>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <strong>None</strong>
+      )}
+    </div>
+  );
+}
+
+function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; preview: ArtifactPreview }) {
+  const isCurrentPreview = preview.artifactId === artifact.id;
+  const status = isCurrentPreview ? preview.status : "idle";
+
+  return (
+    <div className="preview-panel">
+      <div className="preview-heading">
+        <div>
+          <span>Content preview</span>
+          <strong>{artifact.contentType}</strong>
+        </div>
+        <Eye size={18} aria-hidden="true" />
+      </div>
+      {status === "loading" ? (
+        <div className="preview-message">
+          <FileText size={18} aria-hidden="true" />
+          Loading artifact content
+        </div>
+      ) : null}
+      {status === "ready" && preview.text ? <pre className="artifact-preview-code">{preview.text}</pre> : null}
+      {status === "unsupported" ? (
+        <div className="preview-message preview-muted">
+          <AlertCircle size={18} aria-hidden="true" />
+          {preview.reason ?? "This artifact is not previewable in the browser."}
+        </div>
+      ) : null}
+      {status === "error" ? (
+        <div className="preview-message preview-error">
+          <AlertCircle size={18} aria-hidden="true" />
+          {preview.error ?? "Artifact preview failed."}
+        </div>
+      ) : null}
+      {status === "idle" ? (
+        <div className="preview-message preview-muted">
+          <FileText size={18} aria-hidden="true" />
+          Select a text or JSON artifact to load a preview.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -670,113 +985,190 @@ function ReportArtifactList({
   );
 }
 
-function AuditPanel({ evidence }: { evidence: JobEvidence }) {
+function AuditPanel({
+  artifacts,
+  currentJob,
+  evidence,
+  onArtifactSelect
+}: {
+  artifacts: Artifact[];
+  currentJob: Job | null;
+  evidence: JobEvidence;
+  onArtifactSelect: (artifactId: string) => void;
+}) {
+  const [filters, setFilters] = useState<AuditFilterState>({ category: "all", query: "", status: "all" });
+  const auditRecords = useMemo(() => buildAuditRecords(evidence), [evidence]);
+  const filteredRecords = useMemo(
+    () => auditRecords.filter((record) => auditRecordMatches(record, filters)),
+    [auditRecords, filters]
+  );
+  const attentionCount = auditRecords.filter((record) => auditRecordNeedsAttention(record)).length;
+
   return (
     <div className="audit-sections">
-      <section className="audit-section" aria-label="Inference records">
-        <div className="section-heading">
-          <h3>Inference records</h3>
-          <span>{evidence.inferenceRecords.length}</span>
+      <section className="audit-section" aria-label="Audit filters">
+        <div className="audit-toolbar">
+          <div className="audit-filter-icon">
+            <Filter size={18} aria-hidden="true" />
+          </div>
+          <label htmlFor="audit-search">
+            <span>Search</span>
+            <input
+              id="audit-search"
+              name="audit-search"
+              value={filters.query}
+              onChange={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
+              placeholder="Agent, decision, artifact, evidence"
+            />
+          </label>
+          <label htmlFor="audit-category">
+            <span>Record type</span>
+            <select
+              id="audit-category"
+              name="audit-category"
+              value={filters.category}
+              onChange={(event) =>
+                setFilters((current) => ({ ...current, category: event.currentTarget.value as AuditCategory }))
+              }
+            >
+              <option value="all">All records</option>
+              <option value="inference">Inference</option>
+              <option value="review">Review</option>
+              <option value="tool">Tool calls</option>
+            </select>
+          </label>
+          <label htmlFor="audit-status">
+            <span>Status</span>
+            <select
+              id="audit-status"
+              name="audit-status"
+              value={filters.status}
+              onChange={(event) =>
+                setFilters((current) => ({ ...current, status: event.currentTarget.value as AuditStatusFilter }))
+              }
+            >
+              <option value="all">All statuses</option>
+              <option value="attention">Needs attention</option>
+              <option value="pass">Passing</option>
+              <option value="fail">Failing</option>
+            </select>
+          </label>
+          <button
+            className="secondary-action compact"
+            type="button"
+            disabled={!currentJob || filteredRecords.length === 0}
+            onClick={() =>
+              currentJob
+                ? downloadJsonFile(`ai-jsunpack-${currentJob.id}-audit-filtered.json`, {
+                    exportedAt: new Date().toISOString(),
+                    jobId: currentJob.id,
+                    filters,
+                    artifactCount: artifacts.length,
+                    records: filteredRecords
+                  })
+                : undefined
+            }
+          >
+            <Download size={16} aria-hidden="true" />
+            Export view
+          </button>
         </div>
-        {evidence.inferenceRecords.length > 0 ? (
+        <div className="audit-summary-grid">
+          <div>
+            <span>Total</span>
+            <strong>{auditRecords.length}</strong>
+          </div>
+          <div>
+            <span>Attention</span>
+            <strong>{attentionCount}</strong>
+          </div>
+          <div>
+            <span>Visible</span>
+            <strong>{filteredRecords.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="audit-section" aria-label="Filtered audit records">
+        <div className="section-heading">
+          <h3>Audit records</h3>
+          <span>{filteredRecords.length}</span>
+        </div>
+        {filteredRecords.length > 0 ? (
           <div className="table-shell">
-            <table className="data-table">
+            <table className="data-table audit-ledger-table">
               <thead>
                 <tr>
                   <th>Type</th>
-                  <th>Agent</th>
-                  <th>Confidence</th>
-                  <th>Validation</th>
+                  <th>Subject</th>
+                  <th>Status</th>
                   <th>Evidence</th>
+                  <th>Artifacts</th>
                 </tr>
               </thead>
               <tbody>
-                {evidence.inferenceRecords.map((record) => (
+                {filteredRecords.map((record) => (
                   <tr key={record.id}>
-                    <td>{record.type}</td>
-                    <td>{record.agentName}</td>
-                    <td>{formatPercent(record.confidence)}</td>
-                    <td>{record.validationStatus}</td>
-                    <td>{formatEvidenceRefs(record.evidenceRefs)}</td>
+                    <td>
+                      <strong>{record.category}</strong>
+                      <span>{record.label}</span>
+                    </td>
+                    <td>
+                      <strong>{record.secondary}</strong>
+                      <span>{record.detail}</span>
+                    </td>
+                    <td>
+                      <StatusToken status={record.status} />
+                      {record.failureClass !== "none" ? <small>{record.failureClass}</small> : null}
+                    </td>
+                    <td>
+                      <EvidenceRefButtons refs={record.evidenceRefs} onArtifactSelect={onArtifactSelect} />
+                    </td>
+                    <td>{record.artifactIds.length > 0 ? formatIdList(record.artifactIds) : "None"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : (
-          <EmptyState title="No inference records" detail="Agent output records will appear after the agent_pass stage." />
+          <EmptyState title="No matching audit records" detail="Adjust filters or wait for worker audit artifacts." />
         )}
       </section>
+    </div>
+  );
+}
 
-      <section className="audit-section" aria-label="Review runs">
-        <div className="section-heading">
-          <h3>Review runs</h3>
-          <span>{evidence.reviewRuns.length}</span>
-        </div>
-        {evidence.reviewRuns.length > 0 ? (
-          <div className="table-shell">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Decision</th>
-                  <th>Failure</th>
-                  <th>Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {evidence.reviewRuns.map((run) => (
-                  <tr key={run.id}>
-                    <td>{run.reviewType}</td>
-                    <td>{run.status}</td>
-                    <td>{run.decision}</td>
-                    <td>{run.failureClass}</td>
-                    <td>{formatEvidenceRefs(run.evidenceRefs)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState title="No review runs" detail="Review and repair decisions will appear when the worker emits review artifacts." />
-        )}
-      </section>
+function StatusToken({ status }: { status: string }) {
+  const tone = statusTokenTone(status);
+  return <span className={`status-token status-token-${tone}`}>{status}</span>;
+}
 
-      <section className="audit-section" aria-label="Tool calls">
-        <div className="section-heading">
-          <h3>Tool calls</h3>
-          <span>{evidence.toolCalls.length}</span>
-        </div>
-        {evidence.toolCalls.length > 0 ? (
-          <div className="table-shell">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Tool</th>
-                  <th>Caller</th>
-                  <th>Status</th>
-                  <th>Duration</th>
-                  <th>Outputs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {evidence.toolCalls.map((call) => (
-                  <tr key={call.id}>
-                    <td>{call.toolName}</td>
-                    <td>{call.caller}</td>
-                    <td>{call.status}</td>
-                    <td>{formatDuration(call.duration)}</td>
-                    <td>{formatIdList(call.outputArtifactIds)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState title="No tool calls" detail="Tool registry calls are listed once the agent runtime records them." />
-        )}
-      </section>
+function EvidenceRefButtons({
+  onArtifactSelect,
+  refs
+}: {
+  onArtifactSelect: (artifactId: string) => void;
+  refs: EvidenceRef[];
+}) {
+  if (refs.length === 0) {
+    return <span className="muted-inline">None</span>;
+  }
+
+  return (
+    <div className="evidence-ref-list">
+      {refs.map((ref) => (
+        <button
+          className="evidence-ref-chip"
+          key={`${ref.artifactId}-${ref.label}-${ref.locator ?? ""}`}
+          type="button"
+          onClick={() => onArtifactSelect(ref.artifactId)}
+          title={[ref.label, ref.locator, ref.excerpt].filter(Boolean).join(" / ")}
+        >
+          <Link2 size={14} aria-hidden="true" />
+          <span>{ref.label}</span>
+          {ref.locator ? <small>{ref.locator}</small> : null}
+        </button>
+      ))}
     </div>
   );
 }
@@ -786,6 +1178,7 @@ function RuntimePanel({
   artifacts,
   currentJob,
   latestRuntime,
+  onArtifactSelect,
   runtimeMetrics,
   runtimeValidations
 }: {
@@ -793,6 +1186,7 @@ function RuntimePanel({
   artifacts: Artifact[];
   currentJob: Job | null;
   latestRuntime: RuntimeValidationRun | null;
+  onArtifactSelect: (artifactId: string) => void;
   runtimeMetrics: RuntimeMetric[];
   runtimeValidations: RuntimeValidationRun[];
 }) {
@@ -821,7 +1215,9 @@ function RuntimePanel({
             ]}
             artifacts={artifacts}
             currentJob={currentJob}
+            onArtifactSelect={onArtifactSelect}
           />
+          <RuntimeCompareStatus latestRuntime={latestRuntime} />
           <RuntimeIssueList title="Console errors" items={latestRuntime.consoleErrors} />
           <RuntimeIssueList title="Page errors" items={latestRuntime.pageErrors} />
           <RuntimeIssueList title="Failed requests" items={latestRuntime.failedRequests} />
@@ -836,11 +1232,14 @@ function RuntimePanel({
             <span>{runtimeValidations.length}</span>
           </div>
           {runtimeValidations.map((run) => (
-            <div className="history-row" key={run.id}>
-              <span>{run.status}</span>
-              <strong>{run.target}</strong>
-              <small>{run.entryUrl}</small>
-            </div>
+            <RuntimeRunDetail
+              apiBaseUrl={apiBaseUrl}
+              artifacts={artifacts}
+              currentJob={currentJob}
+              key={run.id}
+              onArtifactSelect={onArtifactSelect}
+              run={run}
+            />
           ))}
         </div>
       ) : null}
@@ -848,16 +1247,63 @@ function RuntimePanel({
   );
 }
 
+function RuntimeCompareStatus({ latestRuntime }: { latestRuntime: RuntimeValidationRun }) {
+  return (
+    <div className="runtime-compare-status">
+      <span>Runtime diff</span>
+      <strong>{latestRuntime.comparisonArtifactId ? "Comparison artifact recorded" : "Waiting for runtime_compare evidence"}</strong>
+    </div>
+  );
+}
+
+function RuntimeRunDetail({
+  apiBaseUrl,
+  artifacts,
+  currentJob,
+  onArtifactSelect,
+  run
+}: {
+  apiBaseUrl: string;
+  artifacts: Artifact[];
+  currentJob: Job | null;
+  onArtifactSelect: (artifactId: string) => void;
+  run: RuntimeValidationRun;
+}) {
+  return (
+    <div className="runtime-run-card">
+      <div className="history-row">
+        <StatusToken status={run.status} />
+        <strong>{run.target}</strong>
+        <small>{run.entryUrl}</small>
+      </div>
+      <div className="runtime-run-issues">
+        <RuntimeIssueList title="Console" items={run.consoleErrors} />
+        <RuntimeIssueList title="Page" items={run.pageErrors} />
+        <RuntimeIssueList title="Requests" items={run.failedRequests} />
+      </div>
+      <EvidenceArtifactLinks
+        apiBaseUrl={apiBaseUrl}
+        artifactIds={[...run.screenshotArtifactIds, run.traceArtifactId, run.comparisonArtifactId]}
+        artifacts={artifacts}
+        currentJob={currentJob}
+        onArtifactSelect={onArtifactSelect}
+      />
+    </div>
+  );
+}
+
 function EvidenceArtifactLinks({
   apiBaseUrl,
   artifactIds,
   artifacts,
-  currentJob
+  currentJob,
+  onArtifactSelect
 }: {
   apiBaseUrl: string;
   artifactIds: Array<string | null | undefined>;
   artifacts: Artifact[];
   currentJob: Job | null;
+  onArtifactSelect: (artifactId: string) => void;
 }) {
   const linkedArtifacts = artifactIds
     .filter((artifactId): artifactId is string => Boolean(artifactId))
@@ -871,13 +1317,13 @@ function EvidenceArtifactLinks({
   return (
     <div className="evidence-links" aria-label="Runtime evidence artifact downloads">
       {linkedArtifacts.map((artifact) => (
-        <ArtifactDownloadLink
-          apiBaseUrl={apiBaseUrl}
-          artifact={artifact}
-          currentJob={currentJob}
-          key={artifact.id}
-          label={artifact.kind}
-        />
+        <div className="evidence-link-group" key={artifact.id}>
+          <button className="download-link" type="button" onClick={() => onArtifactSelect(artifact.id)}>
+            <Link2 size={15} aria-hidden="true" />
+            {artifact.kind}
+          </button>
+          <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download" />
+        </div>
       ))}
     </div>
   );
@@ -916,6 +1362,15 @@ function ArtifactDownloadLink({
 }) {
   if (!currentJob) {
     return null;
+  }
+
+  if (!canDownloadArtifact(artifact)) {
+    return (
+      <span className="download-disabled">
+        <AlertCircle size={15} aria-hidden="true" />
+        Package required
+      </span>
+    );
   }
 
   return (
@@ -1008,6 +1463,137 @@ async function fetchJobEvidence(jobId: string): Promise<JobEvidence> {
     fetchToolCalls(jobId)
   ]);
   return { runtimeValidations, inferenceRecords, reviewRuns, toolCalls };
+}
+
+function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
+  if (artifact.kind === "generated_project") {
+    return { supported: false, reason: "Directory artifacts are previewed through a packaged result once packaging is available." };
+  }
+  if (artifact.kind === "result_package") {
+    return { supported: false, reason: "Result packages are binary downloads and are not rendered inline." };
+  }
+  if (artifact.kind === "runtime_screenshot") {
+    return { supported: false, reason: "Screenshots are image evidence. Use the download action to inspect the capture." };
+  }
+  if (artifact.size > previewMaxBytes) {
+    return { supported: false, reason: `Preview is limited to ${formatBytes(previewMaxBytes)} artifacts.` };
+  }
+  if (textualArtifactKinds.has(artifact.kind) || isTextContentType(artifact.contentType)) {
+    return { supported: true, reason: null };
+  }
+  return { supported: false, reason: `${artifact.contentType} is not treated as browser-previewable text.` };
+}
+
+function canDownloadArtifact(artifact: Artifact): boolean {
+  return artifact.kind !== "generated_project";
+}
+
+function isTextContentType(contentType: string): boolean {
+  const normalized = contentType.toLowerCase();
+  return (
+    normalized.startsWith("text/") ||
+    normalized.includes("json") ||
+    normalized.includes("javascript") ||
+    normalized.includes("xml")
+  );
+}
+
+function formatArtifactPreviewText(artifact: Artifact, text: string): string {
+  if (artifact.contentType.toLowerCase().includes("json") || text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) {
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {
+  return [
+    ...evidence.inferenceRecords.map((record) => ({
+      artifactIds: [...record.inputArtifactIds, ...record.outputArtifactIds],
+      category: "inference" as const,
+      detail: `confidence ${formatPercent(record.confidence)} / ${record.validationStatus}`,
+      evidenceRefs: record.evidenceRefs,
+      failureClass: "none",
+      id: record.id,
+      label: record.type,
+      secondary: record.agentName,
+      status: record.validationStatus
+    })),
+    ...evidence.reviewRuns.map((run) => ({
+      artifactIds: [run.logsArtifactId, ...run.repairInstructionIds].filter((artifactId): artifactId is string =>
+        Boolean(artifactId)
+      ),
+      category: "review" as const,
+      detail: run.decision,
+      evidenceRefs: run.evidenceRefs,
+      failureClass: run.failureClass,
+      id: run.id,
+      label: run.reviewType,
+      secondary: `attempt ${run.attempt}`,
+      status: run.status
+    })),
+    ...evidence.toolCalls.map((call) => ({
+      artifactIds: [...call.inputArtifactIds, ...call.outputArtifactIds],
+      category: "tool" as const,
+      detail: `${call.caller} / ${formatDuration(call.duration)}`,
+      evidenceRefs: [],
+      failureClass: call.failureClass,
+      id: call.id,
+      label: call.toolName,
+      secondary: call.toolVersion,
+      status: call.status
+    }))
+  ];
+}
+
+function auditRecordMatches(record: NormalizedAuditRecord, filters: AuditFilterState): boolean {
+  if (filters.category !== "all" && record.category !== filters.category) {
+    return false;
+  }
+  if (filters.status === "attention" && !auditRecordNeedsAttention(record)) {
+    return false;
+  }
+  if (filters.status === "pass" && statusTokenTone(record.status) !== "pass") {
+    return false;
+  }
+  if (filters.status === "fail" && statusTokenTone(record.status) !== "fail") {
+    return false;
+  }
+  const query = filters.query.trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  const haystack = [
+    record.category,
+    record.detail,
+    record.failureClass,
+    record.id,
+    record.label,
+    record.secondary,
+    record.status,
+    ...record.artifactIds,
+    ...record.evidenceRefs.flatMap((ref) => [ref.artifactId, ref.label, ref.locator ?? "", ref.excerpt ?? ""])
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query);
+}
+
+function auditRecordNeedsAttention(record: NormalizedAuditRecord): boolean {
+  return record.failureClass !== "none" || ["best_effort", "fail", "needs_review", "rejected", "retry", "unverified"].includes(record.status);
+}
+
+function statusTokenTone(status: string): "pass" | "warn" | "fail" {
+  if (status === "pass" || status === "accepted") {
+    return "pass";
+  }
+  if (status === "fail" || status === "rejected") {
+    return "fail";
+  }
+  return "warn";
 }
 
 function buildStageItems(currentStatus: JobStatus | undefined): StageItem[] {
@@ -1145,6 +1731,16 @@ function formatIdList(ids: string[]): string {
 
 function artifactDownloadUrl(apiBaseUrl: string, jobId: string, artifactId: string): string {
   return `${apiBaseUrl}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
+function downloadJsonFile(filename: string, payload: unknown): void {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function errorMessage(error: unknown): string {
