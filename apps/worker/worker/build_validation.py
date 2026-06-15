@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import asdict, dataclass, field
@@ -22,7 +23,14 @@ from apps.api.app.models import (
     SandboxResourcePolicy as SandboxResourcePolicyModel,
     TypeScriptDiagnostic,
 )
-from packages.sandbox import LocalSandboxRunner, SandboxCommand, SandboxPolicy, SandboxResult
+from packages.sandbox import (
+    DEFAULT_CONTAINER_IMAGE,
+    ContainerSandboxRunner,
+    LocalSandboxRunner,
+    SandboxCommand,
+    SandboxPolicy,
+    SandboxResult,
+)
 
 
 DEFAULT_NODE_EXECUTABLE = shutil.which("node") or "node"
@@ -58,6 +66,7 @@ TSC_GLOBAL_DIAGNOSTIC_RE = re.compile(
 BuildStage = Literal["building", "typechecking"]
 BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
+SandboxRunnerKind = Literal["local", "container"]
 
 
 class BuildValidationError(RuntimeError):
@@ -68,6 +77,9 @@ class BuildValidationError(RuntimeError):
 class BuildValidationConfig:
     max_attempts: int = 2
     install_dependencies: bool = False
+    sandbox_runner: SandboxRunnerKind = "local"
+    container_image: str = DEFAULT_CONTAINER_IMAGE
+    container_runtime_command: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +161,7 @@ class BuildValidationRunner:
 
     def __init__(
         self,
-        sandbox_runner: LocalSandboxRunner | None = None,
+        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | None = None,
         build_command: Sequence[str] = DEFAULT_BUILD_COMMAND,
         typecheck_command: Sequence[str] = DEFAULT_TYPECHECK_COMMAND,
     ) -> None:
@@ -158,20 +170,8 @@ class BuildValidationRunner:
         self.use_package_scripts = (
             self.build_command == DEFAULT_BUILD_COMMAND and self.typecheck_command == DEFAULT_TYPECHECK_COMMAND
         )
-        self.sandbox_runner = sandbox_runner or LocalSandboxRunner(
-            SandboxPolicy(
-                allowed_commands=(
-                    self.build_command,
-                    self.typecheck_command,
-                    DEFAULT_NPM_INSTALL_COMMAND,
-                    DEFAULT_NPM_BUILD_COMMAND,
-                    DEFAULT_NPM_TYPECHECK_COMMAND,
-                    DEFAULT_NPM_CHECK_COMMAND,
-                ),
-                timeout_ms=120_000,
-                output_limit_bytes=128 * 1024,
-            )
-        )
+        self._provided_sandbox_runner = sandbox_runner
+        self.sandbox_runner = sandbox_runner or self._sandbox_runner_for_config(BuildValidationConfig())
 
     def run(
         self,
@@ -191,6 +191,7 @@ class BuildValidationRunner:
             source_project_parents.append(generated_project_artifact.id)
 
         config = self._config(job_id=job_id, store=store)
+        self.sandbox_runner = self._provided_sandbox_runner or self._sandbox_runner_for_config(config)
         if source_project_path is None or not source_project_path.is_dir():
             build = self._persist_best_effort(
                 job_id=job_id,
@@ -775,10 +776,59 @@ class BuildValidationRunner:
         except (TypeError, ValueError):
             max_attempts = 2
         max_attempts = max(1, min(max_attempts, 5))
+        sandbox_runner = self._sandbox_runner_name(config.get("sandboxRunner") or os.getenv("AI_JSUNPACK_SANDBOX_RUNNER"))
+        container_image = self._string_config(
+            config.get("containerImage") or os.getenv("AI_JSUNPACK_SANDBOX_IMAGE"),
+            default=DEFAULT_CONTAINER_IMAGE,
+        )
         return BuildValidationConfig(
             max_attempts=max_attempts,
             install_dependencies=bool(config.get("installDependencies", False)),
+            sandbox_runner=sandbox_runner,
+            container_image=container_image,
+            container_runtime_command=self._container_runtime_command_config(config.get("containerRuntimeCommand")),
         )
+
+    def _sandbox_runner_for_config(self, config: BuildValidationConfig) -> LocalSandboxRunner | ContainerSandboxRunner:
+        policy = self._sandbox_policy()
+        if config.sandbox_runner == "container":
+            return ContainerSandboxRunner(
+                policy,
+                image=config.container_image,
+                runtime_command=config.container_runtime_command,
+            )
+        return LocalSandboxRunner(policy)
+
+    def _sandbox_policy(self) -> SandboxPolicy:
+        return SandboxPolicy(
+            allowed_commands=(
+                self.build_command,
+                self.typecheck_command,
+                DEFAULT_NPM_INSTALL_COMMAND,
+                DEFAULT_NPM_BUILD_COMMAND,
+                DEFAULT_NPM_TYPECHECK_COMMAND,
+                DEFAULT_NPM_CHECK_COMMAND,
+            ),
+            timeout_ms=120_000,
+            output_limit_bytes=128 * 1024,
+        )
+
+    def _sandbox_runner_name(self, value: Any) -> SandboxRunnerKind:
+        if isinstance(value, str) and value.strip().lower() == "container":
+            return "container"
+        return "local"
+
+    def _string_config(self, value: Any, *, default: str) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return default
+
+    def _container_runtime_command_config(self, value: Any) -> tuple[str, ...] | None:
+        if isinstance(value, list) and all(isinstance(part, str) and part for part in value):
+            return tuple(value)
+        if isinstance(value, tuple) and all(isinstance(part, str) and part for part in value):
+            return tuple(value)
+        return None
 
     def _latest_generated_project(self, *, job_id: str, store) -> ArtifactRecord | None:
         artifacts = store.list_artifacts(job_id, kind="generated_project")

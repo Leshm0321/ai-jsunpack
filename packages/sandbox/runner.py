@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import math
+import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterator, Literal, Mapping, Sequence
 
@@ -13,8 +15,9 @@ from apps.api.app.models import FailureClass
 
 
 NetworkPolicy = Literal["deny", "allow"]
-ResourcePolicyEnforcement = Literal["local_best_effort"]
+ResourcePolicyEnforcement = Literal["local_best_effort", "container_enforced"]
 AllowedCommand = str | Sequence[str]
+DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
 
 
 @dataclass(frozen=True)
@@ -269,3 +272,175 @@ class LocalSandboxRunner:
 
     def _duration_ms(self, started_at: float) -> int:
         return int((time.perf_counter() - started_at) * 1000)
+
+
+class ContainerSandboxRunner(LocalSandboxRunner):
+    """Runs sandbox commands through Docker or Podman with container-level limits."""
+
+    def __init__(
+        self,
+        policy: SandboxPolicy | None = None,
+        *,
+        image: str = DEFAULT_CONTAINER_IMAGE,
+        runtime_command: Sequence[str] | None = None,
+    ) -> None:
+        self.image = image
+        self.runtime_command = tuple(runtime_command) if runtime_command is not None else None
+        super().__init__(self._container_policy(policy or SandboxPolicy()))
+
+    def run_in_workspace(
+        self,
+        command: SandboxCommand,
+        workspace: Path,
+        *,
+        started_at: float | None = None,
+    ) -> SandboxResult:
+        started = started_at if started_at is not None else time.perf_counter()
+        denied_reason = self._denied_reason(command, workspace)
+        if denied_reason is not None:
+            return self._denied_result(command, workspace, started, denied_reason)
+
+        runtime_command = self._runtime_command()
+        if runtime_command is None:
+            return self._denied_result(
+                command,
+                workspace,
+                started,
+                "Container runtime is not available; install docker or podman, or use the local sandbox runner.",
+            )
+
+        working_directory = self._working_directory(command, workspace)
+        working_directory.mkdir(parents=True, exist_ok=True)
+        container_argv = self._container_argv(
+            runtime_command=runtime_command,
+            command=command,
+            workspace=workspace,
+            working_directory=working_directory,
+        )
+        try:
+            process = subprocess.Popen(
+                container_argv,
+                cwd=workspace,
+                env=self._environment(command),
+                stdin=subprocess.PIPE if command.stdin is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+        except OSError as error:
+            return SandboxResult(
+                command=command.argv,
+                stdout="",
+                stderr=str(error),
+                exit_code=None,
+                duration_ms=self._duration_ms(started),
+                failure_class=command.failure_class,
+                timed_out=False,
+                output_truncated=False,
+                working_directory=str(working_directory),
+                network_policy=self.policy.network_policy,
+                resource_policy=self.policy.resource_policy,
+            )
+
+        timed_out = False
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(
+                input=command.stdin,
+                timeout=max(self.policy.timeout_ms, 1) / 1000,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            stdout_bytes, stderr_bytes = process.communicate()
+
+        stdout, stderr, output_truncated = self._decode_limited_output(stdout_bytes, stderr_bytes)
+        failure_class = self._failure_class(
+            exit_code=process.returncode,
+            timed_out=timed_out,
+            output_truncated=output_truncated,
+            command_failure_class=command.failure_class,
+        )
+        return SandboxResult(
+            command=command.argv,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode,
+            duration_ms=self._duration_ms(started),
+            failure_class=failure_class,
+            timed_out=timed_out,
+            output_truncated=output_truncated,
+            working_directory=str(working_directory),
+            network_policy=self.policy.network_policy,
+            resource_policy=self.policy.resource_policy,
+        )
+
+    def _container_policy(self, policy: SandboxPolicy) -> SandboxPolicy:
+        resource_policy = policy.resource_policy
+        limitations = tuple(resource_policy.limitations or ())
+        local_default_limitations = SandboxResourcePolicy().limitations
+        if not limitations:
+            limitations = (
+                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
+            )
+        elif resource_policy.enforcement == "local_best_effort" and limitations == local_default_limitations:
+            limitations = (
+                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
+            )
+        elif resource_policy.enforcement == "local_best_effort":
+            limitations = (
+                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
+                *limitations,
+            )
+        return replace(
+            policy,
+            resource_policy=replace(
+                resource_policy,
+                enforcement="container_enforced",
+                limitations=limitations,
+            ),
+        )
+
+    def _runtime_command(self) -> tuple[str, ...] | None:
+        if self.runtime_command is not None:
+            return self.runtime_command or None
+        for candidate in ("docker", "podman"):
+            resolved = shutil.which(candidate)
+            if resolved is not None:
+                return (resolved,)
+        return None
+
+    def _container_argv(
+        self,
+        *,
+        runtime_command: tuple[str, ...],
+        command: SandboxCommand,
+        workspace: Path,
+        working_directory: Path,
+    ) -> list[str]:
+        argv = [*runtime_command, "run", "--rm"]
+        if command.stdin is not None:
+            argv.append("-i")
+        if self.policy.network_policy == "deny":
+            argv.extend(["--network", "none"])
+        if self.policy.resource_policy.process_limit is not None:
+            argv.extend(["--pids-limit", str(self.policy.resource_policy.process_limit)])
+        if self.policy.resource_policy.memory_limit_bytes is not None:
+            argv.extend(["--memory", str(self.policy.resource_policy.memory_limit_bytes)])
+        if self.policy.resource_policy.cpu_time_limit_ms is not None:
+            cpu_seconds = max(1, math.ceil(self.policy.resource_policy.cpu_time_limit_ms / 1000))
+            argv.extend(["--ulimit", f"cpu={cpu_seconds}"])
+
+        resolved_workspace = workspace.resolve()
+        resolved_working_directory = working_directory.resolve()
+        relative_workdir = resolved_working_directory.relative_to(resolved_workspace).as_posix()
+        container_workdir = "/workspace" if relative_workdir == "." else f"/workspace/{relative_workdir}"
+        argv.extend(["-v", f"{resolved_workspace}:/workspace", "-w", container_workdir])
+        for name, value in self._container_environment(command).items():
+            argv.extend(["-e", f"{name}={value}"])
+        argv.append(self.image)
+        argv.extend(command.argv)
+        return argv
+
+    def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
+        allowed_names = set(self.policy.allowed_environment)
+        return {name: value for name, value in command.environment.items() if name in allowed_names}

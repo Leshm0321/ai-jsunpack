@@ -1,4 +1,6 @@
 from .runner import (
+    DEFAULT_CONTAINER_IMAGE,
+    ContainerSandboxRunner,
     LocalSandboxRunner,
     SandboxCommand,
     SandboxPolicy,
@@ -7,6 +9,8 @@ from .runner import (
 )
 
 __all__ = [
+    "DEFAULT_CONTAINER_IMAGE",
+    "ContainerSandboxRunner",
     "LocalSandboxRunner",
     "SandboxCommand",
     "SandboxPolicy",

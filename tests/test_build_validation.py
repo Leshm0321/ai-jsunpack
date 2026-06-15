@@ -174,6 +174,46 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertIn("package build ok", build_log["stdout"])
         self.assertIn("package typecheck ok", typecheck_log["stdout"])
 
+    def test_uses_container_runner_when_configured(self):
+        fake_runtime = self.root / "fake_container_runtime.py"
+        fake_runtime.write_text(
+            (
+                "import json, sys\n"
+                "print(json.dumps({'argv': sys.argv[1:]}))\n"
+            ),
+            encoding="utf-8",
+        )
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={
+                    "buildValidation": {
+                        "sandboxRunner": "container",
+                        "containerImage": "ai-jsunpack-container-test-image",
+                        "containerRuntimeCommand": [sys.executable, str(fake_runtime)],
+                    }
+                },
+            )
+        )
+        project_root = self.root / "generated-container"
+        (project_root / "scripts").mkdir(parents=True)
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        (project_root / "scripts" / "build.mjs").write_text("console.log('build')", encoding="utf-8")
+        (project_root / "scripts" / "typecheck.mjs").write_text("console.log('typecheck')", encoding="utf-8")
+
+        result = BuildValidationRunner().run(job_id=job.id, store=self.store, project_path=project_root)
+
+        build_artifact = json.loads(Path(result.build.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        runtime_payload = json.loads(build_log["stdout"])
+        self.assertEqual(result.build.review_run.status, "pass")
+        self.assertEqual(result.typecheck.review_run.status, "pass")
+        self.assertEqual(build_artifact["resourcePolicy"]["enforcement"], "container_enforced")
+        self.assertEqual(build_artifact["networkPolicy"], "deny")
+        self.assertIn("--network", runtime_payload["argv"])
+        self.assertIn("ai-jsunpack-container-test-image", runtime_payload["argv"])
+
     def test_failed_attempt_writes_repair_instruction_and_repaired_project_artifact(self):
         project_root = self.root / "generated"
         (project_root / "scripts").mkdir(parents=True)

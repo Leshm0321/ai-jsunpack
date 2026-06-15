@@ -166,7 +166,7 @@ export interface SandboxResourcePolicy {
   processLimit?: number | null;
   cpuTimeLimitMs?: number | null;
   memoryLimitBytes?: number | null;
-  enforcement: "local_best_effort";
+  enforcement: "local_best_effort" | "container_enforced";
   limitations: string[];
 }
 
@@ -354,7 +354,7 @@ const sandboxResourcePolicySchema = {
     processLimit: { type: "integer", minimum: 1 },
     cpuTimeLimitMs: { type: "integer", minimum: 1 },
     memoryLimitBytes: { type: "integer", minimum: 1 },
-    enforcement: { type: "string", enum: ["local_best_effort"] },
+    enforcement: { type: "string", enum: ["local_best_effort", "container_enforced"] },
     limitations: stringArraySchema
   },
   required: ["enforcement", "limitations"],

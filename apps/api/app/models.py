@@ -88,7 +88,7 @@ BuildValidationStage = Literal["building", "typechecking"]
 BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
 NetworkPolicy = Literal["deny", "allow"]
-SandboxResourceEnforcement = Literal["local_best_effort"]
+SandboxResourceEnforcement = Literal["local_best_effort", "container_enforced"]
 DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
 DiagnosticSource = Literal["stdout", "stderr"]
 
