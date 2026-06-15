@@ -124,21 +124,29 @@ class WorkerPipeline:
                 producer="worker.core",
                 parent_artifact_ids=[inventory_artifact.id],
             )
+            job = store.get_job(job_id)
+            if job is None:
+                raise AgentRuntimeError(f"Job not found during Agent runtime setup: {job_id}")
             agent_request = AgentRuntimeRequest(
                 job_id=job_id,
+                project_id=job.project_id,
+                cloud_mode=job.cloud_mode,
+                job_config=job.config,
                 inventory_artifact_id=inventory_artifact.id,
                 ast_index_artifact_id=ast_artifact.id,
                 inventory_payload=result.inventory_artifact_payload,
                 ast_index_payload=result.ast_index_artifact_payload,
             )
             agent_result = self.agent_runtime.run(job_id=job_id, store=store, request=agent_request)
-            run.transition("agent_planning", "CrewAI stub planner context persisted.")
+            run.transition("agent_planning", "CrewAI planner context and evidence persisted.")
             run.transition("agent_pass", agent_result.message)
 
             evidence_parent_ids = [
                 inventory_artifact.id,
                 ast_artifact.id,
                 agent_result.plan_artifact.id,
+                agent_result.memory_artifact.id,
+                agent_result.knowledge_artifact.id,
                 *[artifact.id for artifact in agent_result.inference_artifacts],
                 agent_result.review_artifact.id,
                 agent_result.tool_call_artifact.id,
@@ -179,7 +187,7 @@ class WorkerPipeline:
             "parsing": "HTML, JS, CSS, source map, and manifest parsing scheduled.",
             "indexing": "AST, symbol, source range, and resource indexes scheduled.",
             "analyzing": "Runtime and bundle pattern analysis scheduled.",
-            "agent_planning": "CrewAI planner context prepared.",
+            "agent_planning": "CrewAI planner context and evidence prepared.",
             "agent_pass": "Semantic inference pass scheduled.",
             "reconstructing": "Deterministic writer scheduled.",
             "building": "Sandbox build scheduled.",

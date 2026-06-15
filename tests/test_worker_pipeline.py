@@ -86,6 +86,8 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
                 self.assertIn("agent_plan", artifact_by_kind)
+                self.assertIn("memory_record", artifact_by_kind)
+                self.assertIn("knowledge_evidence", artifact_by_kind)
                 self.assertIn("build_log", artifact_by_kind)
                 self.assertIn("review_run", artifact_by_kind)
                 self.assertIn("tool_call", artifact_by_kind)
@@ -100,10 +102,14 @@ class WorkerPipelineTest(unittest.TestCase):
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
+                memory_artifact = artifact_by_kind["memory_record"]
+                knowledge_artifact = artifact_by_kind["knowledge_evidence"]
                 agent_plan_artifact = artifact_by_kind["agent_plan"]
                 tool_call_artifact = artifact_by_kind["tool_call"]
                 inventory_payload = json.loads(Path(inventory_artifact.storage_uri).read_text(encoding="utf-8"))
                 ast_index_payload = json.loads(Path(ast_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                memory_payload = json.loads(Path(memory_artifact.storage_uri).read_text(encoding="utf-8"))
+                knowledge_payload = json.loads(Path(knowledge_artifact.storage_uri).read_text(encoding="utf-8"))
                 agent_plan_payload = json.loads(Path(agent_plan_artifact.storage_uri).read_text(encoding="utf-8"))
                 inference_payload = json.loads(Path(inference_artifacts[0].storage_uri).read_text(encoding="utf-8"))
                 review_payloads = [
@@ -140,20 +146,39 @@ class WorkerPipelineTest(unittest.TestCase):
                     any(symbol["name"] == "boot" for symbol in ast_index_payload["astIndexes"][0]["symbols"])
                 )
                 self.assertEqual(agent_plan_payload["kind"], "agent_plan")
-                self.assertEqual(agent_plan_payload["provider"], "crewai_stub")
-                self.assertEqual(agent_plan_artifact.parent_artifact_ids, [inventory_artifact.id, ast_index_artifact.id])
-                self.assertEqual(inference_payload["modelProvider"], "crewai_stub")
-                self.assertEqual(inference_payload["inputArtifactIds"], [inventory_artifact.id, ast_index_artifact.id])
+                self.assertEqual(memory_payload["memoryType"], "short_term")
+                self.assertIn("boot", memory_payload["content"])
+                self.assertEqual(knowledge_payload["kind"], "knowledge_evidence")
+                self.assertTrue(knowledge_payload["hits"])
+                self.assertEqual(agent_plan_payload["provider"], "crewai")
+                self.assertEqual(agent_plan_payload["runtimeStatus"], "policy_denied")
+                self.assertFalse(agent_plan_payload["modelPolicy"]["allowed"])
+                self.assertEqual(agent_plan_payload["memoryRecordArtifactId"], memory_artifact.id)
+                self.assertEqual(agent_plan_payload["knowledgeEvidenceArtifactId"], knowledge_artifact.id)
+                self.assertEqual(
+                    agent_plan_artifact.parent_artifact_ids,
+                    [inventory_artifact.id, ast_index_artifact.id, memory_artifact.id, knowledge_artifact.id],
+                )
+                self.assertEqual(inference_payload["modelProvider"], "local")
+                self.assertEqual(
+                    inference_payload["inputArtifactIds"],
+                    [inventory_artifact.id, ast_index_artifact.id, memory_artifact.id, knowledge_artifact.id],
+                )
                 self.assertEqual(inference_payload["outputArtifactIds"], [agent_plan_artifact.id])
+                self.assertTrue(
+                    any(ref["artifactId"] == knowledge_artifact.id for ref in inference_payload["evidenceRefs"])
+                )
                 self.assertEqual(review_payload["reviewType"], "agent_review")
                 self.assertEqual(review_payload["status"], "best_effort")
+                self.assertEqual(review_payload["failureClass"], "policy_denied")
                 self.assertEqual(build_log_payload["status"], "best_effort")
                 self.assertEqual(typecheck_log_payload["status"], "best_effort")
                 self.assertIn("generated_project", build_log_payload["limitations"][0])
                 self.assertEqual(build_review_payload["logsArtifactId"], build_log_artifact.id)
                 self.assertEqual(typecheck_review_payload["logsArtifactId"], typecheck_log_artifact.id)
-                self.assertEqual(tool_call_payload["toolName"], "crewai_stub.agent_pass")
-                self.assertEqual(tool_call_payload["status"], "pass")
+                self.assertEqual(tool_call_payload["toolName"], "crewai.agent_pass")
+                self.assertEqual(tool_call_payload["status"], "fail")
+                self.assertEqual(tool_call_payload["failureClass"], "policy_denied")
                 self.assertIn(review_artifact.id, tool_call_payload["outputArtifactIds"])
                 runtime_payload = json.loads(
                     Path(artifact_by_kind["runtime_validation"].storage_uri).read_text(encoding="utf-8")

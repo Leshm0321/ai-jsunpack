@@ -47,6 +47,8 @@ ArtifactKind = Literal[
     "runtime_screenshot",
     "review_run",
     "tool_call",
+    "memory_record",
+    "knowledge_evidence",
     "repair_instruction",
     "result_package",
     "audit_report",

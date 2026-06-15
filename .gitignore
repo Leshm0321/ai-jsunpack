@@ -6,6 +6,7 @@ build/
 .codex/
 .idea/
 .omx/
+.crewai-data/
 .pytest_cache/
 __pycache__/
 *.pyc
