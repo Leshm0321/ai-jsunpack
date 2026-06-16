@@ -19,14 +19,21 @@ from apps.api.app.models import (
     NetworkPolicy,
     RunStatus,
     RuntimeCaptureSummary,
+    RuntimeCollectionDiff,
     RuntimeComparisonReport,
+    RuntimeComparisonScope,
     RuntimeDifferenceSet,
+    RuntimeDomDifference,
     RuntimeScenario,
+    RuntimeScreenshotDiff,
     RuntimeTarget,
     RuntimeValidationRun,
+    RuntimeViewport,
     RuntimeWaitFor,
 )
 from packages.sandbox import LocalSandboxRunner
+
+DEFAULT_VIEWPORT = {"width": 1365, "height": 768}
 
 
 @dataclass(frozen=True)
@@ -80,7 +87,7 @@ class PlaywrightBrowserAdapter:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
                 try:
-                    page = browser.new_page(viewport={"width": 1365, "height": 768})
+                    page = browser.new_page(viewport=dict(DEFAULT_VIEWPORT))
                     if request.network_policy == "deny":
                         page.route("**/*", lambda route: self._route_network(route, failed_requests))
                     page.on("console", lambda message: self._capture_console(message, console_messages, console_errors))
@@ -626,8 +633,11 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         differences = self._compare_captures(
             original=original["summary"],
             reconstructed=reconstructed["summary"],
+            scenario=scenario,
             original_screenshot_hash=original["screenshot_hash"],
             reconstructed_screenshot_hash=reconstructed["screenshot_hash"],
+            original_screenshot_size=original["screenshot_size"],
+            reconstructed_screenshot_size=reconstructed["screenshot_size"],
         )
         status = self._comparison_status(original["summary"], reconstructed["summary"])
         comparison = RuntimeComparisonReport(
@@ -764,7 +774,9 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
 
         screenshot_artifact = None
         screenshot_hash = None
+        screenshot_size = None
         if screenshot_bytes is not None:
+            screenshot_size = len(screenshot_bytes)
             screenshot_hash = hashlib.sha256(screenshot_bytes).hexdigest()
             screenshot_artifact = store.write_artifact(
                 job_id,
@@ -793,7 +805,12 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             duration_ms=self._duration_ms(started_at),
             limitations=limitations,
         )
-        return {"summary": summary, "screenshot": screenshot_artifact, "screenshot_hash": screenshot_hash}
+        return {
+            "summary": summary,
+            "screenshot": screenshot_artifact,
+            "screenshot_hash": screenshot_hash,
+            "screenshot_size": screenshot_size,
+        }
 
     def _resolve_scenario_entry(self, *, input_path: Path | str | None, scenario: RuntimeScenario) -> RuntimeEntry:
         if scenario.entry_url:
@@ -825,13 +842,16 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         *,
         original: RuntimeCaptureSummary,
         reconstructed: RuntimeCaptureSummary,
+        scenario: RuntimeScenario,
         original_screenshot_hash: str | None,
         reconstructed_screenshot_hash: str | None,
+        original_screenshot_size: int | None,
+        reconstructed_screenshot_size: int | None,
     ) -> RuntimeDifferenceSet:
-        original_requests = set(original.responses + original.failed_requests)
-        reconstructed_requests = set(reconstructed.responses + reconstructed.failed_requests)
-        original_console = set(original.console_messages + original.console_errors)
-        reconstructed_console = set(reconstructed.console_messages + reconstructed.console_errors)
+        original_requests = sorted(set(original.responses + original.failed_requests))
+        reconstructed_requests = sorted(set(reconstructed.responses + reconstructed.failed_requests))
+        original_console = sorted(set(original.console_messages + original.console_errors))
+        reconstructed_console = sorted(set(reconstructed.console_messages + reconstructed.console_errors))
         changed_dom_fields = sorted(
             key
             for key in set(original.dom_summary) | set(reconstructed.dom_summary)
@@ -847,12 +867,131 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             dom_changed=bool(changed_dom_fields),
             network_changed=original_requests != reconstructed_requests,
             console_changed=original_console != reconstructed_console,
-            original_only_requests=sorted(original_requests - reconstructed_requests),
-            reconstructed_only_requests=sorted(reconstructed_requests - original_requests),
-            original_only_console=sorted(original_console - reconstructed_console),
-            reconstructed_only_console=sorted(reconstructed_console - original_console),
+            original_only_requests=sorted(set(original_requests) - set(reconstructed_requests)),
+            reconstructed_only_requests=sorted(set(reconstructed_requests) - set(original_requests)),
+            original_only_console=sorted(set(original_console) - set(reconstructed_console)),
+            reconstructed_only_console=sorted(set(reconstructed_console) - set(original_console)),
             changed_dom_fields=changed_dom_fields,
+            screenshot_diff=self._screenshot_diff(
+                changed=screenshot_changed,
+                original_hash=original_screenshot_hash,
+                reconstructed_hash=reconstructed_screenshot_hash,
+                original_size=original_screenshot_size,
+                reconstructed_size=reconstructed_screenshot_size,
+            ),
+            dom_differences=self._dom_differences(original.dom_summary, reconstructed.dom_summary),
+            network_diff=self._collection_diff(original_requests, reconstructed_requests, "network"),
+            console_diff=self._collection_diff(original_console, reconstructed_console, "console"),
+            comparison_scope=RuntimeComparisonScope(
+                scenario_name=scenario.name,
+                network_policy=scenario.network_policy,
+                timeout_ms=scenario.timeout_ms,
+                viewport=RuntimeViewport(**DEFAULT_VIEWPORT),
+            ),
         )
+
+    def _screenshot_diff(
+        self,
+        *,
+        changed: bool | None,
+        original_hash: str | None,
+        reconstructed_hash: str | None,
+        original_size: int | None,
+        reconstructed_size: int | None,
+    ) -> RuntimeScreenshotDiff:
+        if original_hash is None or reconstructed_hash is None:
+            reason = "One or both runtime comparison screenshots were unavailable."
+        else:
+            reason = "Screenshot bytes were compared by sha256; pixel-level diff requires an image decoder in the sandbox runtime."
+        return RuntimeScreenshotDiff(
+            changed=changed,
+            original_hash=original_hash,
+            reconstructed_hash=reconstructed_hash,
+            original_size_bytes=original_size,
+            reconstructed_size_bytes=reconstructed_size,
+            pixel_diff_status="unavailable",
+            reason=reason,
+        )
+
+    def _dom_differences(self, original: dict[str, Any], reconstructed: dict[str, Any]) -> list[RuntimeDomDifference]:
+        original_flat = self._flatten_dom_summary(original)
+        reconstructed_flat = self._flatten_dom_summary(reconstructed)
+        differences: list[RuntimeDomDifference] = []
+        for path in sorted(set(original_flat) | set(reconstructed_flat)):
+            original_value = original_flat.get(path)
+            reconstructed_value = reconstructed_flat.get(path)
+            if original_value == reconstructed_value:
+                continue
+            differences.append(
+                RuntimeDomDifference(
+                    path=path,
+                    original=original_value,
+                    reconstructed=reconstructed_value,
+                    summary=f"DOM summary path {path} changed.",
+                )
+            )
+        return differences[:80]
+
+    def _flatten_dom_summary(self, value: Any, prefix: str = "", depth: int = 0) -> dict[str, Any]:
+        if depth >= 4 or value is None or isinstance(value, (str, int, float, bool)):
+            return {prefix or "value": value}
+        if isinstance(value, dict):
+            flattened: dict[str, Any] = {}
+            for key in sorted(value):
+                path = f"{prefix}.{key}" if prefix else str(key)
+                flattened.update(self._flatten_dom_summary(value[key], path, depth + 1))
+            return flattened
+        if isinstance(value, list):
+            flattened = {}
+            for index, item in enumerate(value[:12]):
+                path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                flattened.update(self._flatten_dom_summary(item, path, depth + 1))
+            if len(value) > 12:
+                flattened[f"{prefix}.truncated" if prefix else "truncated"] = len(value) - 12
+            return flattened
+        return {prefix or "value": str(value)}
+
+    def _collection_diff(
+        self,
+        original_items: list[str],
+        reconstructed_items: list[str],
+        group_kind: str,
+    ) -> RuntimeCollectionDiff:
+        original_set = set(original_items)
+        reconstructed_set = set(reconstructed_items)
+        combined = sorted(original_set | reconstructed_set)
+        return RuntimeCollectionDiff(
+            changed=original_set != reconstructed_set,
+            original_count=len(original_items),
+            reconstructed_count=len(reconstructed_items),
+            shared=sorted(original_set & reconstructed_set),
+            original_only=sorted(original_set - reconstructed_set),
+            reconstructed_only=sorted(reconstructed_set - original_set),
+            groups=self._group_runtime_lines(combined, group_kind),
+        )
+
+    def _group_runtime_lines(self, items: list[str], group_kind: str) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = {}
+        for item in items:
+            key = self._runtime_line_group(item, group_kind)
+            groups.setdefault(key, []).append(item)
+        return groups
+
+    def _runtime_line_group(self, item: str, group_kind: str) -> str:
+        if group_kind == "network":
+            first_token = item.split(" ", 1)[0]
+            if first_token.isdigit():
+                status = int(first_token)
+                return f"status_{status // 100}xx"
+            if item.startswith("network_policy_denied"):
+                return "policy_denied"
+            if "request failed" in item:
+                return "request_failed"
+            return "network_other"
+        message_type = item.split(":", 1)[0].strip().lower()
+        if message_type in {"error", "warning", "warn", "log", "info", "debug"}:
+            return message_type
+        return "console_other"
 
     def _comparison_status(self, original: RuntimeCaptureSummary, reconstructed: RuntimeCaptureSummary) -> RunStatus:
         statuses = {original.status, reconstructed.status}

@@ -263,6 +263,45 @@ export interface RuntimeCaptureSummary {
   limitations: string[];
 }
 
+export interface RuntimeScreenshotDiff {
+  changed?: boolean | null;
+  originalHash?: string | null;
+  reconstructedHash?: string | null;
+  originalSizeBytes?: number | null;
+  reconstructedSizeBytes?: number | null;
+  pixelDiffStatus: "compared" | "unavailable";
+  reason?: string | null;
+}
+
+export interface RuntimeDomDifference {
+  path: string;
+  original: unknown;
+  reconstructed: unknown;
+  summary: string;
+}
+
+export interface RuntimeCollectionDiff {
+  changed: boolean;
+  originalCount: number;
+  reconstructedCount: number;
+  shared: string[];
+  originalOnly: string[];
+  reconstructedOnly: string[];
+  groups: Record<string, string[]>;
+}
+
+export interface RuntimeViewport {
+  width: number;
+  height: number;
+}
+
+export interface RuntimeComparisonScope {
+  scenarioName: string;
+  networkPolicy: "deny" | "allow";
+  timeoutMs: number;
+  viewport?: RuntimeViewport | null;
+}
+
 export interface RuntimeDifferenceSet {
   screenshotChanged?: boolean | null;
   domChanged: boolean;
@@ -273,6 +312,11 @@ export interface RuntimeDifferenceSet {
   originalOnlyConsole: string[];
   reconstructedOnlyConsole: string[];
   changedDomFields: string[];
+  screenshotDiff: RuntimeScreenshotDiff;
+  domDifferences: RuntimeDomDifference[];
+  networkDiff: RuntimeCollectionDiff;
+  consoleDiff: RuntimeCollectionDiff;
+  comparisonScope: RuntimeComparisonScope;
 }
 
 export interface RuntimeComparisonReport {
@@ -570,6 +614,73 @@ const runtimeCaptureSummarySchema = {
   ],
   additionalProperties: false
 } as const satisfies JsonSchema;
+const runtimeScreenshotDiffSchema = {
+  type: "object",
+  properties: {
+    changed: booleanSchema,
+    originalHash: stringSchema,
+    reconstructedHash: stringSchema,
+    originalSizeBytes: { type: "integer", minimum: 0 },
+    reconstructedSizeBytes: { type: "integer", minimum: 0 },
+    pixelDiffStatus: { type: "string", enum: ["compared", "unavailable"] },
+    reason: stringSchema
+  },
+  required: ["pixelDiffStatus"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const runtimeDomDifferencesSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      path: stringSchema,
+      original: {},
+      reconstructed: {},
+      summary: stringSchema
+    },
+    required: ["path", "original", "reconstructed", "summary"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const runtimeCollectionDiffSchema = {
+  type: "object",
+  properties: {
+    changed: booleanSchema,
+    originalCount: { type: "integer", minimum: 0 },
+    reconstructedCount: { type: "integer", minimum: 0 },
+    shared: stringArraySchema,
+    originalOnly: stringArraySchema,
+    reconstructedOnly: stringArraySchema,
+    groups: {
+      type: "object",
+      additionalProperties: {
+        type: "array",
+        items: stringSchema
+      }
+    }
+  },
+  required: ["changed", "originalCount", "reconstructedCount", "shared", "originalOnly", "reconstructedOnly", "groups"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const runtimeComparisonScopeSchema = {
+  type: "object",
+  properties: {
+    scenarioName: stringSchema,
+    networkPolicy: { type: "string", enum: ["deny", "allow"] },
+    timeoutMs: { type: "integer", minimum: 1 },
+    viewport: {
+      type: "object",
+      properties: {
+        width: { type: "integer", minimum: 1 },
+        height: { type: "integer", minimum: 1 }
+      },
+      required: ["width", "height"],
+      additionalProperties: false
+    }
+  },
+  required: ["scenarioName", "networkPolicy", "timeoutMs"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
 const runtimeDifferenceSetSchema = {
   type: "object",
   properties: {
@@ -581,7 +692,12 @@ const runtimeDifferenceSetSchema = {
     reconstructedOnlyRequests: stringArraySchema,
     originalOnlyConsole: stringArraySchema,
     reconstructedOnlyConsole: stringArraySchema,
-    changedDomFields: stringArraySchema
+    changedDomFields: stringArraySchema,
+    screenshotDiff: runtimeScreenshotDiffSchema,
+    domDifferences: runtimeDomDifferencesSchema,
+    networkDiff: runtimeCollectionDiffSchema,
+    consoleDiff: runtimeCollectionDiffSchema,
+    comparisonScope: runtimeComparisonScopeSchema
   },
   required: [
     "domChanged",
@@ -591,7 +707,12 @@ const runtimeDifferenceSetSchema = {
     "reconstructedOnlyRequests",
     "originalOnlyConsole",
     "reconstructedOnlyConsole",
-    "changedDomFields"
+    "changedDomFields",
+    "screenshotDiff",
+    "domDifferences",
+    "networkDiff",
+    "consoleDiff",
+    "comparisonScope"
   ],
   additionalProperties: false
 } as const satisfies JsonSchema;
@@ -1234,7 +1355,53 @@ export const EXAMPLE_RUNTIME_COMPARISON_REPORT = {
     reconstructedOnlyRequests: ["200 http://127.0.0.1:5173/"],
     originalOnlyConsole: [],
     reconstructedOnlyConsole: [],
-    changedDomFields: ["title"]
+    changedDomFields: ["title"],
+    screenshotDiff: {
+      changed: false,
+      originalHash: "sha256-original",
+      reconstructedHash: "sha256-original",
+      originalSizeBytes: 2048,
+      reconstructedSizeBytes: 2048,
+      pixelDiffStatus: "unavailable",
+      reason: "Pixel-level diff requires an image decoder in the sandbox runtime."
+    },
+    domDifferences: [
+      {
+        path: "title",
+        original: "Original",
+        reconstructed: "Reconstructed",
+        summary: "DOM summary field title changed."
+      }
+    ],
+    networkDiff: {
+      changed: true,
+      originalCount: 1,
+      reconstructedCount: 1,
+      shared: [],
+      originalOnly: ["200 http://127.0.0.1:4173/"],
+      reconstructedOnly: ["200 http://127.0.0.1:5173/"],
+      groups: {
+        status_2xx: ["200 http://127.0.0.1:4173/", "200 http://127.0.0.1:5173/"]
+      }
+    },
+    consoleDiff: {
+      changed: false,
+      originalCount: 0,
+      reconstructedCount: 0,
+      shared: [],
+      originalOnly: [],
+      reconstructedOnly: [],
+      groups: {}
+    },
+    comparisonScope: {
+      scenarioName: "default-load",
+      networkPolicy: "deny",
+      timeoutMs: 10000,
+      viewport: {
+        width: 1365,
+        height: 768
+      }
+    }
   },
   screenshotArtifactIds: ["artifact_original_screenshot_example", "artifact_reconstructed_screenshot_example"],
   traceArtifactIds: ["artifact_runtime_trace_example"],

@@ -320,6 +320,45 @@ class RuntimeCaptureSummary(ContractModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class RuntimeScreenshotDiff(ContractModel):
+    changed: bool | None = None
+    original_hash: str | None = None
+    reconstructed_hash: str | None = None
+    original_size_bytes: int | None = Field(default=None, ge=0)
+    reconstructed_size_bytes: int | None = Field(default=None, ge=0)
+    pixel_diff_status: Literal["compared", "unavailable"]
+    reason: str | None = None
+
+
+class RuntimeDomDifference(ContractModel):
+    path: str
+    original: Any
+    reconstructed: Any
+    summary: str
+
+
+class RuntimeCollectionDiff(ContractModel):
+    changed: bool
+    original_count: int = Field(ge=0)
+    reconstructed_count: int = Field(ge=0)
+    shared: list[str] = Field(default_factory=list)
+    original_only: list[str] = Field(default_factory=list)
+    reconstructed_only: list[str] = Field(default_factory=list)
+    groups: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class RuntimeViewport(ContractModel):
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+
+
+class RuntimeComparisonScope(ContractModel):
+    scenario_name: str
+    network_policy: NetworkPolicy
+    timeout_ms: int = Field(ge=1)
+    viewport: RuntimeViewport | None = None
+
+
 class RuntimeDifferenceSet(ContractModel):
     screenshot_changed: bool | None = None
     dom_changed: bool
@@ -330,6 +369,11 @@ class RuntimeDifferenceSet(ContractModel):
     original_only_console: list[str]
     reconstructed_only_console: list[str]
     changed_dom_fields: list[str]
+    screenshot_diff: RuntimeScreenshotDiff
+    dom_differences: list[RuntimeDomDifference]
+    network_diff: RuntimeCollectionDiff
+    console_diff: RuntimeCollectionDiff
+    comparison_scope: RuntimeComparisonScope
 
 
 class RuntimeComparisonReport(ContractModel):

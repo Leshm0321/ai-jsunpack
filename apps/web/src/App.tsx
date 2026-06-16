@@ -36,6 +36,7 @@ import type {
   Job,
   JobStatus,
   ReviewRun,
+  RuntimeComparisonReport,
   RuntimeValidationRun,
   ToolCall
 } from "@ai-jsunpack/shared";
@@ -148,6 +149,13 @@ interface NormalizedAuditRecord {
   label: string;
   secondary: string;
   status: string;
+}
+
+interface RuntimeComparisonState {
+  artifactId: string | null;
+  error: string | null;
+  report: RuntimeComparisonReport | null;
+  status: "idle" | "loading" | "ready" | "error";
 }
 
 const previewMaxBytes = 256 * 1024;
@@ -1447,7 +1455,12 @@ function RuntimePanel({
             currentJob={currentJob}
             onArtifactSelect={onArtifactSelect}
           />
-          <RuntimeCompareStatus latestRuntime={latestRuntime} />
+          <RuntimeCompareStatus
+            artifacts={artifacts}
+            currentJob={currentJob}
+            latestRuntime={latestRuntime}
+            onArtifactSelect={onArtifactSelect}
+          />
           <RuntimeIssueList title="Console errors" items={latestRuntime.consoleErrors} />
           <RuntimeIssueList title="Page errors" items={latestRuntime.pageErrors} />
           <RuntimeIssueList title="Failed requests" items={latestRuntime.failedRequests} />
@@ -1477,11 +1490,209 @@ function RuntimePanel({
   );
 }
 
-function RuntimeCompareStatus({ latestRuntime }: { latestRuntime: RuntimeValidationRun }) {
+function RuntimeCompareStatus({
+  artifacts,
+  currentJob,
+  latestRuntime,
+  onArtifactSelect
+}: {
+  artifacts: Artifact[];
+  currentJob: Job | null;
+  latestRuntime: RuntimeValidationRun;
+  onArtifactSelect: (artifactId: string) => void;
+}) {
+  const comparisonArtifactId = latestRuntime.comparisonArtifactId ?? null;
+  const [comparison, setComparison] = useState<RuntimeComparisonState>({
+    artifactId: null,
+    error: null,
+    report: null,
+    status: "idle"
+  });
+
+  useEffect(() => {
+    if (!currentJob || !comparisonArtifactId) {
+      setComparison({ artifactId: comparisonArtifactId, error: null, report: null, status: "idle" });
+      return;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+    setComparison({ artifactId: comparisonArtifactId, error: null, report: null, status: "loading" });
+    fetchArtifactText(currentJob.id, comparisonArtifactId, controller.signal)
+      .then((text) => parseRuntimeComparisonReport(text))
+      .then((report) => {
+        if (active) {
+          setComparison({ artifactId: comparisonArtifactId, error: null, report, status: "ready" });
+        }
+      })
+      .catch((error: Error) => {
+        if (active) {
+          setComparison({ artifactId: comparisonArtifactId, error: error.message, report: null, status: "error" });
+        }
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [currentJob?.id, comparisonArtifactId]);
+
+  const report = comparison.report;
+  const differences = report?.differences ?? null;
+
   return (
-    <div className="runtime-compare-status">
-      <span>Runtime diff</span>
-      <strong>{latestRuntime.comparisonArtifactId ? "Comparison artifact recorded" : "Waiting for runtime_compare evidence"}</strong>
+    <div className="runtime-compare-status runtime-compare-detail">
+      <div className="runtime-compare-heading">
+        <div>
+          <span>Runtime diff</span>
+          <strong>{comparisonArtifactId ? "Comparison artifact recorded" : "Waiting for runtime_compare evidence"}</strong>
+        </div>
+        {report ? <StatusToken status={report.status} /> : null}
+      </div>
+
+      {comparison.status === "loading" ? (
+        <div className="preview-message">
+          <FileText size={18} aria-hidden="true" />
+          Loading comparison detail
+        </div>
+      ) : null}
+      {comparison.status === "error" ? (
+        <div className="preview-message preview-error">
+          <AlertCircle size={18} aria-hidden="true" />
+          {comparison.error ?? "Runtime comparison could not be loaded."}
+        </div>
+      ) : null}
+      {!comparisonArtifactId ? (
+        <span className="runtime-compare-note">Runtime compare has not produced a linked artifact yet.</span>
+      ) : null}
+      {report && differences ? (
+        <>
+          <div className="runtime-diff-grid" aria-label="Runtime comparison difference summary">
+            <RuntimeDiffMetric label="Screenshot" value={formatScreenshotDiff(differences)} />
+            <RuntimeDiffMetric label="DOM paths" value={String(differences.domDifferences.length)} />
+            <RuntimeDiffMetric label="Network groups" value={formatRuntimeGroups(differences.networkDiff.groups)} />
+            <RuntimeDiffMetric label="Console groups" value={formatRuntimeGroups(differences.consoleDiff.groups)} />
+          </div>
+          <RuntimeComparisonEvidenceButtons
+            artifacts={artifacts}
+            comparisonArtifactId={comparisonArtifactId ?? report.id}
+            onArtifactSelect={onArtifactSelect}
+            report={report}
+          />
+          <RuntimeDomDifferenceList differences={differences.domDifferences} />
+          <RuntimeCollectionDifferenceList
+            title="Network differences"
+            originalOnly={differences.networkDiff.originalOnly}
+            reconstructedOnly={differences.networkDiff.reconstructedOnly}
+          />
+          <RuntimeCollectionDifferenceList
+            title="Console differences"
+            originalOnly={differences.consoleDiff.originalOnly}
+            reconstructedOnly={differences.consoleDiff.reconstructedOnly}
+          />
+          {differences.screenshotDiff.reason ? (
+            <span className="runtime-compare-note">{differences.screenshotDiff.reason}</span>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeDiffMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="runtime-diff-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function RuntimeComparisonEvidenceButtons({
+  artifacts,
+  comparisonArtifactId,
+  onArtifactSelect,
+  report
+}: {
+  artifacts: Artifact[];
+  comparisonArtifactId: string;
+  onArtifactSelect: (artifactId: string) => void;
+  report: RuntimeComparisonReport;
+}) {
+  const linkedIds = [
+    comparisonArtifactId,
+    report.scenarioArtifactId,
+    ...report.traceArtifactIds,
+    ...report.screenshotArtifactIds
+  ].filter((artifactId, index, ids): artifactId is string => Boolean(artifactId) && ids.indexOf(artifactId) === index);
+  const knownArtifactIds = new Set(artifacts.map((artifact) => artifact.id));
+
+  return (
+    <div className="runtime-evidence-buttons" aria-label="Runtime comparison evidence links">
+      {linkedIds.map((artifactId) => (
+        <button
+          className="evidence-ref-chip"
+          disabled={!knownArtifactIds.has(artifactId)}
+          key={artifactId}
+          type="button"
+          onClick={() => onArtifactSelect(artifactId)}
+          title={artifactId}
+        >
+          <Link2 size={14} aria-hidden="true" />
+          <span>{runtimeEvidenceLabel(artifactId, report)}</span>
+          <small>{artifactId}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RuntimeDomDifferenceList({ differences }: { differences: RuntimeComparisonReport["differences"]["domDifferences"] }) {
+  if (differences.length === 0) {
+    return <RuntimeDiffSection title="DOM differences" items={["No DOM summary paths changed."]} />;
+  }
+
+  return (
+    <div className="runtime-diff-section">
+      <span>DOM differences</span>
+      {differences.slice(0, 8).map((difference) => (
+        <code key={difference.path}>
+          {difference.path}: {formatUnknownValue(difference.original)}
+          {" -> "}
+          {formatUnknownValue(difference.reconstructed)}
+        </code>
+      ))}
+      {differences.length > 8 ? <small>{differences.length - 8} more DOM path changes in the comparison artifact.</small> : null}
+    </div>
+  );
+}
+
+function RuntimeCollectionDifferenceList({
+  originalOnly,
+  reconstructedOnly,
+  title
+}: {
+  originalOnly: string[];
+  reconstructedOnly: string[];
+  title: string;
+}) {
+  const items = [
+    ...originalOnly.slice(0, 4).map((item) => `original only: ${item}`),
+    ...reconstructedOnly.slice(0, 4).map((item) => `reconstructed only: ${item}`)
+  ];
+  if (items.length === 0) {
+    return <RuntimeDiffSection title={title} items={["No unique entries."]} />;
+  }
+  return <RuntimeDiffSection title={title} items={items} />;
+}
+
+function RuntimeDiffSection({ items, title }: { items: string[]; title: string }) {
+  return (
+    <div className="runtime-diff-section">
+      <span>{title}</span>
+      {items.map((item) => (
+        <code key={item}>{item}</code>
+      ))}
     </div>
   );
 }
@@ -1710,6 +1921,14 @@ function parseEvidenceIndexPayload(text: string): EvidenceIndexPayload {
   };
 }
 
+function parseRuntimeComparisonReport(text: string): RuntimeComparisonReport {
+  const payload = JSON.parse(text) as Partial<RuntimeComparisonReport>;
+  if (!payload.id || !payload.differences || !payload.original || !payload.reconstructed) {
+    throw new Error("Artifact is not a valid runtime comparison report.");
+  }
+  return payload as RuntimeComparisonReport;
+}
+
 function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
   if (artifact.kind === "generated_project") {
     return { supported: false, reason: "Directory artifacts are available through the packaged result download." };
@@ -1755,6 +1974,51 @@ function formatArtifactPreviewText(artifact: Artifact, text: string): string {
     }
   }
   return text;
+}
+
+function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"]): string {
+  const changed = differences.screenshotDiff.changed ?? differences.screenshotChanged;
+  const status = differences.screenshotDiff.pixelDiffStatus;
+  return `changed ${String(changed)} / ${status}`;
+}
+
+function formatRuntimeGroups(groups: Record<string, string[]>): string {
+  const keys = Object.keys(groups);
+  if (keys.length === 0) {
+    return "none";
+  }
+  return keys.slice(0, 3).join(", ");
+}
+
+function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparisonReport): string {
+  if (artifactId === report.scenarioArtifactId) {
+    return "scenario";
+  }
+  if (report.traceArtifactIds.includes(artifactId)) {
+    return "trace";
+  }
+  if (report.screenshotArtifactIds.includes(artifactId)) {
+    return "screenshot";
+  }
+  return "comparison";
+}
+
+function formatUnknownValue(value: unknown): string {
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "string") {
+    return value.length > 90 ? `${value.slice(0, 87)}...` : value;
+  }
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+  } catch {
+    return String(value);
+  }
 }
 
 function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {

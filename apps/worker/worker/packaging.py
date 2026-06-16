@@ -163,7 +163,10 @@ class PackagingRunner:
             if artifact.kind != kind:
                 continue
             try:
-                records.append(json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8")))
+                record = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+                if isinstance(record, dict):
+                    record.setdefault("artifactId", artifact.id)
+                records.append(record)
             except Exception as error:
                 records.append(
                     {
@@ -257,6 +260,10 @@ class PackagingRunner:
             "## Runtime Compare",
             "",
             self._status_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
+            "",
+            "## Runtime Compare Difference Summary",
+            "",
+            self._runtime_compare_diff_markdown(runtime_comparisons),
             "",
             "## Review Evidence",
             "",
@@ -353,6 +360,8 @@ class PackagingRunner:
                 self._html_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
                 "<h2>Runtime Compare</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
+                "<h2>Runtime Compare Difference Summary</h2>",
+                self._runtime_compare_diff_html(runtime_comparisons),
                 "<h2>Review Evidence</h2>",
                 self._html_table(review_runs, ("reviewType", "status", "failureClass", "decision")),
                 "<h2>Evidence Attachment Index</h2>",
@@ -388,6 +397,91 @@ class PackagingRunner:
         if len(text) > 240:
             text = f"{text[:237]}..."
         return escape(text)
+
+    def _runtime_compare_diff_markdown(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "No runtime comparison difference records."
+        rows = [
+            "| Comparison | Status | Screenshot | DOM | Network | Console | Evidence |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for record in records:
+            differences = record.get("differences") or {}
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        self._cell(record.get("artifactId") or record.get("id")),
+                        self._cell(record.get("status")),
+                        self._cell(self._screenshot_diff_label(differences)),
+                        self._cell(self._dom_diff_label(differences)),
+                        self._cell(self._collection_diff_label(differences.get("networkDiff"))),
+                        self._cell(self._collection_diff_label(differences.get("consoleDiff"))),
+                        self._cell(self._runtime_compare_evidence_links(record)),
+                    ]
+                )
+                + " |"
+            )
+        return "\n".join(rows)
+
+    def _runtime_compare_diff_html(self, records: list[dict[str, Any]]) -> str:
+        if not records:
+            return '<div class="notice">No runtime comparison difference records.</div>'
+        rows = [
+            "<tr><th>Comparison</th><th>Status</th><th>Screenshot</th><th>DOM</th><th>Network</th><th>Console</th><th>Evidence</th></tr>"
+        ]
+        for record in records:
+            differences = record.get("differences") or {}
+            cells = [
+                record.get("artifactId") or record.get("id"),
+                record.get("status"),
+                self._screenshot_diff_label(differences),
+                self._dom_diff_label(differences),
+                self._collection_diff_label(differences.get("networkDiff")),
+                self._collection_diff_label(differences.get("consoleDiff")),
+                self._runtime_compare_evidence_links(record),
+            ]
+            rows.append("<tr>" + "".join(f"<td>{self._html_cell(value)}</td>" for value in cells) + "</tr>")
+        return f"<table>{''.join(rows)}</table>"
+
+    def _screenshot_diff_label(self, differences: dict[str, Any]) -> str:
+        screenshot = differences.get("screenshotDiff") or {}
+        changed = screenshot.get("changed", differences.get("screenshotChanged"))
+        pixel_status = screenshot.get("pixelDiffStatus", "unknown")
+        original_size = screenshot.get("originalSizeBytes")
+        reconstructed_size = screenshot.get("reconstructedSizeBytes")
+        sizes = ""
+        if original_size is not None or reconstructed_size is not None:
+            sizes = f" ({original_size or 0}B -> {reconstructed_size or 0}B)"
+        return f"changed={changed}; pixel={pixel_status}{sizes}"
+
+    def _dom_diff_label(self, differences: dict[str, Any]) -> str:
+        dom_differences = differences.get("domDifferences") or []
+        changed_fields = differences.get("changedDomFields") or []
+        if dom_differences:
+            return f"{len(dom_differences)} path changes: {', '.join(str(item.get('path')) for item in dom_differences[:4])}"
+        if changed_fields:
+            return f"{len(changed_fields)} top-level fields: {', '.join(map(str, changed_fields[:4]))}"
+        return "none"
+
+    def _collection_diff_label(self, diff: Any) -> str:
+        if not isinstance(diff, dict):
+            return "unavailable"
+        original_only = len(diff.get("originalOnly") or [])
+        reconstructed_only = len(diff.get("reconstructedOnly") or [])
+        shared = len(diff.get("shared") or [])
+        groups = ", ".join(sorted((diff.get("groups") or {}).keys())[:4]) or "none"
+        return f"original-only={original_only}; reconstructed-only={reconstructed_only}; shared={shared}; groups={groups}"
+
+    def _runtime_compare_evidence_links(self, record: dict[str, Any]) -> str:
+        artifact_ids = [
+            record.get("artifactId"),
+            record.get("scenarioArtifactId"),
+            *(record.get("traceArtifactIds") or []),
+            *(record.get("screenshotArtifactIds") or []),
+        ]
+        links = [f"artifact://{artifact_id}" for artifact_id in artifact_ids if artifact_id]
+        return ", ".join(links) if links else "none"
 
     def _evidence_index(self, *, job: JobRecord, artifacts: list[ArtifactRecord]) -> dict[str, Any]:
         attachments = [self._evidence_attachment(artifact) for artifact in artifacts if artifact.kind in EVIDENCE_ATTACHMENT_KINDS]
