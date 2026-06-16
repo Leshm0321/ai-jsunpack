@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
@@ -56,6 +56,7 @@ import {
 import type { JobSummary } from "./api";
 
 gsap.registerPlugin(useGSAP);
+const ArtifactTextEditor = lazy(() => import("./ArtifactTextEditor"));
 
 type StageState = "done" | "active" | "pending" | "warning" | "fail";
 type MetricStatus = "pass" | "warn" | "fail";
@@ -1006,6 +1007,7 @@ function ArtifactLineageGroup({
 function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; preview: ArtifactPreview }) {
   const isCurrentPreview = preview.artifactId === artifact.id;
   const status = isCurrentPreview ? preview.status : "idle";
+  const language = preview.text ? artifactPreviewLanguage(artifact, preview.text) : "plaintext";
 
   return (
     <div className="preview-panel">
@@ -1022,7 +1024,18 @@ function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; previe
           Loading artifact content
         </div>
       ) : null}
-      {status === "ready" && preview.text ? <pre className="artifact-preview-code">{preview.text}</pre> : null}
+      {status === "ready" && preview.text ? (
+        <Suspense
+          fallback={
+            <div className="preview-message">
+              <FileText size={18} aria-hidden="true" />
+              Loading editor
+            </div>
+          }
+        >
+          <ArtifactTextEditor ariaLabel={`${artifact.kind} artifact content preview`} language={language} text={preview.text} />
+        </Suspense>
+      ) : null}
       {status === "unsupported" ? (
         <div className="preview-message preview-muted">
           <AlertCircle size={18} aria-hidden="true" />
@@ -2010,6 +2023,39 @@ function formatArtifactPreviewText(artifact: Artifact, text: string): string {
     }
   }
   return text;
+}
+
+function artifactPreviewLanguage(artifact: Artifact, text: string): string {
+  const contentType = artifact.contentType.toLowerCase();
+  const hint = `${artifact.kind} ${artifact.storageUri} ${artifact.id}`.toLowerCase();
+  const trimmed = text.trimStart();
+
+  if (contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return "json";
+  }
+  if (contentType.includes("markdown") || hasArtifactExtension(hint, [".md", ".markdown"]) || artifact.kind === "audit_report") {
+    return "markdown";
+  }
+  if (contentType.includes("typescript") || hasArtifactExtension(hint, [".ts", ".tsx"])) {
+    return "typescript";
+  }
+  if (contentType.includes("javascript") || hasArtifactExtension(hint, [".js", ".jsx", ".mjs", ".cjs"])) {
+    return "javascript";
+  }
+  if (contentType.includes("html") || hasArtifactExtension(hint, [".html", ".htm"])) {
+    return "html";
+  }
+  if (contentType.includes("css") || hasArtifactExtension(hint, [".css", ".scss", ".less"])) {
+    return "css";
+  }
+  if (contentType.includes("xml") || hasArtifactExtension(hint, [".xml", ".svg"])) {
+    return "xml";
+  }
+  return "plaintext";
+}
+
+function hasArtifactExtension(value: string, extensions: string[]): boolean {
+  return extensions.some((extension) => value.includes(extension));
 }
 
 function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"]): string {

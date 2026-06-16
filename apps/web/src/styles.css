@@ -712,18 +712,18 @@ button:focus-visible,
   background: rgba(220, 38, 38, 0.08);
 }
 
-.artifact-preview-code {
-  max-height: 420px;
-  margin: 0;
-  padding: 14px;
-  overflow: auto;
+.artifact-preview-editor {
+  height: 420px;
+  min-height: 320px;
+  overflow: hidden;
   border-radius: 8px;
   background: #0f172a;
-  color: #dbeafe;
-  font-family: "Fira Code", monospace;
-  font-size: 12px;
-  line-height: 1.65;
-  tab-size: 2;
+  border: 1px solid rgba(15, 23, 42, 0.82);
+}
+
+.artifact-preview-editor .monaco-editor,
+.artifact-preview-editor .monaco-editor-background {
+  border-radius: 8px;
 }
 
 .download-link {
@@ -1557,6 +1557,11 @@ button:focus-visible,
 
   .audit-row {
     grid-template-columns: 110px 180px 100px 240px;
+  }
+
+  .artifact-preview-editor {
+    height: 340px;
+    min-height: 280px;
   }
 }
 
