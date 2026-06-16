@@ -152,10 +152,14 @@ interface NormalizedAuditRecord {
 }
 
 interface RuntimeComparisonState {
-  artifactId: string | null;
   error: string | null;
-  report: RuntimeComparisonReport | null;
+  reports: RuntimeComparisonLoaded[];
   status: "idle" | "loading" | "ready" | "error";
+}
+
+interface RuntimeComparisonLoaded {
+  artifactId: string;
+  report: RuntimeComparisonReport;
 }
 
 const previewMaxBytes = 256 * 1024;
@@ -1458,7 +1462,6 @@ function RuntimePanel({
           <RuntimeCompareStatus
             artifacts={artifacts}
             currentJob={currentJob}
-            latestRuntime={latestRuntime}
             onArtifactSelect={onArtifactSelect}
           />
           <RuntimeIssueList title="Console errors" items={latestRuntime.consoleErrors} />
@@ -1493,41 +1496,48 @@ function RuntimePanel({
 function RuntimeCompareStatus({
   artifacts,
   currentJob,
-  latestRuntime,
   onArtifactSelect
 }: {
   artifacts: Artifact[];
   currentJob: Job | null;
-  latestRuntime: RuntimeValidationRun;
   onArtifactSelect: (artifactId: string) => void;
 }) {
-  const comparisonArtifactId = latestRuntime.comparisonArtifactId ?? null;
+  const comparisonArtifacts = useMemo(
+    () => artifacts.filter((artifact) => artifact.kind === "runtime_comparison"),
+    [artifacts]
+  );
+  const [selectedComparisonId, setSelectedComparisonId] = useState<string | null>(null);
   const [comparison, setComparison] = useState<RuntimeComparisonState>({
-    artifactId: null,
     error: null,
-    report: null,
+    reports: [],
     status: "idle"
   });
 
   useEffect(() => {
-    if (!currentJob || !comparisonArtifactId) {
-      setComparison({ artifactId: comparisonArtifactId, error: null, report: null, status: "idle" });
+    if (!currentJob || comparisonArtifacts.length === 0) {
+      setComparison({ error: null, reports: [], status: "idle" });
       return;
     }
 
     const controller = new AbortController();
     let active = true;
-    setComparison({ artifactId: comparisonArtifactId, error: null, report: null, status: "loading" });
-    fetchArtifactText(currentJob.id, comparisonArtifactId, controller.signal)
-      .then((text) => parseRuntimeComparisonReport(text))
-      .then((report) => {
+    setComparison({ error: null, reports: [], status: "loading" });
+    Promise.all(
+      comparisonArtifacts.map((artifact) =>
+        fetchArtifactText(currentJob.id, artifact.id, controller.signal).then((text) => ({
+          artifactId: artifact.id,
+          report: parseRuntimeComparisonReport(text)
+        }))
+      )
+    )
+      .then((reports) => {
         if (active) {
-          setComparison({ artifactId: comparisonArtifactId, error: null, report, status: "ready" });
+          setComparison({ error: null, reports, status: "ready" });
         }
       })
       .catch((error: Error) => {
         if (active) {
-          setComparison({ artifactId: comparisonArtifactId, error: error.message, report: null, status: "error" });
+          setComparison({ error: error.message, reports: [], status: "error" });
         }
       });
 
@@ -1535,9 +1545,11 @@ function RuntimeCompareStatus({
       active = false;
       controller.abort();
     };
-  }, [currentJob?.id, comparisonArtifactId]);
+  }, [currentJob?.id, comparisonArtifacts]);
 
-  const report = comparison.report;
+  const selectedComparison =
+    comparison.reports.find((item) => item.artifactId === selectedComparisonId) ?? comparison.reports[0] ?? null;
+  const report = selectedComparison?.report ?? null;
   const differences = report?.differences ?? null;
 
   return (
@@ -1545,7 +1557,11 @@ function RuntimeCompareStatus({
       <div className="runtime-compare-heading">
         <div>
           <span>Runtime diff</span>
-          <strong>{comparisonArtifactId ? "Comparison artifact recorded" : "Waiting for runtime_compare evidence"}</strong>
+          <strong>
+            {comparisonArtifacts.length > 0
+              ? `${comparisonArtifacts.length} comparison artifact${comparisonArtifacts.length === 1 ? "" : "s"} recorded`
+              : "Waiting for runtime_compare evidence"}
+          </strong>
         </div>
         {report ? <StatusToken status={report.status} /> : null}
       </div>
@@ -1562,20 +1578,39 @@ function RuntimeCompareStatus({
           {comparison.error ?? "Runtime comparison could not be loaded."}
         </div>
       ) : null}
-      {!comparisonArtifactId ? (
+      {comparisonArtifacts.length === 0 ? (
         <span className="runtime-compare-note">Runtime compare has not produced a linked artifact yet.</span>
       ) : null}
-      {report && differences ? (
+      {comparison.reports.length > 1 ? (
+        <div className="runtime-comparison-list" aria-label="Runtime comparison matrix">
+          {comparison.reports.map((item) => (
+            <button
+              className={item.artifactId === selectedComparison?.artifactId ? "runtime-comparison-row row-active" : "runtime-comparison-row"}
+              key={item.artifactId}
+              type="button"
+              onClick={() => setSelectedComparisonId(item.artifactId)}
+            >
+              <Eye size={15} aria-hidden="true" />
+              <span>{runtimeComparisonScopeLabel(item.report)}</span>
+              <small>{formatScreenshotDiff(item.report.differences)}</small>
+              <StatusToken status={item.report.status} />
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {selectedComparison && report && differences ? (
         <>
           <div className="runtime-diff-grid" aria-label="Runtime comparison difference summary">
+            <RuntimeDiffMetric label="Scope" value={runtimeComparisonScopeLabel(report)} />
             <RuntimeDiffMetric label="Screenshot" value={formatScreenshotDiff(differences)} />
+            <RuntimeDiffMetric label="Pixels" value={formatPixelDiff(differences)} />
             <RuntimeDiffMetric label="DOM paths" value={String(differences.domDifferences.length)} />
             <RuntimeDiffMetric label="Network groups" value={formatRuntimeGroups(differences.networkDiff.groups)} />
             <RuntimeDiffMetric label="Console groups" value={formatRuntimeGroups(differences.consoleDiff.groups)} />
           </div>
           <RuntimeComparisonEvidenceButtons
             artifacts={artifacts}
-            comparisonArtifactId={comparisonArtifactId ?? report.id}
+            comparisonArtifactId={selectedComparison.artifactId}
             onArtifactSelect={onArtifactSelect}
             report={report}
           />
@@ -1623,7 +1658,8 @@ function RuntimeComparisonEvidenceButtons({
     comparisonArtifactId,
     report.scenarioArtifactId,
     ...report.traceArtifactIds,
-    ...report.screenshotArtifactIds
+    ...report.screenshotArtifactIds,
+    report.differences.screenshotDiff.diffArtifactId
   ].filter((artifactId, index, ids): artifactId is string => Boolean(artifactId) && ids.indexOf(artifactId) === index);
   const knownArtifactIds = new Set(artifacts.map((artifact) => artifact.id));
 
@@ -1982,6 +2018,26 @@ function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"
   return `changed ${String(changed)} / ${status}`;
 }
 
+function formatPixelDiff(differences: RuntimeComparisonReport["differences"]): string {
+  const changed = differences.screenshotDiff.changedPixelCount;
+  const total = differences.screenshotDiff.pixelCount;
+  if (changed === undefined || changed === null || total === undefined || total === null) {
+    return "unavailable";
+  }
+  const ratio = differences.screenshotDiff.changedPixelRatio;
+  const percent = typeof ratio === "number" ? ` (${formatPercent(ratio)})` : "";
+  return `${changed}/${total}${percent}`;
+}
+
+function runtimeComparisonScopeLabel(report: RuntimeComparisonReport): string {
+  const scope = report.differences.comparisonScope;
+  const viewport = scope.viewport;
+  const viewportLabel = viewport
+    ? `${viewport.name ? `${viewport.name} ` : ""}${viewport.width}x${viewport.height}`
+    : "default viewport";
+  return `${scope.scenarioName} / ${viewportLabel}`;
+}
+
 function formatRuntimeGroups(groups: Record<string, string[]>): string {
   const keys = Object.keys(groups);
   if (keys.length === 0) {
@@ -1998,7 +2054,10 @@ function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparisonRepor
     return "trace";
   }
   if (report.screenshotArtifactIds.includes(artifactId)) {
-    return "screenshot";
+    return artifactId === report.differences.screenshotDiff.diffArtifactId ? "pixel diff" : "screenshot";
+  }
+  if (artifactId === report.differences.screenshotDiff.diffArtifactId) {
+    return "pixel diff";
   }
   return "comparison";
 }

@@ -402,8 +402,8 @@ class PackagingRunner:
         if not records:
             return "No runtime comparison difference records."
         rows = [
-            "| Comparison | Status | Screenshot | DOM | Network | Console | Evidence |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Comparison | Status | Scope | Screenshot | DOM | Network | Console | Evidence |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for record in records:
             differences = record.get("differences") or {}
@@ -413,6 +413,7 @@ class PackagingRunner:
                     [
                         self._cell(record.get("artifactId") or record.get("id")),
                         self._cell(record.get("status")),
+                        self._cell(self._runtime_compare_scope_label(differences)),
                         self._cell(self._screenshot_diff_label(differences)),
                         self._cell(self._dom_diff_label(differences)),
                         self._cell(self._collection_diff_label(differences.get("networkDiff"))),
@@ -428,13 +429,14 @@ class PackagingRunner:
         if not records:
             return '<div class="notice">No runtime comparison difference records.</div>'
         rows = [
-            "<tr><th>Comparison</th><th>Status</th><th>Screenshot</th><th>DOM</th><th>Network</th><th>Console</th><th>Evidence</th></tr>"
+            "<tr><th>Comparison</th><th>Status</th><th>Scope</th><th>Screenshot</th><th>DOM</th><th>Network</th><th>Console</th><th>Evidence</th></tr>"
         ]
         for record in records:
             differences = record.get("differences") or {}
             cells = [
                 record.get("artifactId") or record.get("id"),
                 record.get("status"),
+                self._runtime_compare_scope_label(differences),
                 self._screenshot_diff_label(differences),
                 self._dom_diff_label(differences),
                 self._collection_diff_label(differences.get("networkDiff")),
@@ -444,16 +446,34 @@ class PackagingRunner:
             rows.append("<tr>" + "".join(f"<td>{self._html_cell(value)}</td>" for value in cells) + "</tr>")
         return f"<table>{''.join(rows)}</table>"
 
+    def _runtime_compare_scope_label(self, differences: dict[str, Any]) -> str:
+        scope = differences.get("comparisonScope") or {}
+        viewport = scope.get("viewport") or {}
+        viewport_name = viewport.get("name")
+        viewport_size = ""
+        if viewport.get("width") and viewport.get("height"):
+            viewport_size = f"{viewport.get('width')}x{viewport.get('height')}"
+        viewport_label = " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "default viewport"
+        return f"{scope.get('scenarioName') or 'unknown scenario'} / {viewport_label}"
+
     def _screenshot_diff_label(self, differences: dict[str, Any]) -> str:
         screenshot = differences.get("screenshotDiff") or {}
         changed = screenshot.get("changed", differences.get("screenshotChanged"))
         pixel_status = screenshot.get("pixelDiffStatus", "unknown")
         original_size = screenshot.get("originalSizeBytes")
         reconstructed_size = screenshot.get("reconstructedSizeBytes")
+        changed_pixels = screenshot.get("changedPixelCount")
+        pixel_count = screenshot.get("pixelCount")
+        ratio = screenshot.get("changedPixelRatio")
         sizes = ""
         if original_size is not None or reconstructed_size is not None:
             sizes = f" ({original_size or 0}B -> {reconstructed_size or 0}B)"
-        return f"changed={changed}; pixel={pixel_status}{sizes}"
+        pixels = ""
+        if changed_pixels is not None and pixel_count is not None:
+            percent = f"{float(ratio) * 100:.3f}%" if isinstance(ratio, (int, float)) else "unknown"
+            pixels = f"; pixels={changed_pixels}/{pixel_count} ({percent})"
+        diff_artifact = f"; diff={screenshot.get('diffArtifactId')}" if screenshot.get("diffArtifactId") else ""
+        return f"changed={changed}; pixel={pixel_status}{pixels}{diff_artifact}{sizes}"
 
     def _dom_diff_label(self, differences: dict[str, Any]) -> str:
         dom_differences = differences.get("domDifferences") or []

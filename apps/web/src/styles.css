@@ -1345,6 +1345,47 @@ button:focus-visible,
   gap: 6px;
 }
 
+.runtime-comparison-list {
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-comparison-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) minmax(120px, 0.7fr) 72px;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid rgba(3, 105, 161, 0.16);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.runtime-comparison-row:hover,
+.runtime-comparison-row:focus-visible,
+.runtime-comparison-row.row-active {
+  border-color: rgba(3, 105, 161, 0.45);
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
+  outline: none;
+}
+
+.runtime-comparison-row span,
+.runtime-comparison-row small {
+  min-width: 0;
+  font-family: "Fira Code", monospace;
+  overflow-wrap: anywhere;
+}
+
+.runtime-comparison-row small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .runtime-diff-section {
   display: grid;
   gap: 6px;
@@ -1486,6 +1527,7 @@ button:focus-visible,
   .audit-toolbar,
   .audit-summary-grid,
   .runtime-diff-grid,
+  .runtime-comparison-row,
   .runtime-run-issues {
     grid-template-columns: 1fr;
   }

@@ -10,6 +10,7 @@ from apps.worker.worker.runtime_smoke import (
     BrowserSmokeRequest,
     RuntimeCompareRunner,
     RuntimeSmokeRunner,
+    _encode_png_rgba,
 )
 
 
@@ -41,6 +42,26 @@ class SequencedBrowserAdapter:
                 "nodeCount": 3,
                 "textLength": len(target),
             },
+        )
+
+
+class PixelDiffBrowserAdapter:
+    def __init__(self) -> None:
+        self.requests: list[BrowserSmokeRequest] = []
+
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        index = len(self.requests)
+        self.requests.append(request)
+        if index % 2 == 0:
+            pixels = b"\xff\x00\x00\xff\x00\xff\x00\xff"
+            title = "original"
+        else:
+            pixels = b"\xff\x00\x00\xff\x00\x00\xff\xff"
+            title = "reconstructed"
+        request.screenshot_path.write_bytes(_encode_png_rgba(2, 1, pixels))
+        return BrowserSmokeCapture(
+            responses=[f"200 {request.entry_url}"],
+            dom_summary={"title": title, "nodeCount": 2},
         )
 
 
@@ -179,6 +200,109 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertIn("log", comparison_payload["differences"]["consoleDiff"]["groups"])
                 self.assertEqual(validation_payload["comparisonArtifactId"], comparisons[0].id)
                 self.assertEqual(set(validation_payload["screenshotArtifactIds"]), {artifact.id for artifact in screenshots})
+            finally:
+                store.close()
+
+    def test_runtime_compare_records_real_pixel_diff_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = PixelDiffBrowserAdapter()
+                result = RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={"name": "pixel scenario", "viewport": {"name": "tiny", "width": 2, "height": 1}},
+                )
+
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                screenshots = store.list_artifacts(job.id, kind="runtime_screenshot")
+                comparison_payload = json.loads(store.read_artifact(job.id, comparisons[0].id))
+                screenshot_diff = comparison_payload["differences"]["screenshotDiff"]
+                self.assertEqual(len(adapter.requests), 2)
+                self.assertEqual(adapter.requests[0].viewport.width, 2)
+                self.assertEqual(adapter.requests[0].viewport.height, 1)
+                self.assertEqual(result.validation.status, "pass")
+                self.assertEqual(len(result.screenshot_artifacts), 3)
+                self.assertEqual(len(screenshots), 3)
+                self.assertEqual(screenshot_diff["pixelDiffStatus"], "compared")
+                self.assertEqual(screenshot_diff["pixelCount"], 2)
+                self.assertEqual(screenshot_diff["changedPixelCount"], 1)
+                self.assertEqual(screenshot_diff["changedPixelRatio"], 0.5)
+                self.assertEqual(screenshot_diff["width"], 2)
+                self.assertEqual(screenshot_diff["height"], 1)
+                self.assertIn(screenshot_diff["diffArtifactId"], [artifact.id for artifact in screenshots])
+                self.assertIn(screenshot_diff["diffArtifactId"], comparison_payload["screenshotArtifactIds"])
+            finally:
+                store.close()
+
+    def test_runtime_compare_runs_scenario_viewport_matrix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = SequencedBrowserAdapter()
+                result = RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={
+                        "scenarios": [{"name": "load"}, {"name": "body", "waitFor": [{"kind": "selector", "selector": "body"}]}],
+                        "viewports": [
+                            {"name": "mobile", "width": 375, "height": 667},
+                            {"name": "desktop", "width": 1365, "height": 768},
+                        ],
+                    },
+                )
+
+                scenarios = store.list_artifacts(job.id, kind="runtime_scenario")
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                validations = store.list_artifacts(job.id, kind="runtime_validation")
+                screenshots = store.list_artifacts(job.id, kind="runtime_screenshot")
+                comparison_payloads = [json.loads(store.read_artifact(job.id, artifact.id)) for artifact in comparisons]
+                scope_labels = {
+                    (
+                        payload["differences"]["comparisonScope"]["scenarioName"],
+                        payload["differences"]["comparisonScope"]["viewport"]["name"],
+                    )
+                    for payload in comparison_payloads
+                }
+
+                self.assertEqual(len(adapter.requests), 8)
+                self.assertEqual(len(result.validations), 4)
+                self.assertEqual(len(result.comparison_artifacts), 4)
+                self.assertEqual(len(scenarios), 4)
+                self.assertEqual(len(comparisons), 4)
+                self.assertEqual(len(validations), 4)
+                self.assertEqual(len(screenshots), 8)
+                self.assertEqual(
+                    scope_labels,
+                    {("load", "mobile"), ("load", "desktop"), ("body", "mobile"), ("body", "desktop")},
+                )
+                self.assertEqual([request.viewport.width for request in adapter.requests[:4]], [375, 375, 1365, 1365])
             finally:
                 store.close()
 

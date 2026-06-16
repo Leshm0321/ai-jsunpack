@@ -194,7 +194,7 @@ class WorkerPipeline:
                 store=store,
                 original_input_path=input_path,
                 reconstructed_input_path=reconstruction_result.project_path,
-                scenario_config=job.config.get("runtimeScenario") if isinstance(job.config, dict) else None,
+                scenario_config=self._runtime_compare_config(job.config),
                 parent_artifact_ids=[
                     *validation_parent_ids,
                     *build_validation_result.artifact_ids,
@@ -241,6 +241,18 @@ class WorkerPipeline:
         except PackagingError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="unknown")
             run.transition("failed", str(error))
+
+    def _runtime_compare_config(self, job_config: dict | None) -> dict | None:
+        if not isinstance(job_config, dict):
+            return None
+        runtime_compare = job_config.get("runtimeCompare")
+        if isinstance(runtime_compare, dict):
+            config = dict(runtime_compare)
+            if "scenarios" not in config and "runtimeScenarios" not in config and isinstance(job_config.get("runtimeScenario"), dict):
+                config["runtimeScenario"] = job_config["runtimeScenario"]
+            return config
+        runtime_scenario = job_config.get("runtimeScenario")
+        return runtime_scenario if isinstance(runtime_scenario, dict) else None
 
     def _json_bytes(self, payload: dict) -> bytes:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")

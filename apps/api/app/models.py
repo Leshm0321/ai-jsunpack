@@ -305,11 +305,18 @@ class RuntimeAssertion(ContractModel):
     value: str | None = None
 
 
+class RuntimeViewport(ContractModel):
+    name: str | None = None
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+
+
 class RuntimeScenario(ContractModel):
     id: str
     job_id: str
     name: str
     entry_url: str | None = None
+    viewport: RuntimeViewport | None = None
     wait_for: list[RuntimeWaitFor] = Field(default_factory=list)
     interactions: list[RuntimeInteraction] = Field(default_factory=list)
     assertions: list[RuntimeAssertion] = Field(default_factory=list)
@@ -341,6 +348,13 @@ class RuntimeScreenshotDiff(ContractModel):
     original_size_bytes: int | None = Field(default=None, ge=0)
     reconstructed_size_bytes: int | None = Field(default=None, ge=0)
     pixel_diff_status: Literal["compared", "unavailable"]
+    pixel_count: int | None = Field(default=None, ge=0)
+    changed_pixel_count: int | None = Field(default=None, ge=0)
+    changed_pixel_ratio: float | None = Field(default=None, ge=0)
+    threshold: int | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    diff_artifact_id: str | None = None
     reason: str | None = None
 
 
@@ -359,11 +373,6 @@ class RuntimeCollectionDiff(ContractModel):
     original_only: list[str] = Field(default_factory=list)
     reconstructed_only: list[str] = Field(default_factory=list)
     groups: dict[str, list[str]] = Field(default_factory=dict)
-
-
-class RuntimeViewport(ContractModel):
-    width: int = Field(ge=1)
-    height: int = Field(ge=1)
 
 
 class RuntimeComparisonScope(ContractModel):

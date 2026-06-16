@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import binascii
 import json
 import hashlib
+import struct
 import time
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -33,7 +36,141 @@ from apps.api.app.models import (
 )
 from packages.sandbox import LocalSandboxRunner
 
-DEFAULT_VIEWPORT = {"width": 1365, "height": 768}
+DEFAULT_VIEWPORT = {"name": "desktop", "width": 1365, "height": 768}
+
+
+@dataclass(frozen=True)
+class PngImage:
+    width: int
+    height: int
+    rgba: bytes
+
+
+class PngDecodeError(ValueError):
+    pass
+
+
+def _decode_png_rgba(content: bytes) -> PngImage:
+    if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise PngDecodeError("Screenshot is not a PNG image.")
+
+    offset = 8
+    width = 0
+    height = 0
+    bit_depth = 0
+    color_type = 0
+    compression = 0
+    filter_method = 0
+    interlace = 0
+    idat_chunks: list[bytes] = []
+    while offset + 8 <= len(content):
+        length = struct.unpack(">I", content[offset : offset + 4])[0]
+        chunk_type = content[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        if data_end + 4 > len(content):
+            raise PngDecodeError("PNG chunk is truncated.")
+        data = content[data_start:data_end]
+        offset = data_end + 4
+        if chunk_type == b"IHDR":
+            width, height, bit_depth, color_type, compression, filter_method, interlace = struct.unpack(">IIBBBBB", data)
+        elif chunk_type == b"IDAT":
+            idat_chunks.append(data)
+        elif chunk_type == b"IEND":
+            break
+
+    if width < 1 or height < 1 or not idat_chunks:
+        raise PngDecodeError("PNG is missing image metadata or pixel data.")
+    if bit_depth != 8 or color_type not in {2, 6} or compression != 0 or filter_method != 0 or interlace != 0:
+        raise PngDecodeError("PNG pixel diff supports only 8-bit non-interlaced RGB/RGBA screenshots.")
+
+    channels = 4 if color_type == 6 else 3
+    stride = width * channels
+    try:
+        raw = zlib.decompress(b"".join(idat_chunks))
+    except zlib.error as error:
+        raise PngDecodeError(f"PNG pixel data could not be decompressed: {error}") from error
+
+    expected = (stride + 1) * height
+    if len(raw) < expected:
+        raise PngDecodeError("PNG pixel data is shorter than expected.")
+
+    rows: list[bytes] = []
+    previous = bytearray(stride)
+    position = 0
+    for _ in range(height):
+        filter_type = raw[position]
+        position += 1
+        scanline = bytearray(raw[position : position + stride])
+        position += stride
+        _unfilter_png_scanline(scanline, previous, channels, filter_type)
+        rows.append(bytes(scanline))
+        previous = scanline
+
+    rgba = bytearray(width * height * 4)
+    out = 0
+    for row in rows:
+        for index in range(0, len(row), channels):
+            rgba[out] = row[index]
+            rgba[out + 1] = row[index + 1]
+            rgba[out + 2] = row[index + 2]
+            rgba[out + 3] = row[index + 3] if channels == 4 else 255
+            out += 4
+    return PngImage(width=width, height=height, rgba=bytes(rgba))
+
+
+def _unfilter_png_scanline(scanline: bytearray, previous: bytearray, bpp: int, filter_type: int) -> None:
+    if filter_type == 0:
+        return
+    for index, value in enumerate(scanline):
+        left = scanline[index - bpp] if index >= bpp else 0
+        up = previous[index]
+        up_left = previous[index - bpp] if index >= bpp else 0
+        if filter_type == 1:
+            scanline[index] = (value + left) & 0xFF
+        elif filter_type == 2:
+            scanline[index] = (value + up) & 0xFF
+        elif filter_type == 3:
+            scanline[index] = (value + ((left + up) // 2)) & 0xFF
+        elif filter_type == 4:
+            scanline[index] = (value + _png_paeth(left, up, up_left)) & 0xFF
+        else:
+            raise PngDecodeError(f"Unsupported PNG filter type: {filter_type}.")
+
+
+def _png_paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    left_distance = abs(estimate - left)
+    up_distance = abs(estimate - up)
+    up_left_distance = abs(estimate - up_left)
+    if left_distance <= up_distance and left_distance <= up_left_distance:
+        return left
+    if up_distance <= up_left_distance:
+        return up
+    return up_left
+
+
+def _encode_png_rgba(width: int, height: int, rgba: bytes) -> bytes:
+    if len(rgba) != width * height * 4:
+        raise ValueError("RGBA pixel data does not match PNG dimensions.")
+    raw = bytearray()
+    stride = width * 4
+    for row in range(height):
+        raw.append(0)
+        start = row * stride
+        raw.extend(rgba[start : start + stride])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw)))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    checksum = binascii.crc32(chunk_type + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", checksum)
 
 
 @dataclass(frozen=True)
@@ -44,6 +181,7 @@ class BrowserSmokeRequest:
     wait_for_selector: str | None = None
     scenario: RuntimeScenario | None = None
     network_policy: NetworkPolicy = "deny"
+    viewport: RuntimeViewport | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +225,8 @@ class PlaywrightBrowserAdapter:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
                 try:
-                    page = browser.new_page(viewport=dict(DEFAULT_VIEWPORT))
+                    viewport = request.viewport or RuntimeViewport(**DEFAULT_VIEWPORT)
+                    page = browser.new_page(viewport={"width": viewport.width, "height": viewport.height})
                     if request.network_policy == "deny":
                         page.route("**/*", lambda route: self._route_network(route, failed_requests))
                     page.on("console", lambda message: self._capture_console(message, console_messages, console_errors))
@@ -552,17 +691,23 @@ class RuntimeCompareResult:
     trace_artifact: ArtifactRecord
     screenshot_artifacts: list[ArtifactRecord]
     report_artifact: ArtifactRecord
+    validations: list[RuntimeValidationRun]
+    scenario_artifacts: list[ArtifactRecord]
+    comparison_artifacts: list[ArtifactRecord]
+    trace_artifacts: list[ArtifactRecord]
+    report_artifacts: list[ArtifactRecord]
     message: str
 
     @property
     def artifact_ids(self) -> list[str]:
-        return [
-            self.scenario_artifact.id,
-            self.comparison_artifact.id,
-            self.trace_artifact.id,
-            self.report_artifact.id,
+        ordered = [
+            *[artifact.id for artifact in self.scenario_artifacts],
+            *[artifact.id for artifact in self.comparison_artifacts],
+            *[artifact.id for artifact in self.trace_artifacts],
+            *[artifact.id for artifact in self.report_artifacts],
             *[artifact.id for artifact in self.screenshot_artifacts],
         ]
+        return list(dict.fromkeys(ordered))
 
 
 class RuntimeCompareRunner(RuntimeSmokeRunner):
@@ -578,12 +723,67 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids or []
         store.update_status(job_id, "runtime_compare")
-        scenario = self._scenario_from_config(job_id=job_id, config=scenario_config)
+        matrix = self._scenario_matrix_from_config(job_id=job_id, config=scenario_config)
+        results = [
+            self._run_single_compare(
+                job_id=job_id,
+                store=store,
+                original_input_path=original_input_path,
+                reconstructed_input_path=reconstructed_input_path,
+                scenario=scenario,
+                pixel_threshold=pixel_threshold,
+                matrix_index=index,
+                parent_artifact_ids=parents,
+            )
+            for index, (scenario, pixel_threshold) in enumerate(matrix)
+        ]
+
+        primary = results[0]
+        validations = [result.validation for result in results]
+        scenario_artifacts = [result.scenario_artifact for result in results]
+        comparison_artifacts = [result.comparison_artifact for result in results]
+        trace_artifacts = [result.trace_artifact for result in results]
+        report_artifacts = [result.report_artifact for result in results]
+        screenshot_artifacts = [artifact for result in results for artifact in result.screenshot_artifacts]
+        statuses = {validation.status for validation in validations}
+        aggregate_status = "best_effort" if "best_effort" in statuses else "fail" if "fail" in statuses else "retry" if "retry" in statuses else "pass"
+        return RuntimeCompareResult(
+            validation=primary.validation,
+            scenario_artifact=primary.scenario_artifact,
+            comparison_artifact=primary.comparison_artifact,
+            trace_artifact=primary.trace_artifact,
+            screenshot_artifacts=screenshot_artifacts,
+            report_artifact=primary.report_artifact,
+            validations=validations,
+            scenario_artifacts=scenario_artifacts,
+            comparison_artifacts=comparison_artifacts,
+            trace_artifacts=trace_artifacts,
+            report_artifacts=report_artifacts,
+            message=(
+                f"Runtime compare completed {len(results)} scenario/viewport run(s) "
+                f"with aggregate status {aggregate_status}."
+            ),
+        )
+
+    def _run_single_compare(
+        self,
+        *,
+        job_id: str,
+        store,
+        original_input_path: Path | str | None,
+        reconstructed_input_path: Path | str | None,
+        scenario: RuntimeScenario,
+        pixel_threshold: int,
+        matrix_index: int,
+        parent_artifact_ids: list[str],
+    ) -> RuntimeCompareResult:
+        parents = parent_artifact_ids
+        artifact_suffix = f"{matrix_index:02d}"
         scenario_artifact = store.write_artifact(
             job_id,
             kind="runtime_scenario",
             stage="runtime_compare",
-            filename="runtime-scenario.json",
+            filename=f"runtime-scenario-{artifact_suffix}.json",
             content=scenario.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.runtime_compare",
@@ -598,6 +798,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 input_path=original_input_path,
                 scenario=scenario,
                 temp_dir=temp_dir,
+                matrix_index=matrix_index,
                 parent_artifact_ids=[*parents, scenario_artifact.id],
             )
             reconstructed = self._capture_target(
@@ -607,15 +808,38 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 input_path=reconstructed_input_path,
                 scenario=scenario,
                 temp_dir=temp_dir,
+                matrix_index=matrix_index,
                 parent_artifact_ids=[*parents, scenario_artifact.id],
             )
 
         screenshot_artifacts = [artifact for artifact in (original["screenshot"], reconstructed["screenshot"]) if artifact]
+        screenshot_diff, diff_artifact = self._screenshot_diff(
+            job_id=job_id,
+            store=store,
+            changed=None,
+            original_hash=original["screenshot_hash"],
+            reconstructed_hash=reconstructed["screenshot_hash"],
+            original_size=original["screenshot_size"],
+            reconstructed_size=reconstructed["screenshot_size"],
+            original_bytes=original["screenshot_bytes"],
+            reconstructed_bytes=reconstructed["screenshot_bytes"],
+            pixel_threshold=pixel_threshold,
+            filename_suffix=artifact_suffix,
+            parent_artifact_ids=[
+                *parents,
+                scenario_artifact.id,
+                *[artifact.id for artifact in screenshot_artifacts],
+            ],
+        )
+        if diff_artifact is not None:
+            screenshot_artifacts.append(diff_artifact)
         trace_payload = {
             "kind": "runtime_trace",
             "jobId": job_id,
             "target": "comparison",
             "scenarioArtifactId": scenario_artifact.id,
+            "scenarioName": scenario.name,
+            "viewport": scenario.viewport.model_dump(by_alias=True) if scenario.viewport else None,
             "original": original["summary"].model_dump(by_alias=True),
             "reconstructed": reconstructed["summary"].model_dump(by_alias=True),
         }
@@ -623,7 +847,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             job_id,
             kind="runtime_trace",
             stage="runtime_compare",
-            filename="runtime-compare-trace.json",
+            filename=f"runtime-compare-trace-{artifact_suffix}.json",
             content=self._json_bytes(trace_payload),
             content_type="application/json",
             producer="worker.runtime_compare",
@@ -634,10 +858,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             original=original["summary"],
             reconstructed=reconstructed["summary"],
             scenario=scenario,
-            original_screenshot_hash=original["screenshot_hash"],
-            reconstructed_screenshot_hash=reconstructed["screenshot_hash"],
-            original_screenshot_size=original["screenshot_size"],
-            reconstructed_screenshot_size=reconstructed["screenshot_size"],
+            screenshot_diff=screenshot_diff,
         )
         status = self._comparison_status(original["summary"], reconstructed["summary"])
         comparison = RuntimeComparisonReport(
@@ -657,7 +878,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             job_id,
             kind="runtime_comparison",
             stage="runtime_compare",
-            filename="runtime-comparison.json",
+            filename=f"runtime-comparison-{artifact_suffix}.json",
             content=comparison.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.runtime_compare",
@@ -687,7 +908,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             job_id,
             kind="runtime_validation",
             stage="runtime_compare",
-            filename="runtime-compare-validation.json",
+            filename=f"runtime-compare-validation-{artifact_suffix}.json",
             content=validation.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.runtime_compare",
@@ -706,19 +927,81 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             trace_artifact=trace_artifact,
             screenshot_artifacts=screenshot_artifacts,
             report_artifact=report_artifact,
+            validations=[validation],
+            scenario_artifacts=[scenario_artifact],
+            comparison_artifacts=[comparison_artifact],
+            trace_artifacts=[trace_artifact],
+            report_artifacts=[report_artifact],
             message=f"Runtime compare completed with status {status}.",
         )
+
+    def _scenario_matrix_from_config(self, *, job_id: str, config: dict[str, Any] | None) -> list[tuple[RuntimeScenario, int]]:
+        payload = dict(config or {})
+        is_matrix = any(key in payload for key in ("runtimeCompare", "runtimeScenario", "scenarios", "runtimeScenarios", "viewports", "viewportMatrix"))
+        if "runtimeCompare" in payload and isinstance(payload["runtimeCompare"], dict):
+            payload = dict(payload["runtimeCompare"])
+
+        if is_matrix:
+            scenario_payloads = payload.get("scenarios", payload.get("runtimeScenarios"))
+            if scenario_payloads is None and isinstance(payload.get("runtimeScenario"), dict):
+                scenario_payloads = [payload["runtimeScenario"]]
+            if scenario_payloads is None:
+                scenario_payloads = [{}]
+            if isinstance(scenario_payloads, dict):
+                scenario_payloads = [scenario_payloads]
+            if not isinstance(scenario_payloads, list) or not scenario_payloads:
+                scenario_payloads = [{}]
+
+            global_viewports = self._viewports_from_config(
+                payload.get("viewports", payload.get("viewportMatrix", payload.get("viewport"))),
+                default=True,
+            )
+            global_threshold = self._pixel_threshold_from_config(payload, default=0)
+            matrix: list[tuple[RuntimeScenario, int]] = []
+            for scenario_payload in scenario_payloads:
+                scenario_dict = dict(scenario_payload) if isinstance(scenario_payload, dict) else {}
+                scenario_viewports = self._viewports_from_config(
+                    scenario_dict.get("viewports", scenario_dict.get("viewportMatrix", scenario_dict.get("viewport"))),
+                    default=False,
+                ) or global_viewports
+                threshold = self._pixel_threshold_from_config(scenario_dict, default=global_threshold)
+                for viewport in scenario_viewports:
+                    scenario_config = dict(scenario_dict)
+                    scenario_config["viewport"] = viewport.model_dump(by_alias=True)
+                    matrix.append((self._scenario_from_config(job_id=job_id, config=scenario_config), threshold))
+            return matrix or [(self._scenario_from_config(job_id=job_id, config=None), 0)]
+
+        return [(self._scenario_from_config(job_id=job_id, config=payload), self._pixel_threshold_from_config(payload, default=0))]
+
+    def _viewports_from_config(self, value: Any, *, default: bool) -> list[RuntimeViewport]:
+        if value is None:
+            return [RuntimeViewport(**DEFAULT_VIEWPORT)] if default else []
+        if isinstance(value, dict):
+            return [RuntimeViewport.model_validate(value)]
+        if isinstance(value, list):
+            viewports = [RuntimeViewport.model_validate(item) for item in value if isinstance(item, dict)]
+            return viewports or ([RuntimeViewport(**DEFAULT_VIEWPORT)] if default else [])
+        return [RuntimeViewport(**DEFAULT_VIEWPORT)] if default else []
+
+    def _pixel_threshold_from_config(self, payload: dict[str, Any], *, default: int) -> int:
+        value = payload.get("pixelDiffThreshold", payload.get("pixelThreshold", default))
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return default
 
     def _scenario_from_config(self, *, job_id: str, config: dict[str, Any] | None) -> RuntimeScenario:
         payload = dict(config or {})
         wait_for = payload.get("waitFor", payload.get("wait_for"))
         if wait_for is None:
             wait_for = [{"kind": "load_state", "state": "load", "timeoutMs": self.timeout_ms}]
+        viewport = self._viewports_from_config(payload.get("viewport"), default=True)[0]
         return RuntimeScenario(
             id=str(payload.get("id") or f"runtime_scenario_{uuid4().hex[:12]}"),
             job_id=job_id,
             name=str(payload.get("name") or "default-load"),
             entry_url=payload.get("entryUrl", payload.get("entry_url")),
+            viewport=viewport,
             wait_for=[RuntimeWaitFor.model_validate(item) for item in wait_for],
             interactions=list(payload.get("interactions") or []),
             assertions=list(payload.get("assertions") or []),
@@ -735,11 +1018,12 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         input_path: Path | str | None,
         scenario: RuntimeScenario,
         temp_dir: Path,
+        matrix_index: int,
         parent_artifact_ids: list[str],
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         entry = self._resolve_scenario_entry(input_path=input_path, scenario=scenario)
-        screenshot_path = temp_dir / f"runtime-compare-{target}.png"
+        screenshot_path = temp_dir / f"runtime-compare-{matrix_index:02d}-{target}.png"
         screenshot_bytes = None
         capture = BrowserSmokeCapture()
         failure_class: FailureClass = "none"
@@ -759,6 +1043,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                             timeout_ms=scenario.timeout_ms,
                             scenario=scenario,
                             network_policy=scenario.network_policy,
+                            viewport=scenario.viewport,
                         )
                     )
                 status = self._status_for_capture(capture)
@@ -782,7 +1067,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 job_id,
                 kind="runtime_screenshot",
                 stage="runtime_compare",
-                filename=f"runtime-compare-{target}.png",
+                filename=f"runtime-compare-{matrix_index:02d}-{target}.png",
                 content=screenshot_bytes,
                 content_type="image/png",
                 producer="worker.runtime_compare",
@@ -810,6 +1095,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             "screenshot": screenshot_artifact,
             "screenshot_hash": screenshot_hash,
             "screenshot_size": screenshot_size,
+            "screenshot_bytes": screenshot_bytes,
         }
 
     def _resolve_scenario_entry(self, *, input_path: Path | str | None, scenario: RuntimeScenario) -> RuntimeEntry:
@@ -843,10 +1129,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         original: RuntimeCaptureSummary,
         reconstructed: RuntimeCaptureSummary,
         scenario: RuntimeScenario,
-        original_screenshot_hash: str | None,
-        reconstructed_screenshot_hash: str | None,
-        original_screenshot_size: int | None,
-        reconstructed_screenshot_size: int | None,
+        screenshot_diff: RuntimeScreenshotDiff,
     ) -> RuntimeDifferenceSet:
         original_requests = sorted(set(original.responses + original.failed_requests))
         reconstructed_requests = sorted(set(reconstructed.responses + reconstructed.failed_requests))
@@ -857,13 +1140,8 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             for key in set(original.dom_summary) | set(reconstructed.dom_summary)
             if original.dom_summary.get(key) != reconstructed.dom_summary.get(key)
         )
-        screenshot_changed = (
-            None
-            if original_screenshot_hash is None or reconstructed_screenshot_hash is None
-            else original_screenshot_hash != reconstructed_screenshot_hash
-        )
         return RuntimeDifferenceSet(
-            screenshot_changed=screenshot_changed,
+            screenshot_changed=screenshot_diff.changed,
             dom_changed=bool(changed_dom_fields),
             network_changed=original_requests != reconstructed_requests,
             console_changed=original_console != reconstructed_console,
@@ -872,13 +1150,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             original_only_console=sorted(set(original_console) - set(reconstructed_console)),
             reconstructed_only_console=sorted(set(reconstructed_console) - set(original_console)),
             changed_dom_fields=changed_dom_fields,
-            screenshot_diff=self._screenshot_diff(
-                changed=screenshot_changed,
-                original_hash=original_screenshot_hash,
-                reconstructed_hash=reconstructed_screenshot_hash,
-                original_size=original_screenshot_size,
-                reconstructed_size=reconstructed_screenshot_size,
-            ),
+            screenshot_diff=screenshot_diff,
             dom_differences=self._dom_differences(original.dom_summary, reconstructed.dom_summary),
             network_diff=self._collection_diff(original_requests, reconstructed_requests, "network"),
             console_diff=self._collection_diff(original_console, reconstructed_console, "console"),
@@ -886,31 +1158,127 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 scenario_name=scenario.name,
                 network_policy=scenario.network_policy,
                 timeout_ms=scenario.timeout_ms,
-                viewport=RuntimeViewport(**DEFAULT_VIEWPORT),
+                viewport=scenario.viewport or RuntimeViewport(**DEFAULT_VIEWPORT),
             ),
         )
 
     def _screenshot_diff(
         self,
         *,
+        job_id: str,
+        store,
         changed: bool | None,
         original_hash: str | None,
         reconstructed_hash: str | None,
         original_size: int | None,
         reconstructed_size: int | None,
-    ) -> RuntimeScreenshotDiff:
-        if original_hash is None or reconstructed_hash is None:
-            reason = "One or both runtime comparison screenshots were unavailable."
-        else:
-            reason = "Screenshot bytes were compared by sha256; pixel-level diff requires an image decoder in the sandbox runtime."
-        return RuntimeScreenshotDiff(
-            changed=changed,
-            original_hash=original_hash,
-            reconstructed_hash=reconstructed_hash,
-            original_size_bytes=original_size,
-            reconstructed_size_bytes=reconstructed_size,
-            pixel_diff_status="unavailable",
-            reason=reason,
+        original_bytes: bytes | None,
+        reconstructed_bytes: bytes | None,
+        pixel_threshold: int,
+        filename_suffix: str,
+        parent_artifact_ids: list[str],
+    ) -> tuple[RuntimeScreenshotDiff, ArtifactRecord | None]:
+        hash_changed = (
+            None
+            if original_hash is None or reconstructed_hash is None
+            else original_hash != reconstructed_hash
+        )
+        if original_bytes is None or reconstructed_bytes is None:
+            return (
+                RuntimeScreenshotDiff(
+                    changed=changed if changed is not None else hash_changed,
+                    original_hash=original_hash,
+                    reconstructed_hash=reconstructed_hash,
+                    original_size_bytes=original_size,
+                    reconstructed_size_bytes=reconstructed_size,
+                    pixel_diff_status="unavailable",
+                    threshold=pixel_threshold,
+                    reason="One or both runtime comparison screenshots were unavailable.",
+                ),
+                None,
+            )
+
+        try:
+            original_image = _decode_png_rgba(original_bytes)
+            reconstructed_image = _decode_png_rgba(reconstructed_bytes)
+        except PngDecodeError as error:
+            return (
+                RuntimeScreenshotDiff(
+                    changed=changed if changed is not None else hash_changed,
+                    original_hash=original_hash,
+                    reconstructed_hash=reconstructed_hash,
+                    original_size_bytes=original_size,
+                    reconstructed_size_bytes=reconstructed_size,
+                    pixel_diff_status="unavailable",
+                    threshold=pixel_threshold,
+                    reason=str(error),
+                ),
+                None,
+            )
+
+        if original_image.width != reconstructed_image.width or original_image.height != reconstructed_image.height:
+            return (
+                RuntimeScreenshotDiff(
+                    changed=True,
+                    original_hash=original_hash,
+                    reconstructed_hash=reconstructed_hash,
+                    original_size_bytes=original_size,
+                    reconstructed_size_bytes=reconstructed_size,
+                    pixel_diff_status="unavailable",
+                    threshold=pixel_threshold,
+                    width=original_image.width,
+                    height=original_image.height,
+                    reason=(
+                        "Runtime comparison screenshots have different dimensions: "
+                        f"{original_image.width}x{original_image.height} vs "
+                        f"{reconstructed_image.width}x{reconstructed_image.height}."
+                    ),
+                ),
+                None,
+            )
+
+        diff_pixels = bytearray(len(original_image.rgba))
+        changed_pixels = 0
+        for index in range(0, len(original_image.rgba), 4):
+            if any(
+                abs(original_image.rgba[index + channel] - reconstructed_image.rgba[index + channel]) > pixel_threshold
+                for channel in range(4)
+            ):
+                changed_pixels += 1
+                diff_pixels[index : index + 4] = b"\xff\x00\x00\xff"
+            else:
+                diff_pixels[index : index + 4] = b"\x00\x00\x00\x00"
+
+        diff_bytes = _encode_png_rgba(original_image.width, original_image.height, bytes(diff_pixels))
+        diff_artifact = store.write_artifact(
+            job_id,
+            kind="runtime_screenshot",
+            stage="runtime_compare",
+            filename=f"runtime-compare-{filename_suffix}-pixel-diff.png",
+            content=diff_bytes,
+            content_type="image/png",
+            producer="worker.runtime_compare",
+            parent_artifact_ids=parent_artifact_ids,
+        )
+        pixel_count = original_image.width * original_image.height
+        return (
+            RuntimeScreenshotDiff(
+                changed=changed_pixels > 0,
+                original_hash=original_hash,
+                reconstructed_hash=reconstructed_hash,
+                original_size_bytes=original_size,
+                reconstructed_size_bytes=reconstructed_size,
+                pixel_diff_status="compared",
+                pixel_count=pixel_count,
+                changed_pixel_count=changed_pixels,
+                changed_pixel_ratio=changed_pixels / pixel_count if pixel_count else 0,
+                threshold=pixel_threshold,
+                width=original_image.width,
+                height=original_image.height,
+                diff_artifact_id=diff_artifact.id,
+                reason=None,
+            ),
+            diff_artifact,
         )
 
     def _dom_differences(self, original: dict[str, Any], reconstructed: dict[str, Any]) -> list[RuntimeDomDifference]:

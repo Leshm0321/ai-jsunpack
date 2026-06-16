@@ -250,6 +250,7 @@ export interface RuntimeScenario {
   jobId: string;
   name: string;
   entryUrl?: string | null;
+  viewport?: RuntimeViewport | null;
   waitFor: RuntimeWaitFor[];
   interactions: RuntimeInteraction[];
   assertions: RuntimeAssertion[];
@@ -281,6 +282,13 @@ export interface RuntimeScreenshotDiff {
   originalSizeBytes?: number | null;
   reconstructedSizeBytes?: number | null;
   pixelDiffStatus: "compared" | "unavailable";
+  pixelCount?: number | null;
+  changedPixelCount?: number | null;
+  changedPixelRatio?: number | null;
+  threshold?: number | null;
+  width?: number | null;
+  height?: number | null;
+  diffArtifactId?: string | null;
   reason?: string | null;
 }
 
@@ -302,6 +310,7 @@ export interface RuntimeCollectionDiff {
 }
 
 export interface RuntimeViewport {
+  name?: string | null;
   width: number;
   height: number;
 }
@@ -608,6 +617,16 @@ const runtimeDomSummarySchema = {
   type: "object",
   additionalProperties: true
 } as const satisfies JsonSchema;
+const runtimeViewportSchema = {
+  type: "object",
+  properties: {
+    name: stringSchema,
+    width: { type: "integer", minimum: 1 },
+    height: { type: "integer", minimum: 1 }
+  },
+  required: ["width", "height"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
 const runtimeCaptureSummarySchema = {
   type: "object",
   properties: {
@@ -652,6 +671,13 @@ const runtimeScreenshotDiffSchema = {
     originalSizeBytes: { type: "integer", minimum: 0 },
     reconstructedSizeBytes: { type: "integer", minimum: 0 },
     pixelDiffStatus: { type: "string", enum: ["compared", "unavailable"] },
+    pixelCount: { type: "integer", minimum: 0 },
+    changedPixelCount: { type: "integer", minimum: 0 },
+    changedPixelRatio: { type: "number", minimum: 0 },
+    threshold: { type: "integer", minimum: 0 },
+    width: { type: "integer", minimum: 1 },
+    height: { type: "integer", minimum: 1 },
+    diffArtifactId: stringSchema,
     reason: stringSchema
   },
   required: ["pixelDiffStatus"],
@@ -697,15 +723,7 @@ const runtimeComparisonScopeSchema = {
     scenarioName: stringSchema,
     networkPolicy: { type: "string", enum: ["deny", "allow"] },
     timeoutMs: { type: "integer", minimum: 1 },
-    viewport: {
-      type: "object",
-      properties: {
-        width: { type: "integer", minimum: 1 },
-        height: { type: "integer", minimum: 1 }
-      },
-      required: ["width", "height"],
-      additionalProperties: false
-    }
+    viewport: runtimeViewportSchema
   },
   required: ["scenarioName", "networkPolicy", "timeoutMs"],
   additionalProperties: false
@@ -990,6 +1008,7 @@ export const SHARED_JSON_SCHEMAS = {
       jobId: stringSchema,
       name: stringSchema,
       entryUrl: stringSchema,
+      viewport: runtimeViewportSchema,
       waitFor: runtimeWaitForSchema,
       interactions: runtimeInteractionsSchema,
       assertions: runtimeAssertionsSchema,
@@ -1339,6 +1358,11 @@ export const EXAMPLE_RUNTIME_SCENARIO = {
   jobId: EXAMPLE_JOB.id,
   name: "default-load",
   entryUrl: null,
+  viewport: {
+    name: "desktop",
+    width: 1365,
+    height: 768
+  },
   waitFor: [
     {
       kind: "load_state",
@@ -1422,8 +1446,15 @@ export const EXAMPLE_RUNTIME_COMPARISON_REPORT = {
       reconstructedHash: "sha256-original",
       originalSizeBytes: 2048,
       reconstructedSizeBytes: 2048,
-      pixelDiffStatus: "unavailable",
-      reason: "Pixel-level diff requires an image decoder in the sandbox runtime."
+      pixelDiffStatus: "compared",
+      pixelCount: 1048320,
+      changedPixelCount: 0,
+      changedPixelRatio: 0,
+      threshold: 0,
+      width: 1365,
+      height: 768,
+      diffArtifactId: "artifact_runtime_diff_screenshot_example",
+      reason: null
     },
     domDifferences: [
       {
@@ -1458,12 +1489,17 @@ export const EXAMPLE_RUNTIME_COMPARISON_REPORT = {
       networkPolicy: "deny",
       timeoutMs: 10000,
       viewport: {
+        name: "desktop",
         width: 1365,
         height: 768
       }
     }
   },
-  screenshotArtifactIds: ["artifact_original_screenshot_example", "artifact_reconstructed_screenshot_example"],
+  screenshotArtifactIds: [
+    "artifact_original_screenshot_example",
+    "artifact_reconstructed_screenshot_example",
+    "artifact_runtime_diff_screenshot_example"
+  ],
   traceArtifactIds: ["artifact_runtime_trace_example"],
   limitations: []
 } as const satisfies RuntimeComparisonReport;
