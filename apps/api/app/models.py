@@ -46,6 +46,8 @@ ArtifactKind = Literal[
     "runtime_validation",
     "runtime_trace",
     "runtime_screenshot",
+    "runtime_scenario",
+    "runtime_comparison",
     "review_run",
     "tool_call",
     "memory_record",
@@ -94,6 +96,10 @@ SandboxResourceEnforcement = Literal["local_best_effort", "container_enforced"]
 DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
 DiagnosticSource = Literal["stdout", "stderr"]
 DiagnosticTool = Literal["tsc", "vite", "esbuild", "unknown"]
+RuntimeWaitForKind = Literal["load_state", "selector", "timeout"]
+RuntimeLoadState = Literal["load", "domcontentloaded", "networkidle"]
+RuntimeInteractionAction = Literal["click", "fill", "press", "wait"]
+RuntimeAssertionKind = Literal["selector_visible", "text_contains", "url_contains"]
 
 
 def to_camel(value: str) -> str:
@@ -260,6 +266,83 @@ class BuildArtifact(ContractModel):
     diagnostics: list[TypeScriptDiagnostic]
     logs_artifact_id: str | None = None
     repair_instruction_ids: list[str]
+    limitations: list[str]
+
+
+class RuntimeWaitFor(ContractModel):
+    kind: RuntimeWaitForKind
+    selector: str | None = None
+    state: RuntimeLoadState | None = None
+    timeout_ms: int | None = Field(default=None, ge=1)
+
+
+class RuntimeInteraction(ContractModel):
+    action: RuntimeInteractionAction
+    selector: str | None = None
+    value: str | None = None
+    key: str | None = None
+    timeout_ms: int | None = Field(default=None, ge=1)
+
+
+class RuntimeAssertion(ContractModel):
+    kind: RuntimeAssertionKind
+    selector: str | None = None
+    text: str | None = None
+    value: str | None = None
+
+
+class RuntimeScenario(ContractModel):
+    id: str
+    job_id: str
+    name: str
+    entry_url: str | None = None
+    wait_for: list[RuntimeWaitFor] = Field(default_factory=list)
+    interactions: list[RuntimeInteraction] = Field(default_factory=list)
+    assertions: list[RuntimeAssertion] = Field(default_factory=list)
+    network_policy: NetworkPolicy = "deny"
+    timeout_ms: int = Field(default=10_000, ge=1)
+
+
+class RuntimeCaptureSummary(ContractModel):
+    target: RuntimeTarget
+    entry_url: str
+    status: RunStatus
+    failure_class: FailureClass
+    console_messages: list[str] = Field(default_factory=list)
+    console_errors: list[str] = Field(default_factory=list)
+    page_errors: list[str] = Field(default_factory=list)
+    failed_requests: list[str] = Field(default_factory=list)
+    responses: list[str] = Field(default_factory=list)
+    assertion_failures: list[str] = Field(default_factory=list)
+    dom_summary: dict[str, Any] = Field(default_factory=dict)
+    screenshot_artifact_id: str | None = None
+    duration_ms: int = Field(ge=0)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class RuntimeDifferenceSet(ContractModel):
+    screenshot_changed: bool | None = None
+    dom_changed: bool
+    network_changed: bool
+    console_changed: bool
+    original_only_requests: list[str]
+    reconstructed_only_requests: list[str]
+    original_only_console: list[str]
+    reconstructed_only_console: list[str]
+    changed_dom_fields: list[str]
+
+
+class RuntimeComparisonReport(ContractModel):
+    id: str
+    job_id: str
+    attempt: int = Field(ge=0)
+    status: RunStatus
+    scenario_artifact_id: str
+    original: RuntimeCaptureSummary
+    reconstructed: RuntimeCaptureSummary
+    differences: RuntimeDifferenceSet
+    screenshot_artifact_ids: list[str]
+    trace_artifact_ids: list[str]
     limitations: list[str]
 
 

@@ -159,6 +159,7 @@ const stageDefinitions: StageDefinition[] = [
   { status: "agent_pass", label: "Agent inference" },
   { status: "reconstructing", label: "Project writer" },
   { status: "runtime_smoke", label: "Browser validation" },
+  { status: "runtime_compare", label: "Runtime compare" },
   { status: "reviewing", label: "Review and repair" },
   { status: "completed", label: "Package ready" }
 ];
@@ -171,6 +172,8 @@ const reportArtifactKinds = new Set<Artifact["kind"]>([
   "runtime_validation",
   "runtime_trace",
   "runtime_screenshot",
+  "runtime_scenario",
+  "runtime_comparison",
   "review_run",
   "build_artifact",
   "tool_call",
@@ -189,6 +192,8 @@ const textualArtifactKinds = new Set<Artifact["kind"]>([
   "build_artifact",
   "runtime_validation",
   "runtime_trace",
+  "runtime_scenario",
+  "runtime_comparison",
   "review_run",
   "tool_call",
   "memory_record",

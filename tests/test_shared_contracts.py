@@ -66,6 +66,8 @@ class SharedContractAlignmentTest(unittest.TestCase):
             "inferenceRecord": models.InferenceRecord,
             "reviewRun": models.ReviewRun,
             "buildArtifact": models.BuildArtifact,
+            "runtimeScenario": models.RuntimeScenario,
+            "runtimeComparisonReport": models.RuntimeComparisonReport,
             "runtimeValidationRun": models.RuntimeValidationRun,
             "toolCall": models.ToolCall,
             "memoryRecord": models.MemoryRecord,

@@ -41,6 +41,8 @@ export const ARTIFACT_KINDS = [
   "runtime_validation",
   "runtime_trace",
   "runtime_screenshot",
+  "runtime_scenario",
+  "runtime_comparison",
   "review_run",
   "tool_call",
   "memory_record",
@@ -210,6 +212,83 @@ export interface BuildArtifact {
   limitations: string[];
 }
 
+export interface RuntimeWaitFor {
+  kind: "load_state" | "selector" | "timeout";
+  selector?: string | null;
+  state?: "load" | "domcontentloaded" | "networkidle" | null;
+  timeoutMs?: number | null;
+}
+
+export interface RuntimeInteraction {
+  action: "click" | "fill" | "press" | "wait";
+  selector?: string | null;
+  value?: string | null;
+  key?: string | null;
+  timeoutMs?: number | null;
+}
+
+export interface RuntimeAssertion {
+  kind: "selector_visible" | "text_contains" | "url_contains";
+  selector?: string | null;
+  text?: string | null;
+  value?: string | null;
+}
+
+export interface RuntimeScenario {
+  id: string;
+  jobId: string;
+  name: string;
+  entryUrl?: string | null;
+  waitFor: RuntimeWaitFor[];
+  interactions: RuntimeInteraction[];
+  assertions: RuntimeAssertion[];
+  networkPolicy: "deny" | "allow";
+  timeoutMs: number;
+}
+
+export interface RuntimeCaptureSummary {
+  target: "original" | "reconstructed";
+  entryUrl: string;
+  status: "pass" | "retry" | "best_effort" | "fail";
+  failureClass: FailureClass;
+  consoleMessages: string[];
+  consoleErrors: string[];
+  pageErrors: string[];
+  failedRequests: string[];
+  responses: string[];
+  assertionFailures: string[];
+  domSummary: Record<string, unknown>;
+  screenshotArtifactId?: string | null;
+  durationMs: number;
+  limitations: string[];
+}
+
+export interface RuntimeDifferenceSet {
+  screenshotChanged?: boolean | null;
+  domChanged: boolean;
+  networkChanged: boolean;
+  consoleChanged: boolean;
+  originalOnlyRequests: string[];
+  reconstructedOnlyRequests: string[];
+  originalOnlyConsole: string[];
+  reconstructedOnlyConsole: string[];
+  changedDomFields: string[];
+}
+
+export interface RuntimeComparisonReport {
+  id: string;
+  jobId: string;
+  attempt: number;
+  status: "pass" | "retry" | "best_effort" | "fail";
+  scenarioArtifactId: string;
+  original: RuntimeCaptureSummary;
+  reconstructed: RuntimeCaptureSummary;
+  differences: RuntimeDifferenceSet;
+  screenshotArtifactIds: string[];
+  traceArtifactIds: string[];
+  limitations: string[];
+}
+
 export interface RuntimeValidationRun {
   id: string;
   jobId: string;
@@ -332,6 +411,7 @@ export type JsonSchema = {
 
 const stringSchema = { type: "string" } as const satisfies JsonSchema;
 const numberSchema = { type: "number" } as const satisfies JsonSchema;
+const booleanSchema = { type: "boolean" } as const satisfies JsonSchema;
 const stringArraySchema = { type: "array", items: stringSchema } as const satisfies JsonSchema;
 const evidenceRefsSchema = {
   type: "array",
@@ -407,6 +487,113 @@ const typeScriptDiagnosticsSchema = {
     required: ["source", "category", "message"],
     additionalProperties: false
   }
+} as const satisfies JsonSchema;
+const runtimeWaitForSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: ["load_state", "selector", "timeout"] },
+      selector: stringSchema,
+      state: { type: "string", enum: ["load", "domcontentloaded", "networkidle"] },
+      timeoutMs: { type: "integer", minimum: 1 }
+    },
+    required: ["kind"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const runtimeInteractionsSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["click", "fill", "press", "wait"] },
+      selector: stringSchema,
+      value: stringSchema,
+      key: stringSchema,
+      timeoutMs: { type: "integer", minimum: 1 }
+    },
+    required: ["action"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const runtimeAssertionsSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: ["selector_visible", "text_contains", "url_contains"] },
+      selector: stringSchema,
+      text: stringSchema,
+      value: stringSchema
+    },
+    required: ["kind"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const runtimeDomSummarySchema = {
+  type: "object",
+  additionalProperties: true
+} as const satisfies JsonSchema;
+const runtimeCaptureSummarySchema = {
+  type: "object",
+  properties: {
+    target: { type: "string", enum: ["original", "reconstructed"] },
+    entryUrl: stringSchema,
+    status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+    failureClass: { type: "string", enum: FAILURE_CLASSES },
+    consoleMessages: stringArraySchema,
+    consoleErrors: stringArraySchema,
+    pageErrors: stringArraySchema,
+    failedRequests: stringArraySchema,
+    responses: stringArraySchema,
+    assertionFailures: stringArraySchema,
+    domSummary: runtimeDomSummarySchema,
+    screenshotArtifactId: stringSchema,
+    durationMs: { type: "integer", minimum: 0 },
+    limitations: stringArraySchema
+  },
+  required: [
+    "target",
+    "entryUrl",
+    "status",
+    "failureClass",
+    "consoleMessages",
+    "consoleErrors",
+    "pageErrors",
+    "failedRequests",
+    "responses",
+    "assertionFailures",
+    "domSummary",
+    "durationMs",
+    "limitations"
+  ],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const runtimeDifferenceSetSchema = {
+  type: "object",
+  properties: {
+    screenshotChanged: booleanSchema,
+    domChanged: booleanSchema,
+    networkChanged: booleanSchema,
+    consoleChanged: booleanSchema,
+    originalOnlyRequests: stringArraySchema,
+    reconstructedOnlyRequests: stringArraySchema,
+    originalOnlyConsole: stringArraySchema,
+    reconstructedOnlyConsole: stringArraySchema,
+    changedDomFields: stringArraySchema
+  },
+  required: [
+    "domChanged",
+    "networkChanged",
+    "consoleChanged",
+    "originalOnlyRequests",
+    "reconstructedOnlyRequests",
+    "originalOnlyConsole",
+    "reconstructedOnlyConsole",
+    "changedDomFields"
+  ],
+  additionalProperties: false
 } as const satisfies JsonSchema;
 
 export const SHARED_CONTRACT_ENUMS = {
@@ -639,6 +826,67 @@ export const SHARED_JSON_SCHEMAS = {
       "resourcePolicy",
       "diagnostics",
       "repairInstructionIds",
+      "limitations"
+    ],
+    additionalProperties: false
+  },
+  runtimeScenario: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/runtime-scenario.json",
+    title: "RuntimeScenario",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      name: stringSchema,
+      entryUrl: stringSchema,
+      waitFor: runtimeWaitForSchema,
+      interactions: runtimeInteractionsSchema,
+      assertions: runtimeAssertionsSchema,
+      networkPolicy: { type: "string", enum: ["deny", "allow"] },
+      timeoutMs: { type: "integer", minimum: 1 }
+    },
+    required: [
+      "id",
+      "jobId",
+      "name",
+      "waitFor",
+      "interactions",
+      "assertions",
+      "networkPolicy",
+      "timeoutMs"
+    ],
+    additionalProperties: false
+  },
+  runtimeComparisonReport: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/runtime-comparison-report.json",
+    title: "RuntimeComparisonReport",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      attempt: { type: "integer", minimum: 0 },
+      status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+      scenarioArtifactId: stringSchema,
+      original: runtimeCaptureSummarySchema,
+      reconstructed: runtimeCaptureSummarySchema,
+      differences: runtimeDifferenceSetSchema,
+      screenshotArtifactIds: stringArraySchema,
+      traceArtifactIds: stringArraySchema,
+      limitations: stringArraySchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "attempt",
+      "status",
+      "scenarioArtifactId",
+      "original",
+      "reconstructed",
+      "differences",
+      "screenshotArtifactIds",
+      "traceArtifactIds",
       "limitations"
     ],
     additionalProperties: false
@@ -905,6 +1153,94 @@ export const EXAMPLE_BUILD_ARTIFACT = {
   limitations: []
 } as const satisfies BuildArtifact;
 
+export const EXAMPLE_RUNTIME_SCENARIO = {
+  id: "runtime_scenario_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  name: "default-load",
+  entryUrl: null,
+  waitFor: [
+    {
+      kind: "load_state",
+      selector: null,
+      state: "load",
+      timeoutMs: 10000
+    }
+  ],
+  interactions: [],
+  assertions: [
+    {
+      kind: "selector_visible",
+      selector: "body",
+      text: null,
+      value: null
+    }
+  ],
+  networkPolicy: "deny",
+  timeoutMs: 10000
+} as const satisfies RuntimeScenario;
+
+export const EXAMPLE_RUNTIME_COMPARISON_REPORT = {
+  id: "runtime_comparison_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  attempt: 0,
+  status: "pass",
+  scenarioArtifactId: "artifact_runtime_scenario_example",
+  original: {
+    target: "original",
+    entryUrl: "http://127.0.0.1:4173/",
+    status: "pass",
+    failureClass: "none",
+    consoleMessages: [],
+    consoleErrors: [],
+    pageErrors: [],
+    failedRequests: [],
+    responses: ["200 http://127.0.0.1:4173/"],
+    assertionFailures: [],
+    domSummary: {
+      title: "Original",
+      nodeCount: 4,
+      textLength: 8
+    },
+    screenshotArtifactId: "artifact_original_screenshot_example",
+    durationMs: 24,
+    limitations: []
+  },
+  reconstructed: {
+    target: "reconstructed",
+    entryUrl: "http://127.0.0.1:5173/",
+    status: "pass",
+    failureClass: "none",
+    consoleMessages: [],
+    consoleErrors: [],
+    pageErrors: [],
+    failedRequests: [],
+    responses: ["200 http://127.0.0.1:5173/"],
+    assertionFailures: [],
+    domSummary: {
+      title: "Reconstructed",
+      nodeCount: 4,
+      textLength: 8
+    },
+    screenshotArtifactId: "artifact_reconstructed_screenshot_example",
+    durationMs: 26,
+    limitations: []
+  },
+  differences: {
+    screenshotChanged: false,
+    domChanged: true,
+    networkChanged: true,
+    consoleChanged: false,
+    originalOnlyRequests: ["200 http://127.0.0.1:4173/"],
+    reconstructedOnlyRequests: ["200 http://127.0.0.1:5173/"],
+    originalOnlyConsole: [],
+    reconstructedOnlyConsole: [],
+    changedDomFields: ["title"]
+  },
+  screenshotArtifactIds: ["artifact_original_screenshot_example", "artifact_reconstructed_screenshot_example"],
+  traceArtifactIds: ["artifact_runtime_trace_example"],
+  limitations: []
+} as const satisfies RuntimeComparisonReport;
+
 export const EXAMPLE_RUNTIME_VALIDATION_RUN = {
   id: "runtime_contract_example",
   jobId: EXAMPLE_JOB.id,
@@ -973,6 +1309,8 @@ export const SHARED_CONTRACT_EXAMPLES = {
   inferenceRecord: EXAMPLE_INFERENCE_RECORD,
   reviewRun: EXAMPLE_REVIEW_RUN,
   buildArtifact: EXAMPLE_BUILD_ARTIFACT,
+  runtimeScenario: EXAMPLE_RUNTIME_SCENARIO,
+  runtimeComparisonReport: EXAMPLE_RUNTIME_COMPARISON_REPORT,
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,

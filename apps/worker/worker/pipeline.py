@@ -9,7 +9,7 @@ from .agent_runtime import AgentRuntime, AgentRuntimeError, AgentRuntimeRequest
 from .build_validation import BuildValidationError, BuildValidationRunner
 from .core_bridge import CoreBridge, CoreBridgeError
 from .reconstruction import ReconstructionError, ReconstructionRunner
-from .runtime_smoke import RuntimeSmokeRunner
+from .runtime_smoke import RuntimeCompareRunner, RuntimeSmokeRunner
 from .packaging import PackagingError, PackagingRunner
 
 
@@ -83,6 +83,7 @@ class WorkerPipeline:
         reconstruction_runner: ReconstructionRunner | None = None,
         build_validation_runner: BuildValidationRunner | None = None,
         runtime_smoke_runner: RuntimeSmokeRunner | None = None,
+        runtime_compare_runner: RuntimeCompareRunner | None = None,
         packaging_runner: PackagingRunner | None = None,
     ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
@@ -90,6 +91,11 @@ class WorkerPipeline:
         self.reconstruction_runner = reconstruction_runner or ReconstructionRunner(self.core_bridge)
         self.build_validation_runner = build_validation_runner or BuildValidationRunner()
         self.runtime_smoke_runner = runtime_smoke_runner or RuntimeSmokeRunner()
+        self.runtime_compare_runner = runtime_compare_runner or RuntimeCompareRunner(
+            browser_adapter=self.runtime_smoke_runner.browser_adapter,
+            timeout_ms=self.runtime_smoke_runner.timeout_ms,
+            sandbox_runner=self.runtime_smoke_runner.sandbox_runner,
+        )
         self.packaging_runner = packaging_runner or PackagingRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
@@ -183,11 +189,27 @@ class WorkerPipeline:
                 parent_artifact_ids=[*validation_parent_ids, *build_validation_result.artifact_ids],
             )
             run.transition("runtime_smoke", runtime_result.message)
+            runtime_compare_result = self.runtime_compare_runner.run_compare(
+                job_id=job_id,
+                store=store,
+                original_input_path=input_path,
+                reconstructed_input_path=reconstruction_result.project_path,
+                scenario_config=job.config.get("runtimeScenario") if isinstance(job.config, dict) else None,
+                parent_artifact_ids=[
+                    *validation_parent_ids,
+                    *build_validation_result.artifact_ids,
+                    runtime_result.trace_artifact.id,
+                    runtime_result.report_artifact.id,
+                    *([runtime_result.screenshot_artifact.id] if runtime_result.screenshot_artifact else []),
+                ],
+            )
+            run.transition("runtime_compare", runtime_compare_result.message)
             packaging_parent_ids = [
                 *validation_parent_ids,
                 *build_validation_result.artifact_ids,
                 runtime_result.trace_artifact.id,
                 runtime_result.report_artifact.id,
+                *runtime_compare_result.artifact_ids,
             ]
             if runtime_result.screenshot_artifact is not None:
                 packaging_parent_ids.append(runtime_result.screenshot_artifact.id)

@@ -5,7 +5,12 @@ from pathlib import Path
 
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import create_store
-from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest, RuntimeSmokeRunner
+from apps.worker.worker.runtime_smoke import (
+    BrowserSmokeCapture,
+    BrowserSmokeRequest,
+    RuntimeCompareRunner,
+    RuntimeSmokeRunner,
+)
 
 
 class FakeBrowserAdapter:
@@ -17,6 +22,26 @@ class FakeBrowserAdapter:
         self.requests.append(request)
         request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nruntime-smoke")
         return self.capture_result
+
+
+class SequencedBrowserAdapter:
+    def __init__(self) -> None:
+        self.requests: list[BrowserSmokeRequest] = []
+
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        index = len(self.requests)
+        self.requests.append(request)
+        target = "original" if index == 0 else "reconstructed"
+        request.screenshot_path.write_bytes(f"\x89PNG\r\n\x1a\nruntime-{target}".encode("utf-8"))
+        return BrowserSmokeCapture(
+            console_messages=[f"log: {target}"],
+            responses=[f"200 {request.entry_url}"],
+            dom_summary={
+                "title": target,
+                "nodeCount": 3,
+                "textLength": len(target),
+            },
+        )
 
 
 class RuntimeSmokeRunnerTest(unittest.TestCase):
@@ -87,6 +112,64 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 trace = json.loads(store.read_artifact(job.id, result.trace_artifact.id))
                 self.assertEqual(trace["failureClass"], "invalid_input")
                 self.assertTrue(any("No HTML entry" in limitation for limitation in trace["limitations"]))
+            finally:
+                store.close()
+
+    def test_runtime_compare_persists_scenario_comparison_trace_and_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = SequencedBrowserAdapter()
+                result = RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={
+                        "name": "fixture scenario",
+                        "waitFor": [{"kind": "selector", "selector": "body", "timeoutMs": 1000}],
+                        "assertions": [{"kind": "selector_visible", "selector": "body"}],
+                        "networkPolicy": "deny",
+                    },
+                )
+
+                self.assertEqual(result.validation.status, "pass")
+                self.assertEqual(len(adapter.requests), 2)
+                self.assertEqual(adapter.requests[0].scenario.name, "fixture scenario")
+                self.assertEqual(adapter.requests[0].network_policy, "deny")
+                self.assertEqual(len(result.screenshot_artifacts), 2)
+
+                scenarios = store.list_artifacts(job.id, kind="runtime_scenario")
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                traces = store.list_artifacts(job.id, kind="runtime_trace")
+                reports = store.list_artifacts(job.id, kind="runtime_validation")
+                screenshots = store.list_artifacts(job.id, kind="runtime_screenshot")
+                self.assertEqual(len(scenarios), 1)
+                self.assertEqual(len(comparisons), 1)
+                self.assertEqual(len(traces), 1)
+                self.assertEqual(len(reports), 1)
+                self.assertEqual(len(screenshots), 2)
+
+                scenario_payload = json.loads(store.read_artifact(job.id, scenarios[0].id))
+                comparison_payload = json.loads(store.read_artifact(job.id, comparisons[0].id))
+                validation_payload = json.loads(store.read_artifact(job.id, reports[0].id))
+                self.assertEqual(scenario_payload["networkPolicy"], "deny")
+                self.assertEqual(comparison_payload["scenarioArtifactId"], scenarios[0].id)
+                self.assertEqual(comparison_payload["differences"]["domChanged"], True)
+                self.assertEqual(comparison_payload["differences"]["consoleChanged"], True)
+                self.assertEqual(validation_payload["comparisonArtifactId"], comparisons[0].id)
+                self.assertEqual(set(validation_payload["screenshotArtifactIds"]), {artifact.id for artifact in screenshots})
             finally:
                 store.close()
 

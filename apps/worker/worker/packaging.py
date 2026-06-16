@@ -10,7 +10,13 @@ import zipfile
 
 from apps.api.app.models import ArtifactRecord, FailureClass, JobRecord, RunStatus
 
-EVIDENCE_ATTACHMENT_KINDS = {"build_log", "runtime_screenshot", "runtime_trace"}
+EVIDENCE_ATTACHMENT_KINDS = {
+    "build_log",
+    "runtime_comparison",
+    "runtime_scenario",
+    "runtime_screenshot",
+    "runtime_trace",
+}
 
 
 class PackagingError(RuntimeError):
@@ -137,6 +143,7 @@ class PackagingRunner:
             "job": job.model_dump(by_alias=True),
             "artifactManifest": [artifact.model_dump(by_alias=True) for artifact in artifacts],
             "runtimeReports": self._load_json_artifacts(job.id, artifacts, store, "runtime_validation"),
+            "runtimeComparisons": self._load_json_artifacts(job.id, artifacts, store, "runtime_comparison"),
             "reviewRuns": self._load_json_artifacts(job.id, artifacts, store, "review_run"),
             "inferenceRecords": self._load_json_artifacts(job.id, artifacts, store, "inference_record"),
             "toolCalls": self._load_json_artifacts(job.id, artifacts, store, "tool_call"),
@@ -209,6 +216,7 @@ class PackagingRunner:
         job = audit_payload["job"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
+        runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         inference_records = audit_payload["inferenceRecords"]
         tool_calls = audit_payload["toolCalls"]
@@ -223,6 +231,7 @@ class PackagingRunner:
             f"- Cloud mode: `{job['cloudMode']}`",
             f"- Artifacts included: {len(artifact_manifest)}",
             f"- Runtime validations: {len(runtime_reports)}",
+            f"- Runtime comparisons: {len(runtime_comparisons)}",
             f"- Review runs: {len(review_runs)}",
             f"- Inference records: {len(inference_records)}",
             f"- Tool calls: {len(tool_calls)}",
@@ -244,6 +253,10 @@ class PackagingRunner:
             "## Runtime Evidence",
             "",
             self._status_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
+            "",
+            "## Runtime Compare",
+            "",
+            self._status_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
             "",
             "## Review Evidence",
             "",
@@ -292,6 +305,7 @@ class PackagingRunner:
         job = audit_payload["job"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
+        runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         build_artifacts = audit_payload["buildArtifacts"]
         attachments = evidence_index["attachments"]
@@ -323,6 +337,7 @@ class PackagingRunner:
                 self._metric_html("Cloud mode", str(job["cloudMode"])),
                 self._metric_html("Artifacts", str(len(artifact_manifest))),
                 self._metric_html("Runtime validations", str(len(runtime_reports))),
+                self._metric_html("Runtime comparisons", str(len(runtime_comparisons))),
                 self._metric_html("Review runs", str(len(review_runs))),
                 self._metric_html("Evidence attachments", str(sum(1 for item in attachments if item["included"]))),
                 "</section>",
@@ -336,6 +351,8 @@ class PackagingRunner:
                 self._html_table(build_artifacts, ("reviewType", "status", "failureClass", "decision")),
                 "<h2>Runtime Evidence</h2>",
                 self._html_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
+                "<h2>Runtime Compare</h2>",
+                self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
                 "<h2>Review Evidence</h2>",
                 self._html_table(review_runs, ("reviewType", "status", "failureClass", "decision")),
                 "<h2>Evidence Attachment Index</h2>",
@@ -453,6 +470,7 @@ class PackagingRunner:
             archive.writestr("build-artifacts.json", self._json_text(audit_payload["buildArtifacts"]))
             archive.writestr("inference-records.json", self._json_text(audit_payload["inferenceRecords"]))
             archive.writestr("runtime-report.json", self._json_text(audit_payload["runtimeReports"]))
+            archive.writestr("runtime-comparisons.json", self._json_text(audit_payload["runtimeComparisons"]))
             archive.writestr("review-runs.json", self._json_text(audit_payload["reviewRuns"]))
             archive.writestr("tool-calls.json", self._json_text(audit_payload["toolCalls"]))
             archive.writestr("repair-instructions.json", self._json_text(audit_payload["repairInstructions"]))
