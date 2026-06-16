@@ -1160,6 +1160,30 @@ button.graph-node:focus-visible {
   align-items: end;
 }
 
+.audit-saved-toolbar,
+.audit-bulk-toolbar {
+  display: grid;
+  gap: 10px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.audit-saved-toolbar {
+  grid-template-columns: minmax(160px, 0.6fr) minmax(220px, 1fr) auto auto;
+}
+
+.audit-bulk-toolbar {
+  grid-template-columns: auto auto auto minmax(180px, 1fr);
+}
+
+.audit-bulk-toolbar > span {
+  align-self: center;
+  color: var(--muted);
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .audit-filter-icon {
   display: inline-flex;
   align-items: center;
@@ -1172,7 +1196,9 @@ button.graph-node:focus-visible {
   background: rgba(14, 165, 233, 0.08);
 }
 
-.audit-toolbar label {
+.audit-toolbar label,
+.audit-saved-toolbar label,
+.runtime-filter-grid label {
   display: grid;
   gap: 5px;
   min-width: 0;
@@ -1181,7 +1207,10 @@ button.graph-node:focus-visible {
 }
 
 .audit-toolbar input,
-.audit-toolbar select {
+.audit-toolbar select,
+.audit-saved-toolbar input,
+.audit-saved-toolbar select,
+.runtime-filter-grid select {
   min-width: 0;
   min-height: 36px;
   width: 100%;
@@ -1193,23 +1222,29 @@ button.graph-node:focus-visible {
   font-size: 13px;
 }
 
-.audit-toolbar input {
+.audit-toolbar input,
+.audit-saved-toolbar input {
   padding: 0 10px;
 }
 
-.audit-toolbar select {
+.audit-toolbar select,
+.audit-saved-toolbar select,
+.runtime-filter-grid select {
   padding: 0 8px;
 }
 
 .audit-toolbar input:focus-visible,
-.audit-toolbar select:focus-visible {
+.audit-toolbar select:focus-visible,
+.audit-saved-toolbar input:focus-visible,
+.audit-saved-toolbar select:focus-visible,
+.runtime-filter-grid select:focus-visible {
   outline: 3px solid rgba(14, 165, 233, 0.45);
   outline-offset: 2px;
 }
 
 .audit-summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-top: 12px;
 }
@@ -1293,7 +1328,20 @@ button.graph-node:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.data-table td:nth-child(1),
+.data-table input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.data-table input[type="checkbox"]:focus-visible {
+  outline: 3px solid rgba(14, 165, 233, 0.45);
+  outline-offset: 2px;
+}
+
+.data-table td:nth-child(2),
 .data-table td:nth-child(3),
 .data-table td:nth-child(4) {
   color: var(--ink);
@@ -1326,6 +1374,36 @@ button.graph-node:focus-visible {
   font-family: "Fira Code", monospace;
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+.audit-group-row td {
+  padding: 8px 12px;
+  color: var(--ink);
+  background: #eff6ff;
+  font-family: "Fira Code", monospace;
+}
+
+.audit-group-row strong,
+.audit-group-row span {
+  display: inline;
+  margin-right: 8px;
+}
+
+.audit-group-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.audit-group-blocking td {
+  background: rgba(254, 242, 242, 0.95);
+}
+
+.audit-group-review td {
+  background: rgba(255, 251, 235, 0.95);
+}
+
+.audit-selected-row {
+  background: rgba(14, 165, 233, 0.08);
 }
 
 .status-token {
@@ -1519,6 +1597,12 @@ button.graph-node:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.runtime-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .runtime-diff-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1563,6 +1647,25 @@ button.graph-node:focus-visible {
 .runtime-comparison-list {
   display: grid;
   gap: 6px;
+}
+
+.runtime-comparison-viewport {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid rgba(3, 105, 161, 0.16);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.runtime-comparison-spacer {
+  position: relative;
+  min-width: 0;
+}
+
+.runtime-comparison-spacer .runtime-comparison-list {
+  position: absolute;
+  inset: 0 0 auto;
+  padding: 6px;
 }
 
 .runtime-comparison-row {
@@ -1618,6 +1721,52 @@ button.graph-node:focus-visible {
 
 .runtime-diff-section small {
   color: var(--muted);
+}
+
+.runtime-screenshot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.runtime-screenshot-card {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(3, 105, 161, 0.16);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.runtime-screenshot-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: contain;
+  background: #0f172a;
+}
+
+.runtime-screenshot-card figcaption {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.runtime-screenshot-card strong,
+.runtime-screenshot-card span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runtime-screenshot-card strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.runtime-screenshot-card span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .issue-list {
@@ -1711,6 +1860,11 @@ button.graph-node:focus-visible {
     grid-template-columns: 36px minmax(0, 1fr) minmax(150px, 0.5fr);
   }
 
+  .audit-saved-toolbar,
+  .audit-bulk-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .audit-toolbar .secondary-action {
     grid-column: 2 / -1;
     justify-self: start;
@@ -1741,9 +1895,13 @@ button.graph-node:focus-visible {
   }
 
   .audit-toolbar,
+  .audit-saved-toolbar,
+  .audit-bulk-toolbar,
   .audit-summary-grid,
   .graph-summary-grid,
   .runtime-diff-grid,
+  .runtime-filter-grid,
+  .runtime-screenshot-grid,
   .runtime-comparison-row,
   .runtime-run-issues {
     grid-template-columns: 1fr;

@@ -8,15 +8,32 @@ from pathlib import Path
 from typing import Any
 import zipfile
 
-from apps.api.app.models import ArtifactRecord, FailureClass, JobRecord, RunStatus
+from apps.api.app.models import ArtifactRecord, FailureClass, JobRecord
 
-EVIDENCE_ATTACHMENT_KINDS = {
+DEFAULT_EVIDENCE_ATTACHMENT_KINDS = {
     "build_log",
     "runtime_comparison",
     "runtime_scenario",
     "runtime_screenshot",
     "runtime_trace",
 }
+SENSITIVITY_CLASSES = {"public", "derived", "source_sensitive", "secret"}
+RETENTION_CLASSES = {"ephemeral", "project", "archive"}
+
+
+@dataclass(frozen=True)
+class EvidenceAttachmentPolicy:
+    include_kinds: set[str] | None
+    exclude_kinds: set[str]
+    include_sensitivity_classes: set[str] | None
+    include_retention_classes: set[str] | None
+    max_bytes_per_artifact: int | None
+
+    @property
+    def candidate_kinds(self) -> set[str]:
+        if self.include_kinds is None:
+            return set(DEFAULT_EVIDENCE_ATTACHMENT_KINDS)
+        return set(DEFAULT_EVIDENCE_ATTACHMENT_KINDS) | set(self.include_kinds)
 
 
 class PackagingError(RuntimeError):
@@ -504,21 +521,26 @@ class PackagingRunner:
         return ", ".join(links) if links else "none"
 
     def _evidence_index(self, *, job: JobRecord, artifacts: list[ArtifactRecord]) -> dict[str, Any]:
-        attachments = [self._evidence_attachment(artifact) for artifact in artifacts if artifact.kind in EVIDENCE_ATTACHMENT_KINDS]
+        policy = self._evidence_attachment_policy(job)
+        attachments = [
+            self._evidence_attachment(artifact, policy)
+            for artifact in artifacts
+            if artifact.kind in policy.candidate_kinds
+        ]
         return {
             "schemaVersion": "2026-06-14",
             "kind": "evidence_index",
             "jobId": job.id,
+            "attachmentPolicy": self._evidence_attachment_policy_payload(policy),
             "attachments": attachments,
             "includedCount": sum(1 for item in attachments if item["included"]),
             "omittedCount": sum(1 for item in attachments if not item["included"]),
         }
 
-    def _evidence_attachment(self, artifact: ArtifactRecord) -> dict[str, Any]:
+    def _evidence_attachment(self, artifact: ArtifactRecord, policy: EvidenceAttachmentPolicy) -> dict[str, Any]:
         source = Path(artifact.storage_uri)
         package_path = f"evidence/{artifact.kind}/{artifact.id}{self._artifact_suffix(artifact)}"
-        included = source.exists() and source.is_file()
-        reason = "included" if included else "Artifact content is missing or not a file."
+        included, reason = self._evidence_attachment_decision(artifact, source, policy)
         return {
             "artifactId": artifact.id,
             "kind": artifact.kind,
@@ -526,11 +548,95 @@ class PackagingRunner:
             "contentType": artifact.content_type,
             "hash": artifact.hash,
             "size": artifact.size,
+            "sensitivityClass": artifact.sensitivity_class,
+            "retentionClass": artifact.retention_class,
             "sourceFilename": source.name,
             "packagePath": package_path if included else None,
             "included": included,
             "reason": reason,
         }
+
+    def _evidence_attachment_decision(
+        self,
+        artifact: ArtifactRecord,
+        source: Path,
+        policy: EvidenceAttachmentPolicy,
+    ) -> tuple[bool, str]:
+        if policy.include_kinds is not None and artifact.kind not in policy.include_kinds:
+            return False, "Artifact kind is outside configured includeKinds."
+        if artifact.kind in policy.exclude_kinds:
+            return False, "Artifact kind is excluded by configured excludeKinds."
+        if (
+            policy.include_sensitivity_classes is not None
+            and artifact.sensitivity_class not in policy.include_sensitivity_classes
+        ):
+            return False, "Artifact sensitivityClass is outside configured includeSensitivityClasses."
+        if policy.include_retention_classes is not None and artifact.retention_class not in policy.include_retention_classes:
+            return False, "Artifact retentionClass is outside configured includeRetentionClasses."
+        if policy.max_bytes_per_artifact is not None and artifact.size > policy.max_bytes_per_artifact:
+            return False, "Artifact exceeds configured maxBytesPerArtifact."
+        if not source.exists() or not source.is_file():
+            return False, "Artifact content is missing or not a file."
+        return True, "included"
+
+    def _evidence_attachment_policy(self, job: JobRecord) -> EvidenceAttachmentPolicy:
+        config = job.config if isinstance(job.config, dict) else {}
+        packaging = config.get("packaging") if isinstance(config.get("packaging"), dict) else {}
+        raw_policy = packaging.get("evidenceAttachments") if isinstance(packaging.get("evidenceAttachments"), dict) else {}
+        include_kinds = self._optional_string_set(raw_policy.get("includeKinds")) if "includeKinds" in raw_policy else None
+        return EvidenceAttachmentPolicy(
+            include_kinds=include_kinds,
+            exclude_kinds=self._optional_string_set(raw_policy.get("excludeKinds")) or set(),
+            include_sensitivity_classes=self._limited_optional_string_set(
+                raw_policy.get("includeSensitivityClasses"),
+                SENSITIVITY_CLASSES,
+            )
+            if "includeSensitivityClasses" in raw_policy
+            else None,
+            include_retention_classes=self._limited_optional_string_set(
+                raw_policy.get("includeRetentionClasses"),
+                RETENTION_CLASSES,
+            )
+            if "includeRetentionClasses" in raw_policy
+            else None,
+            max_bytes_per_artifact=self._positive_int(raw_policy.get("maxBytesPerArtifact")),
+        )
+
+    def _evidence_attachment_policy_payload(self, policy: EvidenceAttachmentPolicy) -> dict[str, Any]:
+        return {
+            "defaultKinds": sorted(DEFAULT_EVIDENCE_ATTACHMENT_KINDS),
+            "includeKinds": sorted(policy.include_kinds) if policy.include_kinds is not None else None,
+            "excludeKinds": sorted(policy.exclude_kinds),
+            "includeSensitivityClasses": sorted(policy.include_sensitivity_classes)
+            if policy.include_sensitivity_classes is not None
+            else None,
+            "includeRetentionClasses": sorted(policy.include_retention_classes)
+            if policy.include_retention_classes is not None
+            else None,
+            "maxBytesPerArtifact": policy.max_bytes_per_artifact,
+        }
+
+    def _optional_string_set(self, value: Any) -> set[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, list):
+            return {item for item in value if isinstance(item, str)}
+        return None
+
+    def _limited_optional_string_set(self, value: Any, allowed: set[str]) -> set[str] | None:
+        values = self._optional_string_set(value)
+        if values is None:
+            return None
+        return {value for value in values if value in allowed}
+
+    def _positive_int(self, value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value >= 0:
+            return value
+        return None
 
     def _artifact_suffix(self, artifact: ArtifactRecord) -> str:
         suffix = Path(artifact.storage_uri).suffix

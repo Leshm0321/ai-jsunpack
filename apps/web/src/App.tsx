@@ -21,9 +21,11 @@ import {
   Radar,
   RefreshCw,
   RotateCcw,
+  Save,
   SearchCode,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload,
   Workflow,
   XCircle
@@ -101,6 +103,8 @@ interface EvidenceAttachmentEntry {
   kind: Artifact["kind"] | string;
   packagePath: string | null;
   reason: string;
+  retentionClass?: Artifact["retentionClass"] | string;
+  sensitivityClass?: Artifact["sensitivityClass"] | string;
   size: number;
   sourceFilename: string;
   stage: JobStatus | string;
@@ -143,6 +147,22 @@ interface AuditFilterState {
   status: AuditStatusFilter;
 }
 
+type AuditRiskGroupId = "blocking" | "review" | "passing";
+
+interface SavedAuditFilter {
+  createdAt: string;
+  filters: AuditFilterState;
+  id: string;
+  name: string;
+}
+
+interface AuditRiskGroup {
+  detail: string;
+  id: AuditRiskGroupId;
+  records: NormalizedAuditRecord[];
+  title: string;
+}
+
 interface NormalizedAuditRecord {
   artifactIds: string[];
   category: Exclude<AuditCategory, "all">;
@@ -164,6 +184,12 @@ interface RuntimeComparisonState {
 interface RuntimeComparisonLoaded {
   artifactId: string;
   report: RuntimeComparisonReport;
+}
+
+interface RuntimeComparisonFilters {
+  scenario: string;
+  status: "all" | RuntimeComparisonReport["status"];
+  viewport: string;
 }
 
 type EvidenceGraphMode = "lineage" | "chunks" | "agents";
@@ -203,6 +229,10 @@ interface EvidenceGraphSourceState {
 }
 
 const previewMaxBytes = 256 * 1024;
+const auditFilterStorageKey = "ai-jsunpack.auditFilters.v1";
+const defaultAuditFilters: AuditFilterState = { category: "all", query: "", status: "all" };
+const runtimeComparisonRowHeight = 50;
+const runtimeComparisonListHeight = 280;
 
 const stageDefinitions: StageDefinition[] = [
   { status: "queued", label: "Job created" },
@@ -1502,13 +1532,98 @@ function AuditPanel({
   evidence: JobEvidence;
   onArtifactSelect: (artifactId: string) => void;
 }) {
-  const [filters, setFilters] = useState<AuditFilterState>({ category: "all", query: "", status: "all" });
+  const [filters, setFilters] = useState<AuditFilterState>(defaultAuditFilters);
+  const [savedFilters, setSavedFilters] = useState<SavedAuditFilter[]>(() => readSavedAuditFilters());
+  const [selectedSavedFilterId, setSelectedSavedFilterId] = useState("");
+  const [filterName, setFilterName] = useState("");
+  const [selectedRecordIds, setSelectedRecordIds] = useState<Set<string>>(() => new Set());
   const auditRecords = useMemo(() => buildAuditRecords(evidence), [evidence]);
   const filteredRecords = useMemo(
     () => auditRecords.filter((record) => auditRecordMatches(record, filters)),
     [auditRecords, filters]
   );
+  const groupedRecords = useMemo(() => groupAuditRecordsByRisk(filteredRecords), [filteredRecords]);
+  const selectedRecords = useMemo(
+    () => auditRecords.filter((record) => selectedRecordIds.has(record.id)),
+    [auditRecords, selectedRecordIds]
+  );
+  const visibleSelectedCount = filteredRecords.filter((record) => selectedRecordIds.has(record.id)).length;
+  const allVisibleSelected = filteredRecords.length > 0 && visibleSelectedCount === filteredRecords.length;
   const attentionCount = auditRecords.filter((record) => auditRecordNeedsAttention(record)).length;
+
+  useEffect(() => {
+    const knownIds = new Set(auditRecords.map((record) => record.id));
+    setSelectedRecordIds((current) => {
+      const next = new Set([...current].filter((recordId) => knownIds.has(recordId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [auditRecords]);
+
+  const handleFilterSave = () => {
+    const name = filterName.trim() || auditFilterLabel(filters);
+    const existingId = selectedSavedFilterId && savedFilters.some((saved) => saved.id === selectedSavedFilterId)
+      ? selectedSavedFilterId
+      : "";
+    const savedFilter: SavedAuditFilter = {
+      createdAt: new Date().toISOString(),
+      filters,
+      id: existingId || `audit-filter-${Date.now()}`,
+      name
+    };
+    const nextSavedFilters = existingId
+      ? savedFilters.map((saved) => (saved.id === existingId ? savedFilter : saved))
+      : [...savedFilters, savedFilter];
+    setSavedFilters(nextSavedFilters);
+    setSelectedSavedFilterId(savedFilter.id);
+    setFilterName(name);
+    persistSavedAuditFilters(nextSavedFilters);
+  };
+
+  const handleSavedFilterLoad = (filterId: string) => {
+    setSelectedSavedFilterId(filterId);
+    const saved = savedFilters.find((item) => item.id === filterId);
+    if (!saved) {
+      return;
+    }
+    setFilters(saved.filters);
+    setFilterName(saved.name);
+  };
+
+  const handleSavedFilterDelete = () => {
+    if (!selectedSavedFilterId) {
+      return;
+    }
+    const nextSavedFilters = savedFilters.filter((saved) => saved.id !== selectedSavedFilterId);
+    setSavedFilters(nextSavedFilters);
+    setSelectedSavedFilterId("");
+    setFilterName("");
+    persistSavedAuditFilters(nextSavedFilters);
+  };
+
+  const handleVisibleSelectionToggle = () => {
+    const visibleIds = filteredRecords.map((record) => record.id);
+    setSelectedRecordIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        visibleIds.forEach((recordId) => next.delete(recordId));
+      } else {
+        visibleIds.forEach((recordId) => next.add(recordId));
+      }
+      return next;
+    });
+  };
+
+  const handleRecordSelectionToggle = (recordId: string) => {
+    setSelectedRecordIds((current) => {
+      const next = new Set(current);
+      if (next.has(recordId)) {
+        next.delete(recordId);
+      } else {
+        next.add(recordId);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="audit-sections">
@@ -1579,6 +1694,79 @@ function AuditPanel({
             Export view
           </button>
         </div>
+        <div className="audit-saved-toolbar" aria-label="Saved audit filters">
+          <label htmlFor="audit-saved-filter">
+            <span>Saved filter</span>
+            <select
+              id="audit-saved-filter"
+              name="audit-saved-filter"
+              value={selectedSavedFilterId}
+              onChange={(event) => handleSavedFilterLoad(event.currentTarget.value)}
+            >
+              <option value="">Manual filters</option>
+              {savedFilters.map((saved) => (
+                <option key={saved.id} value={saved.id}>
+                  {saved.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label htmlFor="audit-filter-name">
+            <span>Filter name</span>
+            <input
+              id="audit-filter-name"
+              name="audit-filter-name"
+              value={filterName}
+              onChange={(event) => setFilterName(event.currentTarget.value)}
+              placeholder={auditFilterLabel(filters)}
+            />
+          </label>
+          <button className="secondary-action compact" type="button" onClick={handleFilterSave}>
+            <Save size={16} aria-hidden="true" />
+            Save filter
+          </button>
+          <button
+            className="secondary-action compact"
+            type="button"
+            disabled={!selectedSavedFilterId}
+            onClick={handleSavedFilterDelete}
+          >
+            <Trash2 size={16} aria-hidden="true" />
+            Delete
+          </button>
+        </div>
+        <div className="audit-bulk-toolbar" aria-label="Audit bulk actions">
+          <button className="secondary-action compact" type="button" disabled={filteredRecords.length === 0} onClick={handleVisibleSelectionToggle}>
+            <Filter size={16} aria-hidden="true" />
+            {allVisibleSelected ? "Clear visible" : "Select visible"}
+          </button>
+          <button className="secondary-action compact" type="button" disabled={selectedRecordIds.size === 0} onClick={() => setSelectedRecordIds(new Set())}>
+            <XCircle size={16} aria-hidden="true" />
+            Clear selection
+          </button>
+          <button
+            className="secondary-action compact"
+            type="button"
+            disabled={!currentJob || selectedRecords.length === 0}
+            onClick={() =>
+              currentJob
+                ? downloadJsonFile(`ai-jsunpack-${currentJob.id}-audit-selected.json`, {
+                    exportedAt: new Date().toISOString(),
+                    jobId: currentJob.id,
+                    filters,
+                    selectedCount: selectedRecords.length,
+                    records: selectedRecords
+                  })
+                : undefined
+            }
+          >
+            <Download size={16} aria-hidden="true" />
+            Export selected
+          </button>
+          <span>
+            {visibleSelectedCount} visible selected / {selectedRecords.length} total selected
+          </span>
+        </div>
         <div className="audit-summary-grid">
           <div>
             <span>Total</span>
@@ -1591,6 +1779,10 @@ function AuditPanel({
           <div>
             <span>Visible</span>
             <strong>{filteredRecords.length}</strong>
+          </div>
+          <div>
+            <span>Selected</span>
+            <strong>{selectedRecords.length}</strong>
           </div>
         </div>
       </section>
@@ -1605,6 +1797,15 @@ function AuditPanel({
             <table className="data-table audit-ledger-table">
               <thead>
                 <tr>
+                  <th>
+                    <input
+                      aria-label={allVisibleSelected ? "Clear all visible audit records" : "Select all visible audit records"}
+                      checked={allVisibleSelected}
+                      disabled={filteredRecords.length === 0}
+                      onChange={handleVisibleSelectionToggle}
+                      type="checkbox"
+                    />
+                  </th>
                   <th>Type</th>
                   <th>Subject</th>
                   <th>Status</th>
@@ -1613,26 +1814,17 @@ function AuditPanel({
                 </tr>
               </thead>
               <tbody>
-                {filteredRecords.map((record) => (
-                  <tr key={record.id}>
-                    <td>
-                      <strong>{record.category}</strong>
-                      <span>{record.label}</span>
-                    </td>
-                    <td>
-                      <strong>{record.secondary}</strong>
-                      <span>{record.detail}</span>
-                    </td>
-                    <td>
-                      <StatusToken status={record.status} />
-                      {record.failureClass !== "none" ? <small>{record.failureClass}</small> : null}
-                    </td>
-                    <td>
-                      <EvidenceRefButtons refs={record.evidenceRefs} onArtifactSelect={onArtifactSelect} />
-                    </td>
-                    <td>{record.artifactIds.length > 0 ? formatIdList(record.artifactIds) : "None"}</td>
-                  </tr>
-                ))}
+                {groupedRecords.map((group) =>
+                  group.records.length > 0 ? (
+                    <AuditRiskGroupRows
+                      group={group}
+                      key={group.id}
+                      onArtifactSelect={onArtifactSelect}
+                      onRecordSelectionToggle={handleRecordSelectionToggle}
+                      selectedRecordIds={selectedRecordIds}
+                    />
+                  ) : null
+                )}
               </tbody>
             </table>
           </div>
@@ -1641,6 +1833,59 @@ function AuditPanel({
         )}
       </section>
     </div>
+  );
+}
+
+function AuditRiskGroupRows({
+  group,
+  onArtifactSelect,
+  onRecordSelectionToggle,
+  selectedRecordIds
+}: {
+  group: AuditRiskGroup;
+  onArtifactSelect: (artifactId: string) => void;
+  onRecordSelectionToggle: (recordId: string) => void;
+  selectedRecordIds: Set<string>;
+}) {
+  return (
+    <>
+      <tr className={`audit-group-row audit-group-${group.id}`}>
+        <td colSpan={6}>
+          <strong>{group.title}</strong>
+          <span>
+            {group.records.length} record{group.records.length === 1 ? "" : "s"} / {group.detail}
+          </span>
+        </td>
+      </tr>
+      {group.records.map((record) => (
+        <tr className={selectedRecordIds.has(record.id) ? "audit-selected-row" : undefined} key={record.id}>
+          <td>
+            <input
+              aria-label={`Select audit record ${record.label}`}
+              checked={selectedRecordIds.has(record.id)}
+              onChange={() => onRecordSelectionToggle(record.id)}
+              type="checkbox"
+            />
+          </td>
+          <td>
+            <strong>{record.category}</strong>
+            <span>{record.label}</span>
+          </td>
+          <td>
+            <strong>{record.secondary}</strong>
+            <span>{record.detail}</span>
+          </td>
+          <td>
+            <StatusToken status={record.status} />
+            {record.failureClass !== "none" ? <small>{record.failureClass}</small> : null}
+          </td>
+          <td>
+            <EvidenceRefButtons refs={record.evidenceRefs} onArtifactSelect={onArtifactSelect} />
+          </td>
+          <td>{record.artifactIds.length > 0 ? formatIdList(record.artifactIds) : "None"}</td>
+        </tr>
+      ))}
+    </>
   );
 }
 
@@ -1724,6 +1969,7 @@ function RuntimePanel({
             onArtifactSelect={onArtifactSelect}
           />
           <RuntimeCompareStatus
+            apiBaseUrl={apiBaseUrl}
             artifacts={artifacts}
             currentJob={currentJob}
             onArtifactSelect={onArtifactSelect}
@@ -1758,10 +2004,12 @@ function RuntimePanel({
 }
 
 function RuntimeCompareStatus({
+  apiBaseUrl,
   artifacts,
   currentJob,
   onArtifactSelect
 }: {
+  apiBaseUrl: string;
   artifacts: Artifact[];
   currentJob: Job | null;
   onArtifactSelect: (artifactId: string) => void;
@@ -1776,6 +2024,8 @@ function RuntimeCompareStatus({
     reports: [],
     status: "idle"
   });
+  const [filters, setFilters] = useState<RuntimeComparisonFilters>({ scenario: "all", status: "all", viewport: "all" });
+  const [listScrollTop, setListScrollTop] = useState(0);
 
   useEffect(() => {
     if (!currentJob || comparisonArtifacts.length === 0) {
@@ -1811,8 +2061,19 @@ function RuntimeCompareStatus({
     };
   }, [currentJob?.id, comparisonArtifacts]);
 
+  const scenarioOptions = useMemo(() => uniqueRuntimeComparisonScenarios(comparison.reports), [comparison.reports]);
+  const viewportOptions = useMemo(() => uniqueRuntimeComparisonViewports(comparison.reports), [comparison.reports]);
+  const filteredReports = useMemo(
+    () => comparison.reports.filter((item) => runtimeComparisonMatchesFilters(item.report, filters)),
+    [comparison.reports, filters]
+  );
+  const virtualRange = useMemo(
+    () => virtualListRange(filteredReports.length, listScrollTop, runtimeComparisonRowHeight, runtimeComparisonListHeight),
+    [filteredReports.length, listScrollTop]
+  );
+  const visibleReports = filteredReports.slice(virtualRange.start, virtualRange.end);
   const selectedComparison =
-    comparison.reports.find((item) => item.artifactId === selectedComparisonId) ?? comparison.reports[0] ?? null;
+    filteredReports.find((item) => item.artifactId === selectedComparisonId) ?? filteredReports[0] ?? null;
   const report = selectedComparison?.report ?? null;
   const differences = report?.differences ?? null;
 
@@ -1846,21 +2107,99 @@ function RuntimeCompareStatus({
         <span className="runtime-compare-note">Runtime compare has not produced a linked artifact yet.</span>
       ) : null}
       {comparison.reports.length > 1 ? (
-        <div className="runtime-comparison-list" aria-label="Runtime comparison matrix">
-          {comparison.reports.map((item) => (
-            <button
-              className={item.artifactId === selectedComparison?.artifactId ? "runtime-comparison-row row-active" : "runtime-comparison-row"}
-              key={item.artifactId}
-              type="button"
-              onClick={() => setSelectedComparisonId(item.artifactId)}
+        <>
+          <div className="runtime-filter-grid" aria-label="Runtime comparison filters">
+            <label htmlFor="runtime-scenario-filter">
+              <span>Scenario</span>
+              <select
+                id="runtime-scenario-filter"
+                value={filters.scenario}
+                onChange={(event) => {
+                  setListScrollTop(0);
+                  setFilters((current) => ({ ...current, scenario: event.currentTarget.value }));
+                }}
+              >
+                <option value="all">All scenarios</option>
+                {scenarioOptions.map((scenario) => (
+                  <option key={scenario} value={scenario}>
+                    {scenario}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label htmlFor="runtime-viewport-filter">
+              <span>Viewport</span>
+              <select
+                id="runtime-viewport-filter"
+                value={filters.viewport}
+                onChange={(event) => {
+                  setListScrollTop(0);
+                  setFilters((current) => ({ ...current, viewport: event.currentTarget.value }));
+                }}
+              >
+                <option value="all">All viewports</option>
+                {viewportOptions.map((viewport) => (
+                  <option key={viewport.value} value={viewport.value}>
+                    {viewport.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label htmlFor="runtime-status-filter">
+              <span>Status</span>
+              <select
+                id="runtime-status-filter"
+                value={filters.status}
+                onChange={(event) => {
+                  setListScrollTop(0);
+                  setFilters((current) => ({
+                    ...current,
+                    status: event.currentTarget.value as RuntimeComparisonFilters["status"]
+                  }));
+                }}
+              >
+                <option value="all">All statuses</option>
+                <option value="pass">Pass</option>
+                <option value="best_effort">Best effort</option>
+                <option value="retry">Retry</option>
+                <option value="fail">Fail</option>
+              </select>
+            </label>
+          </div>
+          <div className="runtime-compare-note">
+            Showing {filteredReports.length} of {comparison.reports.length} comparison rows.
+          </div>
+          {filteredReports.length > 0 ? (
+            <div
+              className="runtime-comparison-viewport"
+              onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
+              style={{ maxHeight: runtimeComparisonListHeight }}
             >
-              <Eye size={15} aria-hidden="true" />
-              <span>{runtimeComparisonScopeLabel(item.report)}</span>
-              <small>{formatScreenshotDiff(item.report.differences)}</small>
-              <StatusToken status={item.report.status} />
-            </button>
-          ))}
-        </div>
+              <div className="runtime-comparison-spacer" style={{ height: filteredReports.length * runtimeComparisonRowHeight }}>
+                <div className="runtime-comparison-list" style={{ transform: `translateY(${virtualRange.start * runtimeComparisonRowHeight}px)` }} aria-label="Runtime comparison matrix">
+                  {visibleReports.map((item) => (
+                    <button
+                      className={
+                        item.artifactId === selectedComparison?.artifactId ? "runtime-comparison-row row-active" : "runtime-comparison-row"
+                      }
+                      key={item.artifactId}
+                      style={{ minHeight: runtimeComparisonRowHeight }}
+                      type="button"
+                      onClick={() => setSelectedComparisonId(item.artifactId)}
+                    >
+                      <Eye size={15} aria-hidden="true" />
+                      <span>{runtimeComparisonScopeLabel(item.report)}</span>
+                      <small>{formatScreenshotDiff(item.report.differences)}</small>
+                      <StatusToken status={item.report.status} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <EmptyState title="No comparison rows" detail="Adjust the runtime comparison filters." />
+          )}
+        </>
       ) : null}
       {selectedComparison && report && differences ? (
         <>
@@ -1875,6 +2214,13 @@ function RuntimeCompareStatus({
           <RuntimeComparisonEvidenceButtons
             artifacts={artifacts}
             comparisonArtifactId={selectedComparison.artifactId}
+            onArtifactSelect={onArtifactSelect}
+            report={report}
+          />
+          <RuntimeScreenshotPreview
+            apiBaseUrl={apiBaseUrl}
+            artifacts={artifacts}
+            currentJob={currentJob}
             onArtifactSelect={onArtifactSelect}
             report={report}
           />
@@ -1942,6 +2288,53 @@ function RuntimeComparisonEvidenceButtons({
           <span>{runtimeEvidenceLabel(artifactId, report)}</span>
           <small>{artifactId}</small>
         </button>
+      ))}
+    </div>
+  );
+}
+
+function RuntimeScreenshotPreview({
+  apiBaseUrl,
+  artifacts,
+  currentJob,
+  onArtifactSelect,
+  report
+}: {
+  apiBaseUrl: string;
+  artifacts: Artifact[];
+  currentJob: Job | null;
+  onArtifactSelect: (artifactId: string) => void;
+  report: RuntimeComparisonReport;
+}) {
+  const screenshotItems = runtimeScreenshotPreviewItems(report)
+    .map((item) => ({
+      ...item,
+      artifact: artifacts.find((artifact) => artifact.id === item.artifactId) ?? null
+    }))
+    .filter((item) => item.artifact);
+
+  if (!currentJob || screenshotItems.length === 0) {
+    return <RuntimeDiffSection title="Screenshot previews" items={["No linked screenshot artifacts are available for inline preview."]} />;
+  }
+
+  return (
+    <div className="runtime-screenshot-grid" aria-label="Runtime screenshot previews">
+      {screenshotItems.map((item) => (
+        <figure className="runtime-screenshot-card" key={`${item.label}-${item.artifactId}`}>
+          <img
+            alt={`${item.label} screenshot evidence`}
+            loading="lazy"
+            src={artifactDownloadUrl(apiBaseUrl, currentJob.id, item.artifactId)}
+          />
+          <figcaption>
+            <strong>{item.label}</strong>
+            <span>{item.detail}</span>
+            <button className="download-link" type="button" onClick={() => onArtifactSelect(item.artifactId)}>
+              <Link2 size={14} aria-hidden="true" />
+              Locate artifact
+            </button>
+          </figcaption>
+        </figure>
       ))}
     </div>
   );
@@ -2227,6 +2620,55 @@ function parseRuntimeComparisonReport(text: string): RuntimeComparisonReport {
     throw new Error("Artifact is not a valid runtime comparison report.");
   }
   return payload as RuntimeComparisonReport;
+}
+
+function readSavedAuditFilters(): SavedAuditFilter[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(auditFilterStorageKey);
+    if (!raw) {
+      return [];
+    }
+    const payload = JSON.parse(raw);
+    if (!Array.isArray(payload)) {
+      return [];
+    }
+    return payload
+      .filter(isRecord)
+      .map((item): SavedAuditFilter | null => {
+        if (typeof item.id !== "string" || typeof item.name !== "string" || !isRecord(item.filters)) {
+          return null;
+        }
+        return {
+          createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date().toISOString(),
+          filters: sanitizeAuditFilters(item.filters),
+          id: item.id,
+          name: item.name
+        };
+      })
+      .filter((item): item is SavedAuditFilter => Boolean(item));
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedAuditFilters(filters: SavedAuditFilter[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(auditFilterStorageKey, JSON.stringify(filters));
+}
+
+function sanitizeAuditFilters(value: Record<string, unknown>): AuditFilterState {
+  const category = value.category === "inference" || value.category === "review" || value.category === "tool" ? value.category : "all";
+  const status = value.status === "attention" || value.status === "pass" || value.status === "fail" ? value.status : "all";
+  return {
+    category,
+    query: typeof value.query === "string" ? value.query : "",
+    status
+  };
 }
 
 function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
@@ -2824,6 +3266,53 @@ function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {
   ];
 }
 
+function auditFilterLabel(filters: AuditFilterState): string {
+  const parts = [
+    filters.category === "all" ? "all records" : filters.category,
+    filters.status === "all" ? "all statuses" : filters.status,
+    filters.query.trim() ? `"${filters.query.trim()}"` : "no search"
+  ];
+  return parts.join(" / ");
+}
+
+function groupAuditRecordsByRisk(records: NormalizedAuditRecord[]): AuditRiskGroup[] {
+  const groups: AuditRiskGroup[] = [
+    {
+      detail: "non-none failure classes or failing decisions",
+      id: "blocking",
+      records: [],
+      title: "Blocking risk"
+    },
+    {
+      detail: "best-effort, retry, unverified, or needs-review records",
+      id: "review",
+      records: [],
+      title: "Needs review"
+    },
+    {
+      detail: "accepted or passing records",
+      id: "passing",
+      records: [],
+      title: "Passing evidence"
+    }
+  ];
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  for (const record of records) {
+    groupsById.get(auditRecordRiskGroup(record))?.records.push(record);
+  }
+  return groups;
+}
+
+function auditRecordRiskGroup(record: NormalizedAuditRecord): AuditRiskGroupId {
+  if (record.failureClass !== "none" || statusTokenTone(record.status) === "fail") {
+    return "blocking";
+  }
+  if (auditRecordNeedsAttention(record)) {
+    return "review";
+  }
+  return "passing";
+}
+
 function auditRecordMatches(record: NormalizedAuditRecord, filters: AuditFilterState): boolean {
   if (filters.category !== "all" && record.category !== filters.category) {
     return false;
@@ -2869,6 +3358,80 @@ function statusTokenTone(status: string): "pass" | "warn" | "fail" {
     return "fail";
   }
   return "warn";
+}
+
+function uniqueRuntimeComparisonScenarios(reports: RuntimeComparisonLoaded[]): string[] {
+  return [...new Set(reports.map((item) => item.report.differences.comparisonScope.scenarioName))].sort();
+}
+
+function uniqueRuntimeComparisonViewports(reports: RuntimeComparisonLoaded[]): Array<{ label: string; value: string }> {
+  const viewports = new Map<string, string>();
+  for (const item of reports) {
+    const value = runtimeComparisonViewportValue(item.report);
+    viewports.set(value, runtimeComparisonViewportLabel(item.report));
+  }
+  return [...viewports.entries()].map(([value, label]) => ({ label, value })).sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function runtimeComparisonMatchesFilters(report: RuntimeComparisonReport, filters: RuntimeComparisonFilters): boolean {
+  if (filters.scenario !== "all" && report.differences.comparisonScope.scenarioName !== filters.scenario) {
+    return false;
+  }
+  if (filters.viewport !== "all" && runtimeComparisonViewportValue(report) !== filters.viewport) {
+    return false;
+  }
+  if (filters.status !== "all" && report.status !== filters.status) {
+    return false;
+  }
+  return true;
+}
+
+function runtimeComparisonViewportLabel(report: RuntimeComparisonReport): string {
+  const viewport = report.differences.comparisonScope.viewport;
+  if (!viewport) {
+    return "default viewport";
+  }
+  const name = viewport.name ? `${viewport.name} ` : "";
+  return `${name}${viewport.width}x${viewport.height}`;
+}
+
+function runtimeComparisonViewportValue(report: RuntimeComparisonReport): string {
+  const viewport = report.differences.comparisonScope.viewport;
+  if (!viewport) {
+    return "default";
+  }
+  return `${viewport.name ?? "viewport"}:${viewport.width}x${viewport.height}`;
+}
+
+function virtualListRange(totalItems: number, scrollTop: number, rowHeight: number, viewportHeight: number): { end: number; start: number } {
+  const overscan = 4;
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  return {
+    end: Math.min(totalItems, start + visibleCount),
+    start
+  };
+}
+
+function runtimeScreenshotPreviewItems(report: RuntimeComparisonReport): Array<{ artifactId: string; detail: string; label: string }> {
+  const items = [
+    {
+      artifactId: report.original.screenshotArtifactId ?? null,
+      detail: "Original runtime capture",
+      label: "Original"
+    },
+    {
+      artifactId: report.reconstructed.screenshotArtifactId ?? null,
+      detail: "Reconstructed runtime capture",
+      label: "Reconstructed"
+    },
+    {
+      artifactId: report.differences.screenshotDiff.diffArtifactId ?? null,
+      detail: "Pixel difference capture",
+      label: "Pixel diff"
+    }
+  ];
+  return items.filter((item): item is { artifactId: string; detail: string; label: string } => Boolean(item.artifactId));
 }
 
 function buildStageItems(currentStatus: JobStatus | undefined): StageItem[] {
