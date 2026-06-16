@@ -233,9 +233,31 @@ class ApiEndpointTest(unittest.TestCase):
             content_type="text/markdown; charset=utf-8",
             producer="test.api",
         )
+        html_artifact = self.store.write_artifact(
+            job_id,
+            kind="html_report",
+            stage="packaging",
+            filename="audit-report.html",
+            content=b"<!doctype html><title>Audit</title>\n",
+            content_type="text/html; charset=utf-8",
+            producer="test.api",
+            parent_artifact_ids=[audit_artifact.id],
+        )
+        evidence_index_artifact = self.store.write_artifact(
+            job_id,
+            kind="evidence_index",
+            stage="packaging",
+            filename="evidence-index.json",
+            content=b'{"kind":"evidence_index","attachments":[]}\n',
+            content_type="application/json",
+            producer="test.api",
+            parent_artifact_ids=[audit_artifact.id],
+        )
         package_buffer = BytesIO()
         with zipfile.ZipFile(package_buffer, "w") as archive:
             archive.writestr("audit-report.md", "# Audit\n")
+            archive.writestr("audit-report.html", "<!doctype html><title>Audit</title>\n")
+            archive.writestr("evidence-index.json", '{"kind":"evidence_index","attachments":[]}\n')
         package_artifact = self.store.write_artifact(
             job_id,
             kind="result_package",
@@ -249,12 +271,18 @@ class ApiEndpointTest(unittest.TestCase):
 
         audit_download = self.client.get(f"/jobs/{job_id}/reports/audit")
         package_download = self.client.get(f"/jobs/{job_id}/result-package")
+        html_download = self.client.get(f"/jobs/{job_id}/artifacts/{html_artifact.id}/download")
+        evidence_index_download = self.client.get(f"/jobs/{job_id}/artifacts/{evidence_index_artifact.id}/download")
         rerun = self.client.post(f"/jobs/{job_id}/rerun")
 
         self.assertEqual(audit_download.status_code, 200)
         self.assertEqual(package_download.status_code, 200)
+        self.assertEqual(html_download.status_code, 200)
+        self.assertEqual(evidence_index_download.status_code, 200)
         self.assertEqual(audit_download.text, "# Audit\n")
         self.assertEqual(package_download.content, Path(package_artifact.storage_uri).read_bytes())
+        self.assertIn("<!doctype html>", html_download.text)
+        self.assertEqual(evidence_index_download.json()["kind"], "evidence_index")
         self.assertEqual(rerun.status_code, 200)
         rerun_body = rerun.json()
         rerun_job = rerun_body["job"]

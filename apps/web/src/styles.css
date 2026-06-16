@@ -770,6 +770,87 @@ button:focus-visible,
   gap: 12px;
 }
 
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.report-metric {
+  min-width: 0;
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid rgba(3, 105, 161, 0.18);
+  border-radius: 8px;
+  background: rgba(240, 249, 255, 0.78);
+}
+
+.report-metric span,
+.report-risk-strip span,
+.evidence-index-row span,
+.evidence-index-row small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.report-metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-metric strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink);
+  font-family: "Fira Code", monospace;
+  font-size: 20px;
+}
+
+.report-risk-strip,
+.report-detail-block {
+  margin: 0 12px;
+}
+
+.report-risk-strip {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 62px;
+  padding: 10px 12px;
+  border: 1px solid rgba(34, 197, 94, 0.22);
+  border-radius: 8px;
+  color: #166534;
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.report-risk-strip.warning {
+  border-color: rgba(245, 158, 11, 0.32);
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.report-risk-strip strong {
+  display: block;
+  color: inherit;
+  font-size: 13px;
+}
+
+.report-risk-strip span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-detail-block {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(203, 213, 225, 0.8);
+}
+
 .report-row {
   display: flex;
   align-items: center;
@@ -801,6 +882,50 @@ button:focus-visible,
   font-family: "Fira Code", monospace;
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+.report-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.evidence-index-list {
+  display: grid;
+  gap: 8px;
+}
+
+.evidence-index-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.evidence-index-row strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.evidence-index-row span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
+}
+
+.evidence-index-row small {
+  margin-top: 4px;
+  color: var(--primary);
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
 }
 
 .audit-sections {
@@ -1271,6 +1396,7 @@ button:focus-visible,
   }
 
   .mode-grid,
+  .report-summary-grid,
   .runtime-grid {
     grid-template-columns: 1fr;
   }
@@ -1294,6 +1420,7 @@ button:focus-visible,
   }
 
   .report-row,
+  .evidence-index-row,
   .history-row {
     align-items: flex-start;
     grid-template-columns: 1fr;
@@ -1301,6 +1428,10 @@ button:focus-visible,
 
   .report-row {
     flex-direction: column;
+  }
+
+  .report-actions {
+    justify-content: flex-start;
   }
 
   .audit-row {

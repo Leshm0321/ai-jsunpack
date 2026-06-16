@@ -103,6 +103,8 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("runtime_trace", artifact_by_kind)
                 self.assertIn("runtime_screenshot", artifact_by_kind)
                 self.assertIn("audit_report", artifact_by_kind)
+                self.assertIn("html_report", artifact_by_kind)
+                self.assertIn("evidence_index", artifact_by_kind)
                 self.assertIn("result_package", artifact_by_kind)
                 inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
                 build_log_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_log"]
@@ -239,15 +241,38 @@ class WorkerPipelineTest(unittest.TestCase):
                 audit_report = Path(artifact_by_kind["audit_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("# AI JS Unpack Audit Report", audit_report)
                 self.assertIn("completed_best_effort", audit_report)
+                self.assertIn("## Evidence Attachment Index", audit_report)
+                html_report = Path(artifact_by_kind["html_report"].storage_uri).read_text(encoding="utf-8")
+                self.assertIn("<!doctype html>", html_report)
+                self.assertIn("Evidence Attachment Index", html_report)
+                evidence_index_payload = json.loads(
+                    Path(artifact_by_kind["evidence_index"].storage_uri).read_text(encoding="utf-8")
+                )
+                self.assertEqual(evidence_index_payload["kind"], "evidence_index")
+                self.assertEqual(evidence_index_payload["includedCount"], 4)
+                package_paths = {item["packagePath"] for item in evidence_index_payload["attachments"] if item["included"]}
+                self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", package_paths)
+                self.assertIn(f"evidence/build_log/{typecheck_log_artifact.id}.json", package_paths)
+                self.assertIn(f"evidence/runtime_trace/{artifact_by_kind['runtime_trace'].id}.json", package_paths)
+                self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", package_paths)
                 with zipfile.ZipFile(artifact_by_kind["result_package"].storage_uri) as archive:
                     names = set(archive.namelist())
                 self.assertIn("audit-report.md", names)
+                self.assertIn("audit-report.html", names)
                 self.assertIn("audit.json", names)
+                self.assertIn("evidence-index.json", names)
                 self.assertIn("artifact-manifest.json", names)
+                self.assertIn("build-artifacts.json", names)
+                self.assertIn("inference-records.json", names)
                 self.assertIn("runtime-report.json", names)
                 self.assertIn("review-runs.json", names)
+                self.assertIn("tool-calls.json", names)
+                self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", names)
+                self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", names)
                 self.assertIn("generated_project/src/main.ts", names)
                 self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
+                self.assertIn(artifact_by_kind["html_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
+                self.assertIn(artifact_by_kind["evidence_index"].id, artifact_by_kind["result_package"].parent_artifact_ids)
             finally:
                 store.close()
 

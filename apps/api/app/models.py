@@ -53,6 +53,8 @@ ArtifactKind = Literal[
     "repair_instruction",
     "result_package",
     "audit_report",
+    "html_report",
+    "evidence_index",
 ]
 FailureClass = Literal[
     "none",

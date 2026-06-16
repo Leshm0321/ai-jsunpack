@@ -88,6 +88,28 @@ interface JobEvidence {
   toolCalls: ToolCall[];
 }
 
+interface EvidenceAttachmentEntry {
+  artifactId: string;
+  contentType: string;
+  hash: string;
+  included: boolean;
+  kind: Artifact["kind"] | string;
+  packagePath: string | null;
+  reason: string;
+  size: number;
+  sourceFilename: string;
+  stage: JobStatus | string;
+}
+
+interface EvidenceIndexPayload {
+  attachments: EvidenceAttachmentEntry[];
+  includedCount: number;
+  jobId: string;
+  kind: "evidence_index";
+  omittedCount: number;
+  schemaVersion: string;
+}
+
 interface JobWorkspace {
   summary: JobSummary;
   evidence: JobEvidence;
@@ -143,6 +165,8 @@ const stageDefinitions: StageDefinition[] = [
 
 const reportArtifactKinds = new Set<Artifact["kind"]>([
   "audit_report",
+  "html_report",
+  "evidence_index",
   "result_package",
   "runtime_validation",
   "runtime_trace",
@@ -170,6 +194,7 @@ const textualArtifactKinds = new Set<Artifact["kind"]>([
   "memory_record",
   "knowledge_evidence",
   "repair_instruction",
+  "evidence_index",
   "audit_report"
 ]);
 
@@ -647,7 +672,13 @@ function AppView({
               </div>
               <Archive size={22} aria-hidden="true" />
             </div>
-            <ReportArtifactList apiBaseUrl={apiBaseUrl} artifacts={data.reportArtifacts} currentJob={currentJob} />
+            <ReportArtifactList
+              apiBaseUrl={apiBaseUrl}
+              artifacts={data.reportArtifacts}
+              currentJob={currentJob}
+              evidence={evidence}
+              onArtifactSelect={onEvidenceArtifactSelect}
+            />
           </section>
 
           <section className="workbench-panel audit-panel motion-item" id="audit">
@@ -1000,29 +1031,181 @@ function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; previe
 function ReportArtifactList({
   apiBaseUrl,
   artifacts,
-  currentJob
+  currentJob,
+  evidence,
+  onArtifactSelect
 }: {
   apiBaseUrl: string;
   artifacts: Artifact[];
   currentJob: Job | null;
+  evidence: JobEvidence;
+  onArtifactSelect: (artifactId: string) => void;
 }) {
+  const evidenceIndexArtifact = artifacts.find((artifact) => artifact.kind === "evidence_index") ?? null;
+  const artifactsById = useMemo(() => new Map(artifacts.map((artifact) => [artifact.id, artifact])), [artifacts]);
+  const [evidenceIndex, setEvidenceIndex] = useState<{
+    artifactId: string | null;
+    error: string | null;
+    payload: EvidenceIndexPayload | null;
+    status: "idle" | "loading" | "ready" | "error";
+  }>({ artifactId: null, error: null, payload: null, status: "idle" });
+
+  useEffect(() => {
+    if (!currentJob || !evidenceIndexArtifact) {
+      setEvidenceIndex({ artifactId: null, error: null, payload: null, status: "idle" });
+      return;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+    setEvidenceIndex({ artifactId: evidenceIndexArtifact.id, error: null, payload: null, status: "loading" });
+    fetchArtifactText(currentJob.id, evidenceIndexArtifact.id, controller.signal)
+      .then((text) => parseEvidenceIndexPayload(text))
+      .then((payload) => {
+        if (active) {
+          setEvidenceIndex({ artifactId: evidenceIndexArtifact.id, error: null, payload, status: "ready" });
+        }
+      })
+      .catch((error: Error) => {
+        if (active) {
+          setEvidenceIndex({
+            artifactId: evidenceIndexArtifact.id,
+            error: error.message,
+            payload: null,
+            status: "error"
+          });
+        }
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [currentJob?.id, evidenceIndexArtifact?.id]);
+
   if (artifacts.length === 0) {
     return <EmptyState title="No report outputs" detail="Runtime, audit, review, and package artifacts appear here when produced." />;
   }
 
+  const markdownReports = artifacts.filter((artifact) => artifact.kind === "audit_report").length;
+  const htmlReports = artifacts.filter((artifact) => artifact.kind === "html_report").length;
+  const packages = artifacts.filter((artifact) => artifact.kind === "result_package").length;
+  const reviewAttention = evidence.reviewRuns.filter(
+    (run) => run.failureClass !== "none" || ["best_effort", "fail", "retry"].includes(run.status)
+  ).length;
+  const attachments = evidenceIndex.payload?.attachments ?? [];
+
   return (
     <div className="report-list">
-      {artifacts.map((artifact) => (
-        <div className="report-row" key={artifact.id}>
-          <div>
-            <strong>{artifact.kind}</strong>
-            <span>
-              {artifact.stage} / {artifact.producer}
-            </span>
-          </div>
-          <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download" />
+      <div className="report-summary-grid" aria-label="Report output summary">
+        <ReportMetric label="Markdown" value={String(markdownReports)} />
+        <ReportMetric label="HTML" value={String(htmlReports)} />
+        <ReportMetric label="Packages" value={String(packages)} />
+        <ReportMetric label="Evidence files" value={String(evidenceIndex.payload?.includedCount ?? 0)} />
+      </div>
+
+      <div className={reviewAttention > 0 ? "report-risk-strip warning" : "report-risk-strip"}>
+        <AlertCircle size={17} aria-hidden="true" />
+        <div>
+          <strong>{currentJob?.failureClass === "none" ? "No job failure class" : currentJob?.failureClass ?? "Awaiting job"}</strong>
+          <span>
+            {reviewAttention > 0
+              ? `${reviewAttention} review record${reviewAttention === 1 ? "" : "s"} need attention.`
+              : currentJob?.failureReason ?? "Build, review, and runtime evidence decide final package confidence."}
+          </span>
         </div>
-      ))}
+      </div>
+
+      <section className="report-detail-block" aria-label="Report downloads">
+        <div className="section-heading">
+          <h3>Report artifacts</h3>
+          <span>{artifacts.length}</span>
+        </div>
+        {artifacts.map((artifact) => (
+          <div className="report-row" key={artifact.id}>
+            <div>
+              <strong>{artifact.kind}</strong>
+              <span>
+                {artifact.stage} / {artifact.producer}
+              </span>
+            </div>
+            <div className="report-actions">
+              <button className="secondary-action compact" type="button" onClick={() => onArtifactSelect(artifact.id)}>
+                <Eye size={16} aria-hidden="true" />
+                Inspect
+              </button>
+              <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download" />
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="report-detail-block" aria-label="Evidence attachment index">
+        <div className="section-heading">
+          <h3>Evidence attachments</h3>
+          <span>{evidenceIndex.status === "ready" ? attachments.length : evidenceIndex.status}</span>
+        </div>
+        {evidenceIndex.status === "loading" ? (
+          <div className="preview-message">
+            <FileText size={18} aria-hidden="true" />
+            Loading evidence index
+          </div>
+        ) : null}
+        {evidenceIndex.status === "error" ? (
+          <div className="preview-message preview-error">
+            <AlertCircle size={18} aria-hidden="true" />
+            {evidenceIndex.error ?? "Evidence index could not be loaded."}
+          </div>
+        ) : null}
+        {evidenceIndex.status === "idle" ? (
+          <EmptyState title="No evidence index" detail="Packaging will add screenshot, trace, and log attachment indexes." />
+        ) : null}
+        {evidenceIndex.status === "ready" && attachments.length === 0 ? (
+          <EmptyState title="No indexed attachments" detail="No screenshot, trace, or log artifacts were available at packaging time." />
+        ) : null}
+        {evidenceIndex.status === "ready" && attachments.length > 0 ? (
+          <div className="evidence-index-list">
+            {attachments.map((attachment) => {
+              const linkedArtifact = artifactsById.get(attachment.artifactId);
+              return (
+                <div className="evidence-index-row" key={attachment.artifactId}>
+                  <div>
+                    <strong>{attachment.kind}</strong>
+                    <span>{attachment.packagePath ?? attachment.reason}</span>
+                    <small>{attachment.artifactId}</small>
+                  </div>
+                  <StatusToken status={attachment.included ? "pass" : "best_effort"} />
+                  <div className="report-actions">
+                    <button
+                      className="secondary-action compact"
+                      type="button"
+                      disabled={!linkedArtifact}
+                      onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
+                    >
+                      <Link2 size={16} aria-hidden="true" />
+                      Locate
+                    </button>
+                    {linkedArtifact ? (
+                      <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={linkedArtifact} currentJob={currentJob} label="Download" />
+                    ) : (
+                      <span className="download-disabled">Missing</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function ReportMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="report-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
@@ -1507,12 +1690,30 @@ async function fetchJobEvidence(jobId: string): Promise<JobEvidence> {
   return { runtimeValidations, inferenceRecords, reviewRuns, toolCalls };
 }
 
+function parseEvidenceIndexPayload(text: string): EvidenceIndexPayload {
+  const payload = JSON.parse(text) as Partial<EvidenceIndexPayload>;
+  if (payload.kind !== "evidence_index" || !Array.isArray(payload.attachments)) {
+    throw new Error("Artifact is not a valid evidence index.");
+  }
+  return {
+    attachments: payload.attachments,
+    includedCount: payload.includedCount ?? payload.attachments.filter((item) => item.included).length,
+    jobId: payload.jobId ?? "",
+    kind: "evidence_index",
+    omittedCount: payload.omittedCount ?? payload.attachments.filter((item) => !item.included).length,
+    schemaVersion: payload.schemaVersion ?? "unknown"
+  };
+}
+
 function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
   if (artifact.kind === "generated_project") {
     return { supported: false, reason: "Directory artifacts are available through the packaged result download." };
   }
   if (artifact.kind === "result_package") {
     return { supported: false, reason: "Result packages are binary downloads and are not rendered inline." };
+  }
+  if (artifact.kind === "html_report") {
+    return { supported: false, reason: "HTML reports are download-only so report markup is not executed inside the workbench." };
   }
   if (artifact.kind === "runtime_screenshot") {
     return { supported: false, reason: "Screenshots are image evidence. Use the download action to inspect the capture." };

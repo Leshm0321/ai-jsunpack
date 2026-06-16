@@ -47,7 +47,9 @@ export const ARTIFACT_KINDS = [
   "knowledge_evidence",
   "repair_instruction",
   "result_package",
-  "audit_report"
+  "audit_report",
+  "html_report",
+  "evidence_index"
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
