@@ -6,6 +6,10 @@ build/
 .codex/
 .idea/
 .omx/
+.omc/
+.agents/
+.claude/
+skills-lock.json
 .crewai-data/
 .pytest_cache/
 __pycache__/
@@ -22,3 +26,4 @@ test-results/
 *.tsbuildinfo
 docs/
 design-system/
+dev_docs/
