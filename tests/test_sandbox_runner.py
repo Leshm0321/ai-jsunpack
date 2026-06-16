@@ -128,8 +128,14 @@ class LocalSandboxRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.failure_class, "none")
         self.assertEqual(result.resource_policy.enforcement, "local_best_effort")
+        self.assertEqual(result.resource_policy.runner_kind, "local")
+        self.assertIsNone(result.resource_policy.runtime_name)
+        self.assertTrue(result.resource_policy.host_platform)
         self.assertEqual(result.resource_policy.process_limit, 8)
         self.assertIn("does not enforce", result.resource_policy.limitations[0])
+        capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
+        self.assertEqual(capabilities["network"].status, "best_effort")
+        self.assertEqual(capabilities["cpu"].status, "best_effort")
 
     def test_container_runner_reports_missing_runtime_as_denied(self):
         runner = ContainerSandboxRunner(
@@ -142,6 +148,11 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(result.failure_class, "sandbox_denied")
         self.assertIsNone(result.exit_code)
         self.assertEqual(result.resource_policy.enforcement, "container_enforced")
+        self.assertEqual(result.resource_policy.runner_kind, "container")
+        self.assertIsNone(result.resource_policy.runtime_name)
+        capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
+        self.assertEqual(capabilities["network"].status, "unsupported")
+        self.assertEqual(capabilities["memory"].status, "unsupported")
         self.assertIn("Container runtime is not available", result.denied_reason or "")
 
     def test_container_runner_maps_policy_to_runtime_arguments(self):
@@ -190,6 +201,15 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(result.failure_class, "none")
         self.assertFalse(payload["hasSecret"])
         self.assertEqual(result.resource_policy.enforcement, "container_enforced")
+        self.assertEqual(result.resource_policy.runner_kind, "container")
+        self.assertEqual(result.resource_policy.runtime_name, "custom")
+        self.assertTrue(result.resource_policy.host_platform)
+        capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
+        self.assertEqual(capabilities["network"].status, "enforced")
+        self.assertEqual(capabilities["process"].status, "enforced")
+        self.assertEqual(capabilities["memory"].status, "enforced")
+        self.assertEqual(capabilities["cpu"].status, "best_effort")
+        self.assertIn("gVisor", result.resource_policy.limitations[-1])
         self.assertIn("run", argv)
         self.assertIn("--rm", argv)
         self.assertEqual(argv[argv.index("--network") + 1], "none")

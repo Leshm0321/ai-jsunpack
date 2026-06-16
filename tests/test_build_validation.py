@@ -274,6 +274,15 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(result.build.review_run.status, "pass")
         self.assertEqual(result.typecheck.review_run.status, "pass")
         self.assertEqual(build_artifact["resourcePolicy"]["enforcement"], "container_enforced")
+        self.assertEqual(build_artifact["resourcePolicy"]["runnerKind"], "container")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeName"], "custom")
+        self.assertTrue(build_artifact["resourcePolicy"]["hostPlatform"])
+        capabilities = {
+            capability["name"]: capability["status"]
+            for capability in build_artifact["resourcePolicy"]["capabilities"]
+        }
+        self.assertEqual(capabilities["network"], "enforced")
+        self.assertEqual(capabilities["cpu"], "best_effort")
         self.assertEqual(build_artifact["networkPolicy"], "deny")
         self.assertIn("--network", runtime_payload["argv"])
         self.assertIn("ai-jsunpack-container-test-image", runtime_payload["argv"])

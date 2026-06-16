@@ -177,11 +177,22 @@ export interface TypeScriptDiagnostic {
   relatedInformation?: TypeScriptRelatedInformation[];
 }
 
+export interface SandboxRuntimeCapability {
+  name: "network" | "process" | "cpu" | "memory" | "filesystem";
+  status: "enforced" | "best_effort" | "unsupported" | "unknown";
+  detail: string;
+}
+
 export interface SandboxResourcePolicy {
   processLimit?: number | null;
   cpuTimeLimitMs?: number | null;
   memoryLimitBytes?: number | null;
   enforcement: "local_best_effort" | "container_enforced";
+  runnerKind: "local" | "container";
+  runtimeName?: string | null;
+  runtimeVersion?: string | null;
+  hostPlatform: string;
+  capabilities: SandboxRuntimeCapability[];
   limitations: string[];
 }
 
@@ -485,6 +496,19 @@ const repairActionsSchema = {
     additionalProperties: false
   }
 } as const satisfies JsonSchema;
+const sandboxRuntimeCapabilitiesSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      name: { type: "string", enum: ["network", "process", "cpu", "memory", "filesystem"] },
+      status: { type: "string", enum: ["enforced", "best_effort", "unsupported", "unknown"] },
+      detail: stringSchema
+    },
+    required: ["name", "status", "detail"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
 const sandboxResourcePolicySchema = {
   type: "object",
   properties: {
@@ -492,9 +516,14 @@ const sandboxResourcePolicySchema = {
     cpuTimeLimitMs: { type: "integer", minimum: 1 },
     memoryLimitBytes: { type: "integer", minimum: 1 },
     enforcement: { type: "string", enum: ["local_best_effort", "container_enforced"] },
+    runnerKind: { type: "string", enum: ["local", "container"] },
+    runtimeName: stringSchema,
+    runtimeVersion: stringSchema,
+    hostPlatform: stringSchema,
+    capabilities: sandboxRuntimeCapabilitiesSchema,
     limitations: stringArraySchema
   },
-  required: ["enforcement", "limitations"],
+  required: ["enforcement", "runnerKind", "hostPlatform", "capabilities", "limitations"],
   additionalProperties: false
 } as const satisfies JsonSchema;
 const typeScriptRelatedInformationSchema = {
@@ -1243,6 +1272,37 @@ export const EXAMPLE_BUILD_ARTIFACT = {
     cpuTimeLimitMs: null,
     memoryLimitBytes: null,
     enforcement: "local_best_effort",
+    runnerKind: "local",
+    runtimeName: null,
+    runtimeVersion: null,
+    hostPlatform: "contract-test-platform",
+    capabilities: [
+      {
+        name: "network",
+        status: "best_effort",
+        detail: "Local runner records network policy but does not enforce OS-level network isolation."
+      },
+      {
+        name: "process",
+        status: "best_effort",
+        detail: "Local runner records process limits but does not enforce a process-count boundary."
+      },
+      {
+        name: "cpu",
+        status: "best_effort",
+        detail: "Local runner enforces wall-clock timeout only; CPU time limits are audit metadata."
+      },
+      {
+        name: "memory",
+        status: "best_effort",
+        detail: "Local runner records memory limits but does not enforce an OS memory boundary."
+      },
+      {
+        name: "filesystem",
+        status: "best_effort",
+        detail: "Local runner executes in a temporary attempt workspace and validates relative working directories."
+      }
+    ],
     limitations: [
       "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation."
     ]

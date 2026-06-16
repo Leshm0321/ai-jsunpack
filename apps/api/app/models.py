@@ -93,6 +93,9 @@ BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
 NetworkPolicy = Literal["deny", "allow"]
 SandboxResourceEnforcement = Literal["local_best_effort", "container_enforced"]
+SandboxRunnerKind = Literal["local", "container"]
+SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesystem"]
+SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
 DiagnosticSource = Literal["stdout", "stderr"]
 DiagnosticTool = Literal["tsc", "vite", "esbuild", "unknown"]
@@ -234,11 +237,22 @@ class TypeScriptDiagnostic(ContractModel):
     related_information: list[TypeScriptRelatedInformation] = Field(default_factory=list)
 
 
+class SandboxRuntimeCapability(ContractModel):
+    name: SandboxCapabilityName
+    status: SandboxCapabilityStatus
+    detail: str
+
+
 class SandboxResourcePolicy(ContractModel):
     process_limit: int | None = Field(default=None, ge=1)
     cpu_time_limit_ms: int | None = Field(default=None, ge=1)
     memory_limit_bytes: int | None = Field(default=None, ge=1)
     enforcement: SandboxResourceEnforcement
+    runner_kind: SandboxRunnerKind = "local"
+    runtime_name: str | None = None
+    runtime_version: str | None = None
+    host_platform: str = "unknown"
+    capabilities: list[SandboxRuntimeCapability] = Field(default_factory=list)
     limitations: list[str]
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import math
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -16,8 +17,55 @@ from apps.api.app.models import FailureClass
 
 NetworkPolicy = Literal["deny", "allow"]
 ResourcePolicyEnforcement = Literal["local_best_effort", "container_enforced"]
+SandboxRunnerKind = Literal["local", "container"]
+SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesystem"]
+SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 AllowedCommand = str | Sequence[str]
 DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
+
+
+@dataclass(frozen=True)
+class SandboxRuntimeCapability:
+    name: SandboxCapabilityName
+    status: SandboxCapabilityStatus
+    detail: str
+
+
+def _host_platform() -> str:
+    system = platform.system() or "unknown"
+    release = platform.release() or "unknown"
+    machine = platform.machine() or "unknown"
+    return f"{system} {release} ({machine})"
+
+
+def _local_capabilities() -> tuple[SandboxRuntimeCapability, ...]:
+    return (
+        SandboxRuntimeCapability(
+            name="network",
+            status="best_effort",
+            detail="Local runner records network policy but does not enforce OS-level network isolation.",
+        ),
+        SandboxRuntimeCapability(
+            name="process",
+            status="best_effort",
+            detail="Local runner records process limits but does not enforce a process-count boundary.",
+        ),
+        SandboxRuntimeCapability(
+            name="cpu",
+            status="best_effort",
+            detail="Local runner enforces wall-clock timeout only; CPU time limits are audit metadata.",
+        ),
+        SandboxRuntimeCapability(
+            name="memory",
+            status="best_effort",
+            detail="Local runner records memory limits but does not enforce an OS memory boundary.",
+        ),
+        SandboxRuntimeCapability(
+            name="filesystem",
+            status="best_effort",
+            detail="Local runner executes in a temporary attempt workspace and validates relative working directories.",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -26,6 +74,11 @@ class SandboxResourcePolicy:
     cpu_time_limit_ms: int | None = None
     memory_limit_bytes: int | None = None
     enforcement: ResourcePolicyEnforcement = "local_best_effort"
+    runner_kind: SandboxRunnerKind = "local"
+    runtime_name: str | None = None
+    runtime_version: str | None = None
+    host_platform: str = field(default_factory=_host_platform)
+    capabilities: tuple[SandboxRuntimeCapability, ...] = field(default_factory=_local_capabilities)
     limitations: tuple[str, ...] = (
         "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation.",
     )
@@ -286,7 +339,8 @@ class ContainerSandboxRunner(LocalSandboxRunner):
     ) -> None:
         self.image = image
         self.runtime_command = tuple(runtime_command) if runtime_command is not None else None
-        super().__init__(self._container_policy(policy or SandboxPolicy()))
+        runtime = self._runtime_command()
+        super().__init__(self._container_policy(policy or SandboxPolicy(), runtime_command=runtime))
 
     def run_in_workspace(
         self,
@@ -374,31 +428,118 @@ class ContainerSandboxRunner(LocalSandboxRunner):
             resource_policy=self.policy.resource_policy,
         )
 
-    def _container_policy(self, policy: SandboxPolicy) -> SandboxPolicy:
+    def _container_policy(self, policy: SandboxPolicy, *, runtime_command: tuple[str, ...] | None) -> SandboxPolicy:
         resource_policy = policy.resource_policy
         limitations = tuple(resource_policy.limitations or ())
         local_default_limitations = SandboxResourcePolicy().limitations
+        container_limitations = (
+            "Container sandbox runner maps resource policy to Docker/Podman flags; enforcement depends on the selected runtime, host OS, and container backend.",
+            "CPU time limits use container ulimit settings and remain best-effort across Docker/Podman and host platforms.",
+            "Windows and macOS container resource controls are enforced by the backing Linux VM/cgroup layer when available.",
+            "For stricter multi-tenant isolation, evaluate gVisor, Firecracker, or an equivalent stronger sandbox runtime before production exposure.",
+        )
         if not limitations:
-            limitations = (
-                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
-            )
+            limitations = container_limitations
         elif resource_policy.enforcement == "local_best_effort" and limitations == local_default_limitations:
-            limitations = (
-                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
-            )
+            limitations = container_limitations
         elif resource_policy.enforcement == "local_best_effort":
-            limitations = (
-                "Container sandbox runner enforces network, process, CPU, and memory policy through the selected container runtime when supported.",
-                *limitations,
-            )
+            limitations = (*container_limitations, *limitations)
+        runtime_name = self._runtime_name(runtime_command)
         return replace(
             policy,
             resource_policy=replace(
                 resource_policy,
                 enforcement="container_enforced",
+                runner_kind="container",
+                runtime_name=runtime_name,
+                runtime_version=None,
+                host_platform=_host_platform(),
+                capabilities=self._container_capabilities(
+                    resource_policy,
+                    network_policy=policy.network_policy,
+                    runtime_name=runtime_name,
+                ),
                 limitations=limitations,
             ),
         )
+
+    def _container_capabilities(
+        self,
+        resource_policy: SandboxResourcePolicy,
+        *,
+        network_policy: NetworkPolicy,
+        runtime_name: str | None,
+    ) -> tuple[SandboxRuntimeCapability, ...]:
+        runtime_label = runtime_name or "unavailable container runtime"
+        if runtime_name is None:
+            return (
+                SandboxRuntimeCapability(
+                    name="network",
+                    status="unsupported",
+                    detail="No Docker or Podman runtime was found, so network isolation cannot be applied.",
+                ),
+                SandboxRuntimeCapability(
+                    name="process",
+                    status="unsupported",
+                    detail="No Docker or Podman runtime was found, so process limits cannot be applied.",
+                ),
+                SandboxRuntimeCapability(
+                    name="cpu",
+                    status="unsupported",
+                    detail="No Docker or Podman runtime was found, so CPU limits cannot be applied.",
+                ),
+                SandboxRuntimeCapability(
+                    name="memory",
+                    status="unsupported",
+                    detail="No Docker or Podman runtime was found, so memory limits cannot be applied.",
+                ),
+                SandboxRuntimeCapability(
+                    name="filesystem",
+                    status="unsupported",
+                    detail="No Docker or Podman runtime was found, so the attempt workspace cannot be mounted into a container.",
+                ),
+            )
+
+        network_status: SandboxCapabilityStatus = "enforced" if network_policy == "deny" else "best_effort"
+        network_detail = (
+            f"{runtime_label} receives --network none for deny policy."
+            if network_policy == "deny"
+            else f"Network access is allowed by policy; {runtime_label} network isolation is not requested."
+        )
+        process_status: SandboxCapabilityStatus = "enforced" if resource_policy.process_limit is not None else "best_effort"
+        process_detail = (
+            f"{runtime_label} receives --pids-limit={resource_policy.process_limit}."
+            if resource_policy.process_limit is not None
+            else f"No process limit is configured; {runtime_label} uses its default process boundary."
+        )
+        memory_status: SandboxCapabilityStatus = "enforced" if resource_policy.memory_limit_bytes is not None else "best_effort"
+        memory_detail = (
+            f"{runtime_label} receives --memory={resource_policy.memory_limit_bytes}; enforcement depends on cgroup support in the host/container backend."
+            if resource_policy.memory_limit_bytes is not None
+            else f"No memory limit is configured; {runtime_label} uses its default memory boundary."
+        )
+        cpu_detail = (
+            f"{runtime_label} receives a CPU ulimit derived from {resource_policy.cpu_time_limit_ms} ms; support differs across Docker/Podman and host platforms."
+            if resource_policy.cpu_time_limit_ms is not None
+            else f"No CPU time limit is configured; {runtime_label} uses its default CPU boundary."
+        )
+        return (
+            SandboxRuntimeCapability(name="network", status=network_status, detail=network_detail),
+            SandboxRuntimeCapability(name="process", status=process_status, detail=process_detail),
+            SandboxRuntimeCapability(name="cpu", status="best_effort", detail=cpu_detail),
+            SandboxRuntimeCapability(name="memory", status=memory_status, detail=memory_detail),
+            SandboxRuntimeCapability(
+                name="filesystem",
+                status="best_effort",
+                detail="The attempt workspace is bind-mounted at /workspace; no read-only root filesystem or stronger runtime isolation is configured.",
+            ),
+        )
+
+    def _runtime_name(self, runtime_command: tuple[str, ...] | None) -> str | None:
+        if runtime_command is None:
+            return None
+        stem = Path(runtime_command[0]).stem.lower()
+        return stem if stem in {"docker", "podman"} else "custom"
 
     def _runtime_command(self) -> tuple[str, ...] | None:
         if self.runtime_command is not None:

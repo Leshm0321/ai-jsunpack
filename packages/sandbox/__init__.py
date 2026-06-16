@@ -5,6 +5,7 @@ from .runner import (
     SandboxCommand,
     SandboxPolicy,
     SandboxResourcePolicy,
+    SandboxRuntimeCapability,
     SandboxResult,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "SandboxCommand",
     "SandboxPolicy",
     "SandboxResourcePolicy",
+    "SandboxRuntimeCapability",
     "SandboxResult",
 ]

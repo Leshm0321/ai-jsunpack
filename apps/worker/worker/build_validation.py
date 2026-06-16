@@ -1009,6 +1009,7 @@ class BuildValidationRunner:
         resource_policy = result.resource_policy if result is not None else self.sandbox_runner.policy.resource_policy
         payload = asdict(resource_policy)
         payload["limitations"] = list(payload.get("limitations") or [])
+        payload["capabilities"] = list(payload.get("capabilities") or [])
         return SandboxResourcePolicyModel.model_validate(payload)
 
     def _diagnostics_for_observation(self, observation: StageObservation) -> list[TypeScriptDiagnostic]:
