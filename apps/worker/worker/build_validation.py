@@ -201,16 +201,22 @@ class BuildValidationRunner:
     ) -> BuildValidationResult:
         parents = parent_artifact_ids or []
         generated_project_artifact = self._latest_generated_project(job_id=job_id, store=store)
-        source_project_path = (
-            Path(project_path) if project_path is not None else self._project_path(generated_project_artifact)
-        )
         source_project_parents = [*parents]
         if generated_project_artifact is not None:
             source_project_parents.append(generated_project_artifact.id)
 
         config = self._config(job_id=job_id, store=store)
         self.sandbox_runner = self._provided_sandbox_runner or self._sandbox_runner_for_config(config)
+        source_project_path = Path(project_path) if project_path is not None else None
         if source_project_path is None or not source_project_path.is_dir():
+            local_artifact_path = (
+                store.artifact_local_path(generated_project_artifact) if generated_project_artifact is not None else None
+            )
+            if local_artifact_path is not None and local_artifact_path.is_dir():
+                source_project_path = local_artifact_path
+        if (source_project_path is None and generated_project_artifact is None) or (
+            source_project_path is not None and not source_project_path.is_dir()
+        ):
             build = self._persist_best_effort(
                 job_id=job_id,
                 store=store,
@@ -236,6 +242,7 @@ class BuildValidationRunner:
         install_logs: list[BuildValidationLogResult] = []
         repair_artifacts: list[ArtifactRecord] = []
         current_project_path = source_project_path
+        current_project_artifact = generated_project_artifact
         current_parent_ids = source_project_parents
         last_build: BuildValidationStageResult | None = None
         last_typecheck: BuildValidationStageResult | None = None
@@ -243,6 +250,30 @@ class BuildValidationRunner:
         for attempt in range(config.max_attempts):
             with self.sandbox_runner.attempt_workspace() as workspace:
                 project_root = workspace / "project"
+                if current_project_path is None:
+                    current_project_path = self._project_path(current_project_artifact, store, workspace / "source_project")
+                if current_project_path is None or not current_project_path.is_dir():
+                    build = self._persist_best_effort(
+                        job_id=job_id,
+                        store=store,
+                        stage="building",
+                        review_type="build",
+                        attempt=attempt,
+                        command=self.build_command,
+                        parent_artifact_ids=current_parent_ids,
+                        limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                    )
+                    typecheck = self._persist_best_effort(
+                        job_id=job_id,
+                        store=store,
+                        stage="typechecking",
+                        review_type="typecheck",
+                        attempt=attempt,
+                        command=self.typecheck_command,
+                        parent_artifact_ids=[*current_parent_ids, *build.artifact_ids],
+                        limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                    )
+                    return BuildValidationResult(build=build, typecheck=typecheck, install_logs=install_logs)
                 shutil.copytree(current_project_path, project_root, dirs_exist_ok=True)
                 attempt_parent_ids = [*current_parent_ids]
 
@@ -317,7 +348,10 @@ class BuildValidationRunner:
                     break
                 if repair_outcome is None or repair_outcome.applied_project_artifact is None:
                     break
-                current_project_path = Path(repair_outcome.applied_project_artifact.storage_uri)
+                current_project_artifact = repair_outcome.applied_project_artifact
+                current_project_path = store.artifact_local_path(current_project_artifact)
+                if current_project_path is not None and not current_project_path.is_dir():
+                    current_project_path = None
                 current_parent_ids = [
                     *attempt_parent_ids,
                     repair_outcome.repair_artifact.id,
@@ -852,13 +886,16 @@ class BuildValidationRunner:
         artifacts = store.list_artifacts(job_id, kind="generated_project")
         return artifacts[-1] if artifacts else None
 
-    def _project_path(self, artifact: ArtifactRecord | None) -> Path | None:
+    def _project_path(self, artifact: ArtifactRecord | None, store, target_dir: Path) -> Path | None:
         if artifact is None:
             return None
-        path = Path(artifact.storage_uri)
-        if path.is_dir():
+        path = store.artifact_local_path(artifact)
+        if path is not None and path.is_dir():
             return path
-        return None
+        try:
+            return store.materialize_artifact_directory(artifact, target_dir)
+        except Exception:
+            return None
 
     def _read_package_json(self, project_root: Path) -> dict[str, Any] | None:
         package_path = project_root / "package.json"

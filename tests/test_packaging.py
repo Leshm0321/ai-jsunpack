@@ -4,6 +4,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import artifacts_table, create_store
 from apps.worker.worker.packaging import PackagingRunner
@@ -300,6 +301,50 @@ class PackagingRunnerTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_evidence_attachment_can_package_non_local_object_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            object_client = InMemoryObjectStorageClient()
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+                artifact_store=S3CompatibleArtifactStore(bucket="artifact-bucket", prefix="packaging", client=object_client),
+            )
+            try:
+                job = store.create_job(
+                    CreateJobRequest(
+                        config={
+                            "packaging": {
+                                "evidenceAttachments": {
+                                    "includeKinds": ["runtime_trace"],
+                                }
+                            }
+                        }
+                    )
+                )
+                runtime_trace = store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="runtime_compare",
+                    filename="trace.json",
+                    content=b'{"trace":"object"}',
+                    content_type="application/json",
+                    producer="test",
+                )
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                evidence_index = json.loads(store.read_artifact_record(result.evidence_index_artifact).decode("utf-8"))
+                package_bytes = store.read_artifact_record(result.result_package_artifact)
+
+                self.assertTrue(evidence_index["attachments"][0]["included"])
+                with zipfile.ZipFile(self._bytes_zip_path(root, package_bytes)) as archive:
+                    self.assertEqual(
+                        archive.read(f"evidence/runtime_trace/{runtime_trace.id}.json"),
+                        b'{"trace":"object"}',
+                    )
+            finally:
+                store.close()
+
     def _set_artifact_policy_metadata(self, store, artifact_id: str, *, sensitivity_class: str, retention_class: str) -> None:
         with store.engine.begin() as connection:
             connection.execute(
@@ -311,6 +356,11 @@ class PackagingRunnerTest(unittest.TestCase):
     def _read_zip_json(self, package_path: str, name: str):
         with zipfile.ZipFile(package_path) as archive:
             return json.loads(archive.read(name).decode("utf-8"))
+
+    def _bytes_zip_path(self, root: Path, content: bytes) -> Path:
+        package_path = root / "package.zip"
+        package_path.write_bytes(content)
+        return package_path
 
 
 if __name__ == "__main__":

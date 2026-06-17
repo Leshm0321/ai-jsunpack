@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, insert, select, update
 from sqlalchemy.engine import Engine
 
+from .artifact_store import (
+    ArtifactStore,
+    LocalArtifactStore,
+    S3CompatibleArtifactStore,
+)
 from .models import (
     ArtifactKind,
     ArtifactRecord,
@@ -26,6 +29,9 @@ from .models import (
 
 DATABASE_URL_ENV = "AI_JSUNPACK_DATABASE_URL"
 ARTIFACT_ROOT_ENV = "AI_JSUNPACK_ARTIFACT_ROOT"
+ARTIFACT_STORE_ENV = "AI_JSUNPACK_ARTIFACT_STORE"
+ARTIFACT_S3_BUCKET_ENV = "AI_JSUNPACK_ARTIFACT_S3_BUCKET"
+ARTIFACT_S3_PREFIX_ENV = "AI_JSUNPACK_ARTIFACT_S3_PREFIX"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://ai_jsunpack:ai_jsunpack@127.0.0.1:5432/ai_jsunpack"
 CONTRACT_SCHEMA_VERSION = "2026-06-14"
 
@@ -71,11 +77,17 @@ artifacts_table = Table(
 
 
 class DatabaseStore:
-    def __init__(self, database_url: str | None = None, artifact_root: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        artifact_root: Path | str | None = None,
+        artifact_store: ArtifactStore | None = None,
+    ) -> None:
         self.database_url = database_url or os.getenv(DATABASE_URL_ENV, DEFAULT_DATABASE_URL)
         self.engine: Engine = create_engine(self.database_url, future=True)
         self.artifact_root = Path(artifact_root or os.getenv(ARTIFACT_ROOT_ENV, "artifacts"))
         self.artifact_root.mkdir(parents=True, exist_ok=True)
+        self.artifact_store = artifact_store or create_artifact_store(self.artifact_root)
         self._schema_ready = False
 
     def initialize(self) -> None:
@@ -182,7 +194,31 @@ class DatabaseStore:
         artifact = self.get_artifact(job_id, artifact_id)
         if artifact is None:
             raise KeyError(f"Artifact not found: {artifact_id}")
-        return Path(artifact.storage_uri).read_bytes()
+        return self.read_artifact_record(artifact)
+
+    def read_artifact_record(self, artifact: ArtifactRecord) -> bytes:
+        return self.artifact_store.read_bytes(artifact.storage_uri)
+
+    def artifact_exists(self, artifact: ArtifactRecord) -> bool:
+        return self.artifact_store.exists(artifact.storage_uri)
+
+    def artifact_is_file(self, artifact: ArtifactRecord) -> bool:
+        return self.artifact_store.is_file(artifact.storage_uri)
+
+    def artifact_is_directory(self, artifact: ArtifactRecord) -> bool:
+        return self.artifact_store.is_directory(artifact.storage_uri)
+
+    def artifact_local_path(self, artifact: ArtifactRecord) -> Path | None:
+        return self.artifact_store.local_path(artifact.storage_uri)
+
+    def materialize_artifact_directory(self, artifact: ArtifactRecord, target_dir: Path | str) -> Path:
+        return self.artifact_store.materialize_directory(artifact.storage_uri, target_dir)
+
+    def artifact_filename(self, artifact: ArtifactRecord) -> str:
+        return self.artifact_store.filename(artifact.storage_uri)
+
+    def artifact_suffix(self, artifact: ArtifactRecord) -> str:
+        return self.artifact_store.suffix(artifact.storage_uri)
 
     def write_artifact(
         self,
@@ -205,13 +241,7 @@ class DatabaseStore:
             job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
         if job_row is None:
             raise KeyError(f"Job not found: {job_id}")
-
-        job_dir = self.artifact_root / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        safe_filename = Path(filename).name or "artifact.bin"
-        target = job_dir / f"{artifact_id}-{safe_filename}"
-        target.write_bytes(content)
-        digest = hashlib.sha256(content).hexdigest()
+        stored = self.artifact_store.write_bytes(job_id=job_id, artifact_id=artifact_id, filename=filename, content=content)
         row = {
             "id": artifact_id,
             "job_id": job_id,
@@ -220,9 +250,9 @@ class DatabaseStore:
             "attempt": attempt,
             "schema_version": CONTRACT_SCHEMA_VERSION,
             "content_type": content_type,
-            "hash": digest,
-            "size": len(content),
-            "storage_uri": str(target),
+            "hash": stored.hash,
+            "size": stored.size,
+            "storage_uri": stored.storage_uri,
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
@@ -264,19 +294,7 @@ class DatabaseStore:
         source = Path(source_path)
         if not source.exists():
             raise FileNotFoundError(f"Artifact source path does not exist: {source}")
-
-        job_dir = self.artifact_root / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        safe_filename = Path(filename).name or source.name or "artifact"
-        target = job_dir / f"{artifact_id}-{safe_filename}"
-        if source.is_dir():
-            shutil.copytree(source, target)
-            digest, size = self._hash_directory(target)
-        else:
-            shutil.copy2(source, target)
-            content = target.read_bytes()
-            digest = hashlib.sha256(content).hexdigest()
-            size = len(content)
+        stored = self.artifact_store.copy_path(job_id=job_id, artifact_id=artifact_id, filename=filename, source_path=source)
 
         row = {
             "id": artifact_id,
@@ -286,9 +304,9 @@ class DatabaseStore:
             "attempt": attempt,
             "schema_version": CONTRACT_SCHEMA_VERSION,
             "content_type": content_type,
-            "hash": digest,
-            "size": size,
-            "storage_uri": str(target),
+            "hash": stored.hash,
+            "size": stored.size,
+            "storage_uri": stored.storage_uri,
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
@@ -299,20 +317,6 @@ class DatabaseStore:
             connection.execute(insert(artifacts_table).values(**row))
         return self._artifact_from_row(row)
 
-    def _hash_directory(self, directory: Path) -> tuple[str, int]:
-        digest = hashlib.sha256()
-        total_size = 0
-        files = sorted(path for path in directory.rglob("*") if path.is_file())
-        for file_path in files:
-            relative_path = file_path.relative_to(directory).as_posix()
-            content = file_path.read_bytes()
-            total_size += len(content)
-            digest.update(relative_path.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(hashlib.sha256(content).hexdigest().encode("ascii"))
-            digest.update(b"\0")
-        return digest.hexdigest(), total_size
-
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)
         return JobRecord.model_validate(data)
@@ -322,8 +326,21 @@ class DatabaseStore:
         return ArtifactRecord.model_validate(data)
 
 
-def create_store(database_url: str | None = None, artifact_root: Path | str | None = None) -> DatabaseStore:
-    return DatabaseStore(database_url=database_url, artifact_root=artifact_root)
+def create_artifact_store(artifact_root: Path | str) -> ArtifactStore:
+    backend = os.getenv(ARTIFACT_STORE_ENV, "local").strip().lower()
+    if backend in {"s3", "minio"}:
+        bucket = os.getenv(ARTIFACT_S3_BUCKET_ENV, "").strip()
+        prefix = os.getenv(ARTIFACT_S3_PREFIX_ENV, "").strip()
+        return S3CompatibleArtifactStore(bucket=bucket, prefix=prefix)
+    return LocalArtifactStore(artifact_root)
+
+
+def create_store(
+    database_url: str | None = None,
+    artifact_root: Path | str | None = None,
+    artifact_store: ArtifactStore | None = None,
+) -> DatabaseStore:
+    return DatabaseStore(database_url=database_url, artifact_root=artifact_root, artifact_store=artifact_store)
 
 
 store = create_store()

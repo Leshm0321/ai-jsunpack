@@ -18,7 +18,7 @@ class ReconstructionError(RuntimeError):
 class ReconstructionResult:
     plan_artifact: ArtifactRecord
     generated_project_artifact: ArtifactRecord
-    project_path: Path
+    project_path: Path | None
     message: str
 
     @property
@@ -76,7 +76,7 @@ class ReconstructionRunner:
         return ReconstructionResult(
             plan_artifact=plan_artifact,
             generated_project_artifact=generated_project_artifact,
-            project_path=Path(generated_project_artifact.storage_uri),
+            project_path=store.artifact_local_path(generated_project_artifact),
             message="Deterministic writer produced a generated_project directory for sandbox validation.",
         )
 

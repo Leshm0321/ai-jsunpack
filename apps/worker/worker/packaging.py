@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -80,7 +81,7 @@ class PackagingRunner:
         parents = parent_artifact_ids or [artifact.id for artifact in artifacts]
         audit_payload = self._audit_payload(job=job, artifacts=artifacts, store=store)
         decision = self._completion_decision(audit_payload)
-        evidence_index = self._evidence_index(job=job, artifacts=artifacts, decision=decision)
+        evidence_index = self._evidence_index(job=job, artifacts=artifacts, decision=decision, store=store)
         audit_payload["completionDecision"] = decision
         audit_payload["evidenceIndex"] = evidence_index
         report_markdown = self._audit_markdown(audit_payload, decision, evidence_index)
@@ -606,10 +607,17 @@ class PackagingRunner:
         links = [f"artifact://{artifact_id}" for artifact_id in artifact_ids if artifact_id]
         return ", ".join(links) if links else "none"
 
-    def _evidence_index(self, *, job: JobRecord, artifacts: list[ArtifactRecord], decision: dict[str, Any]) -> dict[str, Any]:
+    def _evidence_index(
+        self,
+        *,
+        job: JobRecord,
+        artifacts: list[ArtifactRecord],
+        decision: dict[str, Any],
+        store,
+    ) -> dict[str, Any]:
         policy = self._evidence_attachment_policy(job)
         attachments = [
-            self._evidence_attachment(artifact, policy)
+            self._evidence_attachment(artifact, policy, store)
             for artifact in artifacts
             if artifact.kind in policy.candidate_kinds
         ]
@@ -920,10 +928,9 @@ class PackagingRunner:
             "evidenceLinks": [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids)],
         }
 
-    def _evidence_attachment(self, artifact: ArtifactRecord, policy: EvidenceAttachmentPolicy) -> dict[str, Any]:
-        source = Path(artifact.storage_uri)
-        package_path = f"evidence/{artifact.kind}/{artifact.id}{self._artifact_suffix(artifact)}"
-        included, reason = self._evidence_attachment_decision(artifact, source, policy)
+    def _evidence_attachment(self, artifact: ArtifactRecord, policy: EvidenceAttachmentPolicy, store) -> dict[str, Any]:
+        package_path = f"evidence/{artifact.kind}/{artifact.id}{self._artifact_suffix(artifact, store)}"
+        included, reason = self._evidence_attachment_decision(artifact, policy, store)
         return {
             "artifactId": artifact.id,
             "kind": artifact.kind,
@@ -933,7 +940,7 @@ class PackagingRunner:
             "size": artifact.size,
             "sensitivityClass": artifact.sensitivity_class,
             "retentionClass": artifact.retention_class,
-            "sourceFilename": source.name,
+            "sourceFilename": store.artifact_filename(artifact),
             "packagePath": package_path if included else None,
             "included": included,
             "reason": reason,
@@ -942,8 +949,8 @@ class PackagingRunner:
     def _evidence_attachment_decision(
         self,
         artifact: ArtifactRecord,
-        source: Path,
         policy: EvidenceAttachmentPolicy,
+        store,
     ) -> tuple[bool, str]:
         if policy.include_kinds is not None and artifact.kind not in policy.include_kinds:
             return False, "Artifact kind is outside configured includeKinds."
@@ -958,7 +965,7 @@ class PackagingRunner:
             return False, "Artifact retentionClass is outside configured includeRetentionClasses."
         if policy.max_bytes_per_artifact is not None and artifact.size > policy.max_bytes_per_artifact:
             return False, "Artifact exceeds configured maxBytesPerArtifact."
-        if not source.exists() or not source.is_file():
+        if not store.artifact_exists(artifact) or not store.artifact_is_file(artifact):
             return False, "Artifact content is missing or not a file."
         return True, "included"
 
@@ -1021,8 +1028,8 @@ class PackagingRunner:
             return value
         return None
 
-    def _artifact_suffix(self, artifact: ArtifactRecord) -> str:
-        suffix = Path(artifact.storage_uri).suffix
+    def _artifact_suffix(self, artifact: ArtifactRecord, store) -> str:
+        suffix = store.artifact_suffix(artifact)
         if suffix:
             return suffix
         content_type = artifact.content_type.lower()
@@ -1077,14 +1084,14 @@ class PackagingRunner:
             archive.writestr("review-runs.json", self._json_text(audit_payload["reviewRuns"]))
             archive.writestr("tool-calls.json", self._json_text(audit_payload["toolCalls"]))
             archive.writestr("repair-instructions.json", self._json_text(audit_payload["repairInstructions"]))
-            self._write_evidence_attachments(archive, artifacts, evidence_index)
+            self._write_evidence_attachments(archive, artifacts, evidence_index, store)
             if generated_project is None:
                 archive.writestr(
                     "generated_project/README.md",
                     "No generated_project artifact was available when packaging ran.\n",
                 )
             else:
-                self._write_directory(archive, Path(generated_project.storage_uri), "generated_project")
+                self._write_artifact_directory(archive, generated_project, "generated_project", store)
         return buffer.getvalue()
 
     def _write_evidence_attachments(
@@ -1092,6 +1099,7 @@ class PackagingRunner:
         archive: zipfile.ZipFile,
         artifacts: list[ArtifactRecord],
         evidence_index: dict[str, Any],
+        store,
     ) -> None:
         artifacts_by_id = {artifact.id: artifact for artifact in artifacts}
         for attachment in evidence_index["attachments"]:
@@ -1100,9 +1108,32 @@ class PackagingRunner:
             artifact = artifacts_by_id.get(attachment["artifactId"])
             if artifact is None:
                 continue
-            source = Path(artifact.storage_uri)
-            if source.exists() and source.is_file():
-                archive.write(source, attachment["packagePath"])
+            if store.artifact_exists(artifact) and store.artifact_is_file(artifact):
+                local_path = store.artifact_local_path(artifact)
+                if local_path is not None:
+                    archive.write(local_path, attachment["packagePath"])
+                else:
+                    archive.writestr(attachment["packagePath"], store.read_artifact_record(artifact))
+
+    def _write_artifact_directory(
+        self,
+        archive: zipfile.ZipFile,
+        artifact: ArtifactRecord,
+        root_name: str,
+        store,
+    ) -> None:
+        local_path = store.artifact_local_path(artifact)
+        if local_path is not None and local_path.is_dir():
+            self._write_directory(archive, local_path, root_name)
+            return
+        with tempfile.TemporaryDirectory(prefix="ai-jsunpack-package-artifact-") as temp_dir:
+            target = Path(temp_dir) / "artifact"
+            try:
+                materialized = store.materialize_artifact_directory(artifact, target)
+            except Exception as error:
+                archive.writestr(f"{root_name}/README.md", f"Directory artifact was unavailable: {error}\n")
+                return
+            self._write_directory(archive, materialized, root_name)
 
     def _write_directory(self, archive: zipfile.ZipFile, source: Path, root_name: str) -> None:
         if not source.exists() or not source.is_dir():

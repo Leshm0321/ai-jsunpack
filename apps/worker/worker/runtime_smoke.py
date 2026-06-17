@@ -1110,8 +1110,10 @@ class RuntimeCompareRepairRunner:
                 message="Runtime compare repair skipped because no generated_project artifact was available.",
             )
 
-        source_project = Path(generated_project_artifact.storage_uri)
-        if not source_project.is_dir():
+        source_project = store.artifact_local_path(generated_project_artifact)
+        if source_project is not None and not source_project.is_dir():
+            source_project = None
+        if source_project is None and not store.artifact_is_directory(generated_project_artifact):
             repair_artifact = self._write_repair_instruction(
                 job_id=job_id,
                 store=store,
@@ -1131,6 +1133,11 @@ class RuntimeCompareRepairRunner:
             )
 
         with tempfile.TemporaryDirectory(prefix="ai-jsunpack-runtime-repair-") as temp_dir:
+            if source_project is None:
+                source_project = store.materialize_artifact_directory(
+                    generated_project_artifact,
+                    Path(temp_dir) / "source_project",
+                )
             attempt_root = Path(temp_dir) / "generated_project"
             shutil.copytree(source_project, attempt_root)
             actions, decision = self._apply_runtime_actions(project_root=attempt_root)

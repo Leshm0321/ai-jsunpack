@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from apps.api.app import main as api_main
+from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
 from apps.api.app.store import create_store
 
 
@@ -295,7 +296,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(html_download.status_code, 200)
         self.assertEqual(evidence_index_download.status_code, 200)
         self.assertEqual(audit_download.text, "# Audit\n")
-        self.assertEqual(package_download.content, Path(package_artifact.storage_uri).read_bytes())
+        self.assertEqual(package_download.content, self.store.read_artifact_record(package_artifact))
         self.assertIn("<!doctype html>", html_download.text)
         self.assertEqual(evidence_index_download.json()["kind"], "evidence_index")
         self.assertEqual(rerun.status_code, 200)
@@ -309,6 +310,37 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(rerun_job["config"]["nested"], {"enabled": True})
         self.assertEqual(rerun_artifact["kind"], "source_input")
         self.assertEqual(Path(rerun_artifact["storageUri"]).read_bytes(), b"zip-bytes")
+
+    def test_artifact_download_streams_non_local_object_artifacts(self):
+        object_client = InMemoryObjectStorageClient()
+        object_store = S3CompatibleArtifactStore(bucket="artifact-bucket", prefix="api", client=object_client)
+        object_backed_store = create_store(
+            database_url=f"sqlite:///{(self.root / 'object-metadata.db').as_posix()}",
+            artifact_root=self.root / "object-artifacts",
+            artifact_store=object_store,
+        )
+        self.store.close()
+        self.store = object_backed_store
+        api_main.store = self.store
+
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        artifact = self.store.write_artifact(
+            job_id,
+            kind="audit_report",
+            stage="packaging",
+            filename="audit-report.md",
+            content=b"# Object Audit\n",
+            content_type="text/markdown; charset=utf-8",
+            producer="test.api",
+        )
+
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{artifact.id}/download", headers=self.access_headers)
+
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, b"# Object Audit\n")
+        self.assertEqual(downloaded.headers["content-type"], "text/markdown; charset=utf-8")
 
     def test_missing_runtime_validation_and_artifact_download_return_404(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)

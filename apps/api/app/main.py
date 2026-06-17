@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import os
-from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from .models import (
     ArtifactRecord,
@@ -195,8 +194,7 @@ def rerun_job(
     source_artifact = store.get_artifact(job_id, source_job.input_artifact_id)
     if source_artifact is None:
         raise HTTPException(status_code=404, detail="Source input artifact not found")
-    source_path = Path(source_artifact.storage_uri)
-    if not source_path.exists() or source_path.is_dir():
+    if not store.artifact_exists(source_artifact) or not store.artifact_is_file(source_artifact):
         raise HTTPException(status_code=400, detail="Source input artifact is not a downloadable file")
 
     rerun_config = deepcopy(source_job.config)
@@ -215,8 +213,8 @@ def rerun_job(
         created.id,
         kind="source_input",
         stage="intake",
-        filename=source_filename(source_path),
-        content=source_path.read_bytes(),
+        filename=source_filename(source_artifact),
+        content=store.read_artifact_record(source_artifact),
         content_type=source_artifact.content_type,
         producer="api.rerun",
     )
@@ -246,21 +244,28 @@ def latest_artifact_or_404(job_id: str, kind: str, detail: str, access: dict[str
     return artifacts[-1]
 
 
-def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = None) -> FileResponse:
-    artifact_path = Path(artifact.storage_uri)
-    if not artifact_path.exists():
+def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = None) -> Response:
+    if not store.artifact_exists(artifact):
         raise HTTPException(status_code=404, detail="Artifact content not found")
-    if artifact_path.is_dir():
+    if store.artifact_is_directory(artifact):
         raise HTTPException(status_code=400, detail="Directory artifact download requires a result package")
+    artifact_path = store.artifact_local_path(artifact)
+    response_filename = filename or store.artifact_filename(artifact)
+    if artifact_path is None:
+        return Response(
+            content=store.read_artifact_record(artifact),
+            media_type=artifact.content_type,
+            headers={"Content-Disposition": f'attachment; filename="{response_filename}"'},
+        )
     return FileResponse(
         artifact_path,
         media_type=artifact.content_type,
-        filename=filename or artifact_path.name,
+        filename=response_filename,
     )
 
 
-def source_filename(source_path: Path) -> str:
-    suffix = source_path.suffix
+def source_filename(source_artifact: ArtifactRecord) -> str:
+    suffix = store.artifact_suffix(source_artifact)
     return f"rerun-source-input{suffix}" if suffix else "rerun-source-input"
 
 
