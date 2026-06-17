@@ -91,6 +91,25 @@ class SharedContractAlignmentTest(unittest.TestCase):
         self.assertIn("schemaVersion", artifact_schema["properties"])
         self.assertNotIn("schema_version", artifact_schema["properties"])
 
+    def test_repair_action_contract_accepts_runtime_static_mirror(self):
+        example = dict(self.contract["examples"]["repairInstruction"])
+        example["targetStage"] = "runtime_compare"
+        example["failureClass"] = "runtime_error"
+        example["actions"] = [
+            {
+                "action": "mirror_original_static_entry",
+                "path": "projectRoot",
+                "value": "public/original",
+                "reason": "Mirror the original static entry for runtime compare retry.",
+            }
+        ]
+
+        validated = models.RepairInstruction.model_validate(example)
+        action_schema = self.contract["schemas"]["repairInstruction"]["properties"]["actions"]["items"]
+
+        self.assertEqual(validated.actions[0].action, "mirror_original_static_entry")
+        self.assertIn("mirror_original_static_entry", action_schema["properties"]["action"]["enum"])
+
 
 if __name__ == "__main__":
     unittest.main()

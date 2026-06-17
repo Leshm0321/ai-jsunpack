@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from urllib.request import urlopen
 import zipfile
 from pathlib import Path
 
@@ -19,6 +20,24 @@ class FakeBrowserAdapter:
     def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
         request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nworker-runtime")
         return BrowserSmokeCapture()
+
+
+class ContentAwareBrowserAdapter:
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        with urlopen(request.entry_url, timeout=2) as response:
+            content = response.read().decode("utf-8")
+        label = "original" if "Original App" in content else "generated"
+        request.screenshot_path.write_bytes(f"\x89PNG\r\n\x1a\n{label}".encode("utf-8"))
+        return BrowserSmokeCapture(
+            console_messages=[f"rendered:{label}"],
+            responses=["200 /index.html"],
+            dom_summary={
+                "title": label,
+                "nodeCount": content.count("<"),
+                "textLength": len(content),
+                "textSample": label,
+            },
+        )
 
 
 class WorkerPipelineTest(unittest.TestCase):
@@ -307,6 +326,97 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
                 self.assertIn(artifact_by_kind["html_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
                 self.assertIn(artifact_by_kind["evidence_index"].id, artifact_by_kind["result_package"].parent_artifact_ids)
+            finally:
+                store.close()
+
+    def test_worker_pipeline_applies_runtime_compare_repair_and_retries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            asset_root = input_root / "assets"
+            asset_root.mkdir(parents=True)
+            (input_root / "index.html").write_text(
+                '<h1>Original App</h1><script type="module" src="/assets/app.js"></script>',
+                encoding="utf-8",
+            )
+            (asset_root / "app.js").write_text("console.log('original app');", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                runner = RuntimeSmokeRunner(browser_adapter=ContentAwareBrowserAdapter())
+                run = WorkerPipeline(runtime_smoke_runner=runner).run(job.id, input_path=input_root, store=store)
+                artifacts = store.list_artifacts(job.id)
+                persisted_job = store.get_job(job.id)
+                repair_payloads = [
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for artifact in artifacts
+                    if artifact.kind == "repair_instruction"
+                ]
+                review_payloads = [
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for artifact in artifacts
+                    if artifact.kind == "review_run"
+                ]
+                runtime_compare_reviews = [
+                    payload for payload in review_payloads if payload.get("reviewType") == "runtime_compare"
+                ]
+                runtime_comparisons = [
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for artifact in artifacts
+                    if artifact.kind == "runtime_comparison"
+                ]
+                generated_projects = [artifact for artifact in artifacts if artifact.kind == "generated_project"]
+                audit_report = next(artifact for artifact in artifacts if artifact.kind == "audit_report")
+                result_package = next(artifact for artifact in artifacts if artifact.kind == "result_package")
+                with zipfile.ZipFile(result_package.storage_uri) as archive:
+                    audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+
+                self.assertEqual(sum(1 for event in run.events if event.status == "runtime_smoke"), 2)
+                self.assertEqual(sum(1 for event in run.events if event.status == "runtime_compare"), 2)
+                self.assertTrue(any(event.status == "repairing" for event in run.events))
+                self.assertIsNotNone(persisted_job)
+                self.assertEqual(persisted_job.failure_class, "policy_denied")
+                self.assertIn("planned", {payload["status"] for payload in repair_payloads})
+                self.assertIn("applied", {payload["status"] for payload in repair_payloads})
+                self.assertTrue(
+                    any(
+                        action["action"] == "mirror_original_static_entry"
+                        for payload in repair_payloads
+                        for action in payload["actions"]
+                    )
+                )
+                self.assertGreaterEqual(len(generated_projects), 2)
+                self.assertEqual(max(artifact.attempt for artifact in generated_projects), 1)
+                self.assertEqual(
+                    {payload["attempt"]: payload["status"] for payload in runtime_compare_reviews},
+                    {0: "fail", 1: "pass"},
+                )
+                self.assertEqual(
+                    {payload["attempt"]: payload["status"] for payload in runtime_comparisons},
+                    {0: "pass", 1: "pass"},
+                )
+                self.assertTrue(
+                    any(payload["attempt"] == 0 and payload["differences"]["domChanged"] for payload in runtime_comparisons)
+                )
+                self.assertTrue(
+                    any(
+                        payload["attempt"] == 1 and not payload["differences"]["domChanged"]
+                        for payload in runtime_comparisons
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        observation["group"] == "reviewRuns" and observation["failureClass"] == "runtime_error"
+                        for observation in audit_payload["completionDecision"]["observations"]
+                    )
+                )
+                self.assertIn(audit_report.id, result_package.parent_artifact_ids)
+                with zipfile.ZipFile(result_package.storage_uri) as archive:
+                    repaired_index = archive.read("generated_project/index.html").decode("utf-8")
+                self.assertIn("Original App", repaired_index)
             finally:
                 store.close()
 

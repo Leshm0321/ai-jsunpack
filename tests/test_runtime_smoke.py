@@ -8,6 +8,7 @@ from apps.api.app.store import create_store
 from apps.worker.worker.runtime_smoke import (
     BrowserSmokeCapture,
     BrowserSmokeRequest,
+    RuntimeCompareRepairRunner,
     RuntimeCompareReviewGate,
     RuntimeCompareRunner,
     RuntimeSmokeRunner,
@@ -509,6 +510,153 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(repair_payload["status"], "planned")
                 self.assertEqual(repair_payload["actions"], [])
                 self.assertEqual(repair_payload["inputArtifactIds"], [compare_result.comparison_artifact.id])
+            finally:
+                store.close()
+
+    def test_runtime_compare_repair_mirrors_original_static_entry_into_new_project_attempt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            generated_root = root / "generated_project"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            (generated_root / "src").mkdir(parents=True)
+            (generated_root / "scripts").mkdir()
+            (generated_root / "public" / "original" / "assets").mkdir(parents=True)
+            (generated_root / "public" / "original" / "src").mkdir()
+            (generated_root / "index.html").write_text("<h1>Generated shell</h1>", encoding="utf-8")
+            (generated_root / "package.json").write_text('{"scripts":{"build":"node scripts/build.mjs"}}', encoding="utf-8")
+            (generated_root / "tsconfig.json").write_text('{"include":["src/**/*.ts"]}', encoding="utf-8")
+            (generated_root / "src" / "main.ts").write_text("export const shell = true;\n", encoding="utf-8")
+            (generated_root / "scripts" / "build.mjs").write_text("console.log('build');\n", encoding="utf-8")
+            (generated_root / "public" / "original" / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (generated_root / "public" / "original" / "assets" / "app.js").write_text("console.log('app');", encoding="utf-8")
+            (generated_root / "public" / "original" / "package.json").write_text('{"unsafe":true}', encoding="utf-8")
+            (generated_root / "public" / "original" / "src" / "override.ts").write_text("unsafe", encoding="utf-8")
+            (generated_root / "src" / "reconstruction-manifest.json").write_text(
+                json.dumps({"kind": "generated_project", "sourceRoot": "public/original"}),
+                encoding="utf-8",
+            )
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                generated_artifact = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=generated_root,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                )
+                compare_result = RuntimeCompareRunner(browser_adapter=SequencedBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                )
+                gate_result = RuntimeCompareReviewGate().run(
+                    job_id=job.id,
+                    store=store,
+                    comparison_artifacts=compare_result.comparison_artifacts,
+                    parent_artifact_ids=compare_result.artifact_ids,
+                )
+
+                repair_result = RuntimeCompareRepairRunner().run(
+                    job_id=job.id,
+                    store=store,
+                    generated_project_artifact=generated_artifact,
+                    planned_repair_artifact=gate_result.repair_artifact,
+                    parent_artifact_ids=gate_result.artifact_ids,
+                    attempt=1,
+                )
+
+                self.assertIsNotNone(repair_result.applied_project_artifact)
+                repair_payload = json.loads(store.read_artifact(job.id, repair_result.repair_artifact.id))
+                applied_root = Path(repair_result.applied_project_artifact.storage_uri)
+                package_payload = json.loads((applied_root / "package.json").read_text(encoding="utf-8"))
+
+                self.assertEqual(repair_payload["status"], "applied")
+                self.assertEqual(repair_payload["attempt"], 1)
+                self.assertEqual(repair_payload["actions"][0]["action"], "mirror_original_static_entry")
+                self.assertEqual((applied_root / "index.html").read_text(encoding="utf-8"), "<h1>Original</h1>")
+                self.assertEqual((applied_root / "assets" / "app.js").read_text(encoding="utf-8"), "console.log('app');")
+                self.assertEqual(package_payload["scripts"]["build"], "node scripts/build.mjs")
+                self.assertFalse((applied_root / "src" / "override.ts").exists())
+            finally:
+                store.close()
+
+    def test_runtime_compare_repair_skips_when_source_root_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            generated_root = root / "generated_project"
+            (generated_root / "src").mkdir(parents=True)
+            (generated_root / "index.html").write_text("<h1>Generated shell</h1>", encoding="utf-8")
+            (generated_root / "src" / "reconstruction-manifest.json").write_text(
+                json.dumps({"kind": "generated_project", "sourceRoot": "public/original"}),
+                encoding="utf-8",
+            )
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                generated_artifact = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=generated_root,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                )
+                planned_repair = store.write_artifact(
+                    job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="planned-runtime-repair.json",
+                    content=json.dumps(
+                        {
+                            "id": "repair_planned",
+                            "jobId": job.id,
+                            "attempt": 1,
+                            "targetStage": "runtime_compare",
+                            "failureClass": "runtime_error",
+                            "inputArtifactIds": [],
+                            "evidenceRefs": [],
+                            "actions": [],
+                            "status": "planned",
+                            "riskLevel": "medium",
+                            "decision": "planned",
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                    attempt=1,
+                )
+
+                repair_result = RuntimeCompareRepairRunner().run(
+                    job_id=job.id,
+                    store=store,
+                    generated_project_artifact=generated_artifact,
+                    planned_repair_artifact=planned_repair,
+                    attempt=1,
+                )
+
+                repair_payload = json.loads(store.read_artifact(job.id, repair_result.repair_artifact.id))
+                generated_artifacts = store.list_artifacts(job.id, kind="generated_project")
+
+                self.assertIsNone(repair_result.applied_project_artifact)
+                self.assertEqual(repair_payload["status"], "skipped")
+                self.assertEqual(repair_payload["actions"], [])
+                self.assertEqual(len(generated_artifacts), 1)
             finally:
                 store.close()
 

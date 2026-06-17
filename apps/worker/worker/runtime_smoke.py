@@ -3,8 +3,10 @@ from __future__ import annotations
 import binascii
 import json
 import hashlib
+import shutil
 import struct
 import time
+import tempfile
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -21,6 +23,7 @@ from apps.api.app.models import (
     EvidenceRef,
     FailureClass,
     NetworkPolicy,
+    RepairAction,
     RepairInstruction,
     ReviewRun,
     RunStatus,
@@ -431,6 +434,14 @@ class RuntimeSmokeResult:
     screenshot_artifact: ArtifactRecord | None
     message: str
 
+    @property
+    def artifact_ids(self) -> list[str]:
+        return [
+            artifact.id
+            for artifact in (self.trace_artifact, self.report_artifact, self.screenshot_artifact)
+            if artifact is not None
+        ]
+
 
 @dataclass(frozen=True)
 class RuntimeEntry:
@@ -463,6 +474,7 @@ class RuntimeSmokeRunner:
         scenario: RuntimeScenario | None = None,
         network_policy: NetworkPolicy = "deny",
         parent_artifact_ids: list[str] | None = None,
+        attempt: int = 0,
     ) -> RuntimeSmokeResult:
         parents = parent_artifact_ids or []
         started_at = time.perf_counter()
@@ -489,6 +501,7 @@ class RuntimeSmokeRunner:
                     scenario=scenario,
                     network_policy=network_policy,
                     parent_artifact_ids=parents,
+                    attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
                     message="Runtime smoke skipped because no HTML entry was found.",
             )
@@ -532,6 +545,7 @@ class RuntimeSmokeRunner:
                     scenario=scenario,
                     network_policy=network_policy,
                     parent_artifact_ids=parents,
+                    attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
                     message=f"Runtime smoke completed with status {status}.",
                 )
@@ -555,6 +569,7 @@ class RuntimeSmokeRunner:
                     scenario=scenario,
                     network_policy=network_policy,
                     parent_artifact_ids=parents,
+                    attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
                     message=f"Runtime smoke produced best-effort evidence: {error}",
                 )
@@ -638,6 +653,7 @@ class RuntimeSmokeRunner:
         scenario: RuntimeScenario | None,
         network_policy: NetworkPolicy,
         parent_artifact_ids: list[str],
+        attempt: int,
         duration_ms: int,
         message: str,
     ) -> RuntimeSmokeResult:
@@ -652,6 +668,7 @@ class RuntimeSmokeRunner:
                 content_type="image/png",
                 producer="worker.runtime_smoke",
                 parent_artifact_ids=parent_artifact_ids,
+                attempt=attempt,
             )
 
         trace_payload = {
@@ -682,12 +699,13 @@ class RuntimeSmokeRunner:
             content_type="application/json",
             producer="worker.runtime_smoke",
             parent_artifact_ids=parent_artifact_ids,
+            attempt=attempt,
         )
 
         validation = RuntimeValidationRun(
             id=f"runtime_{uuid4().hex[:12]}",
             job_id=job_id,
-            attempt=0,
+            attempt=attempt,
             target=target,
             entry_url=entry_url,
             status=status,
@@ -710,6 +728,7 @@ class RuntimeSmokeRunner:
             content_type="application/json",
             producer="worker.runtime_smoke",
             parent_artifact_ids=report_parent_ids,
+            attempt=attempt,
         )
         return RuntimeSmokeResult(
             validation=validation,
@@ -786,6 +805,7 @@ class RuntimeCompareReviewGate:
         comparison_artifacts: list[ArtifactRecord],
         job_config: dict[str, Any] | None = None,
         parent_artifact_ids: list[str] | None = None,
+        attempt: int = 0,
     ) -> RuntimeCompareReviewGateResult:
         policy = self._policy(job_config)
         if not policy["enabled"]:
@@ -817,10 +837,11 @@ class RuntimeCompareReviewGate:
         ]
         repair_artifact = None
         if triggered:
+            repair_attempt = attempt + 1
             repair_instruction = RepairInstruction(
                 id=f"repair_{uuid4().hex[:12]}",
                 job_id=job_id,
-                attempt=1,
+                attempt=repair_attempt,
                 target_stage="runtime_compare",
                 failure_class="runtime_error",
                 input_artifact_ids=[artifact.id for artifact, _ in comparisons],
@@ -838,12 +859,12 @@ class RuntimeCompareReviewGate:
                 job_id,
                 kind="repair_instruction",
                 stage="repairing",
-                filename="runtime-compare-repair-instruction.json",
+                filename=f"runtime-compare-repair-instruction-attempt-{repair_attempt}.json",
                 content=repair_instruction.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                 content_type="application/json",
                 producer="worker.runtime_compare_review",
                 parent_artifact_ids=parents,
-                attempt=1,
+                attempt=repair_attempt,
             )
 
         decision = self._decision(
@@ -854,7 +875,7 @@ class RuntimeCompareReviewGate:
         review_run = ReviewRun(
             id=f"review_{uuid4().hex[:12]}",
             job_id=job_id,
-            attempt=0,
+            attempt=attempt,
             review_type="runtime_compare",
             status="fail" if triggered else "pass",
             decision=decision,
@@ -875,6 +896,7 @@ class RuntimeCompareReviewGate:
             content_type="application/json",
             producer="worker.runtime_compare_review",
             parent_artifact_ids=review_parent_ids,
+            attempt=attempt,
         )
         if triggered:
             store.update_status(job_id, "repairing")
@@ -1012,6 +1034,260 @@ class RuntimeCompareReviewGate:
         return default
 
 
+@dataclass(frozen=True)
+class RuntimeCompareRepairResult:
+    repair_artifact: ArtifactRecord | None
+    applied_project_artifact: ArtifactRecord | None
+    message: str
+
+    @property
+    def artifact_ids(self) -> list[str]:
+        return [
+            artifact.id
+            for artifact in (self.repair_artifact, self.applied_project_artifact)
+            if artifact is not None
+        ]
+
+
+class RuntimeCompareRepairRunner:
+    """Applies low-risk deterministic runtime repair actions to a generated project attempt."""
+
+    PROTECTED_ROOTS = {"src", "scripts", "node_modules", ".git"}
+    PROTECTED_FILES = {
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "tsconfig.json",
+        "tsconfig.base.json",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.ts",
+        "rollup.config.js",
+        "webpack.config.js",
+    }
+
+    def run(
+        self,
+        *,
+        job_id: str,
+        store,
+        generated_project_artifact: ArtifactRecord | None,
+        planned_repair_artifact: ArtifactRecord | None,
+        parent_artifact_ids: list[str] | None = None,
+        attempt: int = 1,
+    ) -> RuntimeCompareRepairResult:
+        if planned_repair_artifact is None:
+            return RuntimeCompareRepairResult(
+                repair_artifact=None,
+                applied_project_artifact=None,
+                message="No planned runtime compare repair instruction was available.",
+            )
+
+        store.update_status(job_id, "repairing")
+        parents = list(dict.fromkeys([*(parent_artifact_ids or []), planned_repair_artifact.id]))
+        planned = self._load_repair_instruction(job_id=job_id, store=store, artifact=planned_repair_artifact)
+        evidence_refs = planned.evidence_refs
+        input_artifact_ids = list(dict.fromkeys([planned_repair_artifact.id, *planned.input_artifact_ids]))
+
+        if generated_project_artifact is None:
+            repair_artifact = self._write_repair_instruction(
+                job_id=job_id,
+                store=store,
+                attempt=attempt,
+                parent_artifact_ids=parents,
+                input_artifact_ids=input_artifact_ids,
+                evidence_refs=evidence_refs,
+                actions=[],
+                status="skipped",
+                risk_level="medium",
+                decision="Runtime compare repair skipped because no generated_project artifact was available.",
+            )
+            return RuntimeCompareRepairResult(
+                repair_artifact=repair_artifact,
+                applied_project_artifact=None,
+                message="Runtime compare repair skipped because no generated_project artifact was available.",
+            )
+
+        source_project = Path(generated_project_artifact.storage_uri)
+        if not source_project.is_dir():
+            repair_artifact = self._write_repair_instruction(
+                job_id=job_id,
+                store=store,
+                attempt=attempt,
+                parent_artifact_ids=[*parents, generated_project_artifact.id],
+                input_artifact_ids=[*input_artifact_ids, generated_project_artifact.id],
+                evidence_refs=evidence_refs,
+                actions=[],
+                status="skipped",
+                risk_level="medium",
+                decision="Runtime compare repair skipped because generated_project storage was not a directory.",
+            )
+            return RuntimeCompareRepairResult(
+                repair_artifact=repair_artifact,
+                applied_project_artifact=None,
+                message="Runtime compare repair skipped because generated_project storage was not a directory.",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="ai-jsunpack-runtime-repair-") as temp_dir:
+            attempt_root = Path(temp_dir) / "generated_project"
+            shutil.copytree(source_project, attempt_root)
+            actions, decision = self._apply_runtime_actions(project_root=attempt_root)
+            status = "applied" if actions else "skipped"
+            risk_level = "low" if actions else "medium"
+            repair_artifact = self._write_repair_instruction(
+                job_id=job_id,
+                store=store,
+                attempt=attempt,
+                parent_artifact_ids=[*parents, generated_project_artifact.id],
+                input_artifact_ids=[*input_artifact_ids, generated_project_artifact.id],
+                evidence_refs=evidence_refs,
+                actions=actions,
+                status=status,
+                risk_level=risk_level,
+                decision=decision,
+            )
+            if not actions:
+                return RuntimeCompareRepairResult(
+                    repair_artifact=repair_artifact,
+                    applied_project_artifact=None,
+                    message=decision,
+                )
+
+            applied_project_artifact = store.register_artifact_path(
+                job_id,
+                kind="generated_project",
+                stage="repairing",
+                filename=f"runtime-repaired-generated-project-attempt-{attempt}",
+                source_path=attempt_root,
+                content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                producer="worker.runtime_compare_repair",
+                parent_artifact_ids=[*parents, generated_project_artifact.id, repair_artifact.id],
+                attempt=attempt,
+            )
+            return RuntimeCompareRepairResult(
+                repair_artifact=repair_artifact,
+                applied_project_artifact=applied_project_artifact,
+                message=decision,
+            )
+
+    def _load_repair_instruction(self, *, job_id: str, store, artifact: ArtifactRecord) -> RepairInstruction:
+        payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+        return RepairInstruction.model_validate(payload)
+
+    def _apply_runtime_actions(self, *, project_root: Path) -> tuple[list[RepairAction], str]:
+        source_root, limitation = self._source_root(project_root)
+        if source_root is None:
+            return [], limitation
+
+        copied = 0
+        skipped = 0
+        for source_file in sorted(path for path in source_root.rglob("*") if path.is_file()):
+            if source_file.is_symlink():
+                skipped += 1
+                continue
+            relative_path = source_file.relative_to(source_root)
+            if self._is_protected_mirror_path(relative_path):
+                skipped += 1
+                continue
+            target_path = project_root / relative_path
+            try:
+                target_path.resolve().relative_to(project_root.resolve())
+            except ValueError:
+                skipped += 1
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, target_path)
+            copied += 1
+
+        if copied < 1:
+            return [], "Runtime compare repair skipped because no safe static files were available to mirror."
+
+        action = RepairAction(
+            action="mirror_original_static_entry",
+            path="projectRoot",
+            value="public/original",
+            reason=(
+                f"Mirrored {copied} static file(s) from public/original into the generated project root "
+                f"for runtime compare retry; skipped {skipped} protected or unsafe file(s)."
+            ),
+        )
+        return [action], (
+            "Applied deterministic runtime repair by mirroring the original static entry into a new "
+            f"generated_project attempt ({copied} file(s) copied, {skipped} skipped)."
+        )
+
+    def _source_root(self, project_root: Path) -> tuple[Path | None, str]:
+        manifest_path = project_root / "src" / "reconstruction-manifest.json"
+        if not manifest_path.is_file():
+            return None, "Runtime compare repair skipped because reconstruction manifest was missing."
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None, "Runtime compare repair skipped because reconstruction manifest was not valid JSON."
+
+        source_root_value = manifest.get("sourceRoot")
+        if not isinstance(source_root_value, str) or not source_root_value:
+            return None, "Runtime compare repair skipped because reconstruction manifest sourceRoot was missing."
+        source_root_relative = Path(source_root_value)
+        if source_root_relative.is_absolute() or ".." in source_root_relative.parts:
+            return None, "Runtime compare repair skipped because reconstruction manifest sourceRoot was unsafe."
+        source_root = project_root / source_root_relative
+        if not source_root.is_dir():
+            return None, f"Runtime compare repair skipped because sourceRoot was unavailable: {source_root_value}."
+        return source_root, ""
+
+    def _is_protected_mirror_path(self, relative_path: Path) -> bool:
+        parts = relative_path.parts
+        if not parts:
+            return True
+        first = parts[0].lower()
+        if first in self.PROTECTED_ROOTS:
+            return True
+        normalized = relative_path.as_posix().lower()
+        return normalized in self.PROTECTED_FILES
+
+    def _write_repair_instruction(
+        self,
+        *,
+        job_id: str,
+        store,
+        attempt: int,
+        parent_artifact_ids: list[str],
+        input_artifact_ids: list[str],
+        evidence_refs: list[EvidenceRef],
+        actions: list[RepairAction],
+        status: str,
+        risk_level: str,
+        decision: str,
+    ) -> ArtifactRecord:
+        repair_instruction = RepairInstruction(
+            id=f"repair_{uuid4().hex[:12]}",
+            job_id=job_id,
+            attempt=attempt,
+            target_stage="runtime_compare",
+            failure_class="runtime_error",
+            input_artifact_ids=list(dict.fromkeys(input_artifact_ids)),
+            evidence_refs=evidence_refs,
+            actions=actions,
+            status=status,
+            risk_level=risk_level,
+            decision=decision,
+        )
+        return store.write_artifact(
+            job_id,
+            kind="repair_instruction",
+            stage="repairing",
+            filename=f"runtime-compare-applied-repair-attempt-{attempt}.json",
+            content=repair_instruction.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+            content_type="application/json",
+            producer="worker.runtime_compare_repair",
+            parent_artifact_ids=list(dict.fromkeys(parent_artifact_ids)),
+            attempt=attempt,
+        )
+
+
 class RuntimeCompareRunner(RuntimeSmokeRunner):
     def run_compare(
         self,
@@ -1022,6 +1298,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         reconstructed_input_path: Path | str | None,
         scenario_config: dict[str, Any] | None = None,
         parent_artifact_ids: list[str] | None = None,
+        attempt: int = 0,
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids or []
         store.update_status(job_id, "runtime_compare")
@@ -1031,6 +1308,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             store=store,
             parent_artifact_ids=parents,
             matrix_plan=matrix_plan,
+            attempt=attempt,
         )
         matrix_limitation = self._matrix_limitation(matrix_plan)
         run_parent_ids = [*parents, *([matrix_trace_artifact.id] if matrix_trace_artifact else [])]
@@ -1045,6 +1323,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 matrix_index=index,
                 matrix_limitation=matrix_limitation,
                 parent_artifact_ids=run_parent_ids,
+                attempt=attempt,
             )
             for index, item in enumerate(matrix)
         ]
@@ -1091,6 +1370,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         matrix_index: int,
         matrix_limitation: str | None,
         parent_artifact_ids: list[str],
+        attempt: int,
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids
         artifact_suffix = f"{matrix_index:02d}"
@@ -1103,6 +1383,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             content_type="application/json",
             producer="worker.runtime_compare",
             parent_artifact_ids=parents,
+            attempt=attempt,
         )
 
         with self.sandbox_runner.attempt_workspace() as temp_dir:
@@ -1115,6 +1396,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 temp_dir=temp_dir,
                 matrix_index=matrix_index,
                 parent_artifact_ids=[*parents, scenario_artifact.id],
+                attempt=attempt,
             )
             reconstructed = self._capture_target(
                 job_id=job_id,
@@ -1125,6 +1407,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 temp_dir=temp_dir,
                 matrix_index=matrix_index,
                 parent_artifact_ids=[*parents, scenario_artifact.id],
+                attempt=attempt,
             )
 
         screenshot_artifacts = [artifact for artifact in (original["screenshot"], reconstructed["screenshot"]) if artifact]
@@ -1145,6 +1428,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 scenario_artifact.id,
                 *[artifact.id for artifact in screenshot_artifacts],
             ],
+            attempt=attempt,
         )
         if diff_artifact is not None:
             screenshot_artifacts.append(diff_artifact)
@@ -1172,6 +1456,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             content_type="application/json",
             producer="worker.runtime_compare",
             parent_artifact_ids=[*parents, scenario_artifact.id, *[artifact.id for artifact in screenshot_artifacts]],
+            attempt=attempt,
         )
 
         differences = self._compare_captures(
@@ -1184,7 +1469,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         comparison = RuntimeComparisonReport(
             id=f"runtime_comparison_{uuid4().hex[:12]}",
             job_id=job_id,
-            attempt=0,
+            attempt=attempt,
             status=status,
             scenario_artifact_id=scenario_artifact.id,
             original=original["summary"],
@@ -1207,12 +1492,13 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             content_type="application/json",
             producer="worker.runtime_compare",
             parent_artifact_ids=[*parents, scenario_artifact.id, trace_artifact.id, *[artifact.id for artifact in screenshot_artifacts]],
+            attempt=attempt,
         )
 
         validation = RuntimeValidationRun(
             id=f"runtime_{uuid4().hex[:12]}",
             job_id=job_id,
-            attempt=0,
+            attempt=attempt,
             target="reconstructed",
             entry_url=reconstructed["summary"].entry_url,
             status=status,
@@ -1243,6 +1529,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 comparison_artifact.id,
                 *[artifact.id for artifact in screenshot_artifacts],
             ],
+            attempt=attempt,
         )
         return RuntimeCompareResult(
             validation=validation,
@@ -1434,6 +1721,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         store,
         parent_artifact_ids: list[str],
         matrix_plan: dict[str, Any],
+        attempt: int,
     ) -> ArtifactRecord | None:
         if matrix_plan["omittedRunCount"] <= 0:
             return None
@@ -1452,6 +1740,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             content_type="application/json",
             producer="worker.runtime_compare",
             parent_artifact_ids=parent_artifact_ids,
+            attempt=attempt,
         )
 
     def _matrix_limitation(self, matrix_plan: dict[str, Any]) -> str | None:
@@ -1509,6 +1798,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         temp_dir: Path,
         matrix_index: int,
         parent_artifact_ids: list[str],
+        attempt: int,
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         entry = self._resolve_scenario_entry(input_path=input_path, scenario=scenario)
@@ -1561,6 +1851,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 content_type="image/png",
                 producer="worker.runtime_compare",
                 parent_artifact_ids=parent_artifact_ids,
+                attempt=attempt,
             )
 
         summary = RuntimeCaptureSummary(
@@ -1666,6 +1957,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         image_diff_policy: RuntimeImageDiffPolicy,
         filename_suffix: str,
         parent_artifact_ids: list[str],
+        attempt: int,
     ) -> tuple[RuntimeScreenshotDiff, ArtifactRecord | None]:
         hash_changed = (
             None
@@ -1785,6 +2077,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             content_type="image/png",
             producer="worker.runtime_compare",
             parent_artifact_ids=parent_artifact_ids,
+            attempt=attempt,
         )
         pixel_count = original_image.width * original_image.height
         return (

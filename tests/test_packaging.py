@@ -10,6 +10,51 @@ from apps.worker.worker.packaging import PackagingRunner
 
 
 class PackagingRunnerTest(unittest.TestCase):
+    def test_completion_decision_uses_latest_attempt_per_validation_group(self):
+        decision = PackagingRunner()._completion_decision(
+            {
+                "buildArtifacts": [],
+                "runtimeReports": [
+                    {
+                        "target": "reconstructed",
+                        "attempt": 0,
+                        "status": "fail",
+                        "failureClass": "runtime_error",
+                        "decision": "first runtime compare failed",
+                        "comparisonArtifactId": "comparison_0",
+                    },
+                    {
+                        "target": "reconstructed",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "decision": "runtime compare passed after repair",
+                        "comparisonArtifactId": "comparison_1",
+                    },
+                ],
+                "reviewRuns": [
+                    {
+                        "reviewType": "runtime_compare",
+                        "attempt": 0,
+                        "status": "fail",
+                        "failureClass": "runtime_error",
+                        "decision": "planned runtime repair",
+                    },
+                    {
+                        "reviewType": "runtime_compare",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "decision": "runtime compare repair passed",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(decision["status"], "completed")
+        self.assertEqual(decision["failureClass"], "none")
+        self.assertEqual(decision["observations"], [])
+
     def test_evidence_attachment_include_kinds_filter_controls_zip_entries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

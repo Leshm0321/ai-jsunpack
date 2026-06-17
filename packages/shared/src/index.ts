@@ -398,7 +398,7 @@ export interface MemoryRecord {
 }
 
 export interface RepairAction {
-  action: "add_package_script";
+  action: "add_package_script" | "mirror_original_static_entry";
   path: string;
   value: string;
   reason: string;
@@ -500,7 +500,7 @@ const repairActionsSchema = {
   items: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add_package_script"] },
+      action: { type: "string", enum: ["add_package_script", "mirror_original_static_entry"] },
       path: stringSchema,
       value: stringSchema,
       reason: stringSchema

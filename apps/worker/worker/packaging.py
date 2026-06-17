@@ -197,8 +197,22 @@ class PackagingRunner:
 
     def _completion_decision(self, audit_payload: dict[str, Any]) -> dict[str, Any]:
         observations: list[dict[str, str]] = []
-        for group in ("buildArtifacts", "runtimeReports", "reviewRuns"):
-            for record in audit_payload[group]:
+        decision_records = {
+            "buildArtifacts": self._latest_decision_records(
+                audit_payload["buildArtifacts"],
+                key_name="reviewType",
+            ),
+            "runtimeReports": self._latest_decision_records(
+                audit_payload["runtimeReports"],
+                key_name=None,
+            ),
+            "reviewRuns": self._latest_decision_records(
+                audit_payload["reviewRuns"],
+                key_name="reviewType",
+            ),
+        }
+        for group, records in decision_records.items():
+            for record in records:
                 status = record.get("status")
                 if status in {"fail", "retry", "best_effort"}:
                     observations.append(
@@ -226,6 +240,31 @@ class PackagingRunner:
             "reason": reason,
             "observations": observations,
         }
+
+    def _latest_decision_records(self, records: list[dict[str, Any]], *, key_name: str | None) -> list[dict[str, Any]]:
+        latest_attempt_by_key: dict[str, int] = {}
+        for record in records:
+            key = self._decision_record_key(record, key_name=key_name)
+            attempt = self._record_attempt(record)
+            latest_attempt_by_key[key] = max(attempt, latest_attempt_by_key.get(key, attempt))
+        return [
+            record
+            for record in records
+            if self._record_attempt(record) == latest_attempt_by_key[self._decision_record_key(record, key_name=key_name)]
+        ]
+
+    def _decision_record_key(self, record: dict[str, Any], *, key_name: str | None) -> str:
+        if key_name is not None:
+            return str(record.get(key_name) or "unknown")
+        phase = "runtime_compare" if record.get("comparisonArtifactId") else "runtime_smoke"
+        target = str(record.get("target") or "unknown")
+        return f"{phase}:{target}"
+
+    def _record_attempt(self, record: dict[str, Any]) -> int:
+        attempt = record.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool):
+            return max(0, attempt)
+        return 0
 
     def _audit_markdown(
         self,

@@ -9,7 +9,7 @@ from .agent_runtime import AgentRuntime, AgentRuntimeError, AgentRuntimeRequest
 from .build_validation import BuildValidationError, BuildValidationRunner
 from .core_bridge import CoreBridge, CoreBridgeError
 from .reconstruction import ReconstructionError, ReconstructionRunner
-from .runtime_smoke import RuntimeCompareReviewGate, RuntimeCompareRunner, RuntimeSmokeRunner
+from .runtime_smoke import RuntimeCompareRepairRunner, RuntimeCompareReviewGate, RuntimeCompareRunner, RuntimeSmokeRunner
 from .packaging import PackagingError, PackagingRunner
 
 
@@ -85,6 +85,7 @@ class WorkerPipeline:
         runtime_smoke_runner: RuntimeSmokeRunner | None = None,
         runtime_compare_runner: RuntimeCompareRunner | None = None,
         runtime_compare_review_gate: RuntimeCompareReviewGate | None = None,
+        runtime_compare_repair_runner: RuntimeCompareRepairRunner | None = None,
         packaging_runner: PackagingRunner | None = None,
     ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
@@ -98,6 +99,7 @@ class WorkerPipeline:
             sandbox_runner=self.runtime_smoke_runner.sandbox_runner,
         )
         self.runtime_compare_review_gate = runtime_compare_review_gate or RuntimeCompareReviewGate()
+        self.runtime_compare_repair_runner = runtime_compare_repair_runner or RuntimeCompareRepairRunner()
         self.packaging_runner = packaging_runner or PackagingRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
@@ -184,34 +186,40 @@ class WorkerPipeline:
             if build_validation_result.repair_artifacts:
                 run.transition("repairing", "Build/typecheck review produced repair evidence for validation retry.")
 
+            current_project_artifact = (
+                self._latest_artifact(store=store, job_id=job_id, kind="generated_project")
+                or reconstruction_result.generated_project_artifact
+            )
+            current_project_path = Path(current_project_artifact.storage_uri)
+            packaging_parent_ids = self._unique_ids([*validation_parent_ids, *build_validation_result.artifact_ids])
+
             runtime_result = self.runtime_smoke_runner.run(
                 job_id=job_id,
-                input_path=reconstruction_result.project_path,
+                input_path=current_project_path,
                 store=store,
-                parent_artifact_ids=[*validation_parent_ids, *build_validation_result.artifact_ids],
+                parent_artifact_ids=packaging_parent_ids,
+                attempt=0,
             )
             run.transition("runtime_smoke", runtime_result.message)
+            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_result.artifact_ids])
             runtime_compare_result = self.runtime_compare_runner.run_compare(
                 job_id=job_id,
                 store=store,
                 original_input_path=input_path,
-                reconstructed_input_path=reconstruction_result.project_path,
+                reconstructed_input_path=current_project_path,
                 scenario_config=self._runtime_compare_config(job.config),
-                parent_artifact_ids=[
-                    *validation_parent_ids,
-                    *build_validation_result.artifact_ids,
-                    runtime_result.trace_artifact.id,
-                    runtime_result.report_artifact.id,
-                    *([runtime_result.screenshot_artifact.id] if runtime_result.screenshot_artifact else []),
-                ],
+                parent_artifact_ids=packaging_parent_ids,
+                attempt=0,
             )
             run.transition("runtime_compare", runtime_compare_result.message)
+            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_result.artifact_ids])
             runtime_compare_gate_result = self.runtime_compare_review_gate.run(
                 job_id=job_id,
                 store=store,
                 comparison_artifacts=runtime_compare_result.comparison_artifacts,
                 job_config=job.config,
                 parent_artifact_ids=runtime_compare_result.artifact_ids,
+                attempt=0,
             )
             if runtime_compare_gate_result.enabled:
                 run.transition("reviewing", runtime_compare_gate_result.message)
@@ -220,16 +228,60 @@ class WorkerPipeline:
                         "repairing",
                         "Runtime compare review produced repair evidence for follow-up Review/Fix.",
                     )
-            packaging_parent_ids = [
-                *validation_parent_ids,
-                *build_validation_result.artifact_ids,
-                runtime_result.trace_artifact.id,
-                runtime_result.report_artifact.id,
-                *runtime_compare_result.artifact_ids,
-                *runtime_compare_gate_result.artifact_ids,
-            ]
-            if runtime_result.screenshot_artifact is not None:
-                packaging_parent_ids.append(runtime_result.screenshot_artifact.id)
+            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_gate_result.artifact_ids])
+
+            if runtime_compare_gate_result.enabled and runtime_compare_gate_result.triggered:
+                runtime_repair_result = self.runtime_compare_repair_runner.run(
+                    job_id=job_id,
+                    store=store,
+                    generated_project_artifact=current_project_artifact,
+                    planned_repair_artifact=runtime_compare_gate_result.repair_artifact,
+                    parent_artifact_ids=packaging_parent_ids,
+                    attempt=1,
+                )
+                run.transition("repairing", runtime_repair_result.message)
+                packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_repair_result.artifact_ids])
+
+                if runtime_repair_result.applied_project_artifact is not None:
+                    current_project_artifact = runtime_repair_result.applied_project_artifact
+                    current_project_path = Path(current_project_artifact.storage_uri)
+                    retry_runtime_result = self.runtime_smoke_runner.run(
+                        job_id=job_id,
+                        input_path=current_project_path,
+                        store=store,
+                        parent_artifact_ids=packaging_parent_ids,
+                        attempt=1,
+                    )
+                    run.transition("runtime_smoke", retry_runtime_result.message)
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_runtime_result.artifact_ids])
+                    retry_compare_result = self.runtime_compare_runner.run_compare(
+                        job_id=job_id,
+                        store=store,
+                        original_input_path=input_path,
+                        reconstructed_input_path=current_project_path,
+                        scenario_config=self._runtime_compare_config(job.config),
+                        parent_artifact_ids=packaging_parent_ids,
+                        attempt=1,
+                    )
+                    run.transition("runtime_compare", retry_compare_result.message)
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_compare_result.artifact_ids])
+                    retry_gate_result = self.runtime_compare_review_gate.run(
+                        job_id=job_id,
+                        store=store,
+                        comparison_artifacts=retry_compare_result.comparison_artifacts,
+                        job_config=job.config,
+                        parent_artifact_ids=retry_compare_result.artifact_ids,
+                        attempt=1,
+                    )
+                    if retry_gate_result.enabled:
+                        run.transition("reviewing", retry_gate_result.message)
+                        if retry_gate_result.triggered:
+                            run.transition(
+                                "repairing",
+                                "Runtime compare repair retry still requires follow-up Review/Fix.",
+                            )
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_gate_result.artifact_ids])
+
             packaging_result = self.packaging_runner.run(
                 job_id=job_id,
                 store=store,
@@ -270,6 +322,13 @@ class WorkerPipeline:
             return config
         runtime_scenario = job_config.get("runtimeScenario")
         return runtime_scenario if isinstance(runtime_scenario, dict) else None
+
+    def _latest_artifact(self, *, store, job_id: str, kind: str):
+        artifacts = store.list_artifacts(job_id, kind=kind)
+        return artifacts[-1] if artifacts else None
+
+    def _unique_ids(self, artifact_ids: list[str]) -> list[str]:
+        return list(dict.fromkeys(artifact_ids))
 
     def _json_bytes(self, payload: dict) -> bytes:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
