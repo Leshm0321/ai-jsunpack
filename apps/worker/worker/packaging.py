@@ -80,7 +80,7 @@ class PackagingRunner:
         parents = parent_artifact_ids or [artifact.id for artifact in artifacts]
         audit_payload = self._audit_payload(job=job, artifacts=artifacts, store=store)
         decision = self._completion_decision(audit_payload)
-        evidence_index = self._evidence_index(job=job, artifacts=artifacts)
+        evidence_index = self._evidence_index(job=job, artifacts=artifacts, decision=decision)
         audit_payload["completionDecision"] = decision
         audit_payload["evidenceIndex"] = evidence_index
         report_markdown = self._audit_markdown(audit_payload, decision, evidence_index)
@@ -559,21 +559,270 @@ class PackagingRunner:
         links = [f"artifact://{artifact_id}" for artifact_id in artifact_ids if artifact_id]
         return ", ".join(links) if links else "none"
 
-    def _evidence_index(self, *, job: JobRecord, artifacts: list[ArtifactRecord]) -> dict[str, Any]:
+    def _evidence_index(self, *, job: JobRecord, artifacts: list[ArtifactRecord], decision: dict[str, Any]) -> dict[str, Any]:
         policy = self._evidence_attachment_policy(job)
         attachments = [
             self._evidence_attachment(artifact, policy)
             for artifact in artifacts
             if artifact.kind in policy.candidate_kinds
         ]
+        package_contents = self._package_contents(
+            attachments=attachments,
+            generated_project=self._latest_artifact(artifacts, "generated_project"),
+        )
+        report_sections = self._report_sections(attachments=attachments, artifacts=artifacts)
         return {
             "schemaVersion": "2026-06-14",
             "kind": "evidence_index",
             "jobId": job.id,
             "attachmentPolicy": self._evidence_attachment_policy_payload(policy),
             "attachments": attachments,
+            "packageContents": package_contents,
+            "reportSections": report_sections,
+            "failureSummary": decision["observations"],
             "includedCount": sum(1 for item in attachments if item["included"]),
             "omittedCount": sum(1 for item in attachments if not item["included"]),
+        }
+
+    def _package_contents(
+        self,
+        *,
+        attachments: list[dict[str, Any]],
+        generated_project: ArtifactRecord | None,
+    ) -> list[dict[str, Any]]:
+        contents = [
+            self._package_content(
+                path="audit-report.md",
+                content_type="text/markdown; charset=utf-8",
+                source="audit_report",
+                description="Human-readable Markdown audit report.",
+            ),
+            self._package_content(
+                path="audit-report.html",
+                content_type="text/html; charset=utf-8",
+                source="html_report",
+                description="Offline HTML audit report.",
+            ),
+            self._package_content(
+                path="audit.json",
+                content_type="application/json",
+                source="audit_payload",
+                description="Structured audit payload with report inputs and completion decision.",
+            ),
+            self._package_content(
+                path="evidence-index.json",
+                content_type="application/json",
+                source="evidence_index",
+                description="Structured package, report, and evidence attachment index.",
+            ),
+            self._package_content(
+                path="artifact-manifest.json",
+                content_type="application/json",
+                source="artifact_manifest",
+                description="Artifact metadata manifest captured at packaging time.",
+            ),
+            self._package_content(
+                path="build-artifacts.json",
+                content_type="application/json",
+                source="build_artifact",
+                description="Build and typecheck evidence records.",
+            ),
+            self._package_content(
+                path="inference-records.json",
+                content_type="application/json",
+                source="inference_record",
+                description="Agent inference audit records.",
+            ),
+            self._package_content(
+                path="runtime-report.json",
+                content_type="application/json",
+                source="runtime_validation",
+                description="Browser runtime validation records.",
+            ),
+            self._package_content(
+                path="runtime-comparisons.json",
+                content_type="application/json",
+                source="runtime_comparison",
+                description="Original-vs-reconstructed runtime comparison records.",
+            ),
+            self._package_content(
+                path="review-runs.json",
+                content_type="application/json",
+                source="review_run",
+                description="Review and gate decision records.",
+            ),
+            self._package_content(
+                path="tool-calls.json",
+                content_type="application/json",
+                source="tool_call",
+                description="Tool call audit records.",
+            ),
+            self._package_content(
+                path="repair-instructions.json",
+                content_type="application/json",
+                source="repair_instruction",
+                description="Structured repair instructions and applied repair evidence.",
+            ),
+        ]
+        if generated_project is None:
+            contents.append(
+                self._package_content(
+                    path="generated_project/README.md",
+                    content_type="text/markdown; charset=utf-8",
+                    source="generated_project",
+                    description="Placeholder explaining that no generated project was available.",
+                    included=False,
+                    reason="No generated_project artifact was available when packaging ran.",
+                )
+            )
+        else:
+            contents.append(
+                self._package_content(
+                    path="generated_project/",
+                    content_type="inode/directory",
+                    source="generated_project",
+                    description="Generated TypeScript-oriented project directory.",
+                    artifact_id=generated_project.id,
+                    size=generated_project.size,
+                )
+            )
+        for attachment in attachments:
+            contents.append(
+                self._package_content(
+                    path=attachment["packagePath"] or f"evidence/{attachment['kind']}/{attachment['artifactId']}",
+                    content_type=str(attachment["contentType"]),
+                    source=str(attachment["kind"]),
+                    description="Evidence attachment collected into the result package.",
+                    artifact_id=str(attachment["artifactId"]),
+                    included=bool(attachment["included"]),
+                    reason=str(attachment["reason"]),
+                    size=int(attachment["size"]),
+                )
+            )
+        return contents
+
+    def _package_content(
+        self,
+        *,
+        path: str,
+        content_type: str,
+        source: str,
+        description: str,
+        artifact_id: str | None = None,
+        included: bool = True,
+        reason: str = "included",
+        size: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "path": path,
+            "contentType": content_type,
+            "source": source,
+            "artifactId": artifact_id,
+            "included": included,
+            "reason": reason,
+            "size": size,
+            "description": description,
+        }
+
+    def _report_sections(
+        self,
+        *,
+        attachments: list[dict[str, Any]],
+        artifacts: list[ArtifactRecord],
+    ) -> list[dict[str, Any]]:
+        artifact_ids_by_kind: dict[str, list[str]] = {}
+        for artifact in artifacts:
+            artifact_ids_by_kind.setdefault(artifact.kind, []).append(artifact.id)
+        attachment_ids = [str(item["artifactId"]) for item in attachments if item["included"]]
+        return [
+            self._report_section(
+                title="Completion Decision",
+                anchor="completion-decision",
+                summary="Final completed or best-effort decision and the primary reason.",
+                artifact_kinds=("audit_report", "html_report"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Risk And Failure Groups",
+                anchor="risk-and-failure-groups",
+                summary="Failing or best-effort build, runtime, and review observations.",
+                artifact_kinds=("build_artifact", "runtime_validation", "review_run"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Build And Typecheck",
+                anchor="build-and-typecheck",
+                summary="Sandboxed build and typecheck results.",
+                artifact_kinds=("build_artifact", "build_log"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Runtime Evidence",
+                anchor="runtime-evidence",
+                summary="Browser validation reports, traces, screenshots, and request evidence.",
+                artifact_kinds=("runtime_validation", "runtime_trace", "runtime_screenshot"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Runtime Compare Difference Summary",
+                anchor="runtime-compare-difference-summary",
+                summary="Scenario and viewport comparison differences with evidence deep links.",
+                artifact_kinds=("runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Review Evidence",
+                anchor="review-evidence",
+                summary="Review, repair gate, and best-effort decision evidence.",
+                artifact_kinds=("review_run", "repair_instruction"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Artifact Manifest",
+                anchor="artifact-manifest",
+                summary="Packaged artifact manifest and artifact deep links.",
+                artifact_kinds=tuple(sorted(artifact_ids_by_kind)),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Evidence Attachment Index",
+                anchor="evidence-attachment-index",
+                summary="Evidence files included in or omitted from the result package.",
+                artifact_kinds=(),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+                evidence_artifact_ids=attachment_ids,
+            ),
+            self._report_section(
+                title="Reproduction",
+                anchor="reproduction",
+                summary="Offline commands and files needed to inspect the package.",
+                artifact_kinds=("result_package", "evidence_index"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+        ]
+
+    def _report_section(
+        self,
+        *,
+        title: str,
+        anchor: str,
+        summary: str,
+        artifact_kinds: tuple[str, ...],
+        artifact_ids_by_kind: dict[str, list[str]],
+        evidence_artifact_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        artifact_ids: list[str] = []
+        for kind in artifact_kinds:
+            artifact_ids.extend(artifact_ids_by_kind.get(kind, []))
+        if evidence_artifact_ids:
+            artifact_ids.extend(evidence_artifact_ids)
+        return {
+            "title": title,
+            "anchor": anchor,
+            "summary": summary,
+            "artifactKinds": list(artifact_kinds),
+            "artifactIds": list(dict.fromkeys(artifact_ids)),
+            "evidenceLinks": [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids)],
         }
 
     def _evidence_attachment(self, artifact: ArtifactRecord, policy: EvidenceAttachmentPolicy) -> dict[str, Any]:

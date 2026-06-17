@@ -101,6 +101,28 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="image/png",
                     producer="test",
                 )
+                review_run = store.write_artifact(
+                    job.id,
+                    kind="review_run",
+                    stage="reviewing",
+                    filename="review.json",
+                    content=json.dumps(
+                        {
+                            "id": "review_test",
+                            "jobId": job.id,
+                            "attempt": 0,
+                            "reviewType": "runtime_compare",
+                            "status": "fail",
+                            "decision": "runtime compare needs repair",
+                            "failureClass": "runtime_error",
+                            "evidenceRefs": [],
+                            "repairInstructionIds": [],
+                            "logsArtifactId": None,
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
@@ -108,6 +130,9 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 self.assertEqual(evidence_index["includedCount"], 1)
                 self.assertEqual(evidence_index["omittedCount"], 2)
+                package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
+                report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
+                self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "runtime_error")
                 self.assertTrue(attachments[runtime_trace.id]["included"])
                 self.assertFalse(attachments[build_log.id]["included"])
                 self.assertFalse(attachments[runtime_screenshot.id]["included"])
@@ -115,6 +140,17 @@ class PackagingRunnerTest(unittest.TestCase):
                     attachments[build_log.id]["reason"],
                     "Artifact kind is outside configured includeKinds.",
                 )
+                self.assertIn("audit-report.md", package_contents)
+                self.assertIn("evidence-index.json", package_contents)
+                self.assertIn("generated_project/README.md", package_contents)
+                self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", package_contents)
+                self.assertTrue(package_contents[f"evidence/runtime_trace/{runtime_trace.id}.json"]["included"])
+                self.assertFalse(package_contents[f"evidence/build_log/{build_log.id}"]["included"])
+                self.assertEqual(package_contents[f"evidence/runtime_trace/{runtime_trace.id}.json"]["artifactId"], runtime_trace.id)
+                self.assertIn("risk-and-failure-groups", report_sections)
+                self.assertIn("evidence-attachment-index", report_sections)
+                self.assertIn(f"artifact://{review_run.id}", report_sections["risk-and-failure-groups"]["evidenceLinks"])
+                self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())

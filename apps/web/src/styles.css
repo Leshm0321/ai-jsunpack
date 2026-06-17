@@ -1106,14 +1106,19 @@ button.graph-node:focus-visible {
   gap: 7px;
 }
 
+.report-issue-list,
+.package-content-list,
+.report-section-list,
 .evidence-index-list {
   display: grid;
   gap: 8px;
 }
 
+.report-issue-row,
+.package-content-row,
+.report-section-row,
 .evidence-index-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px auto;
   gap: 10px;
   align-items: center;
   min-height: 64px;
@@ -1123,12 +1128,48 @@ button.graph-node:focus-visible {
   background: #ffffff;
 }
 
+.report-issue-row {
+  grid-template-columns: minmax(0, 1fr) 112px minmax(100px, 0.25fr);
+}
+
+.package-content-row {
+  grid-template-columns: 24px minmax(0, 1fr) 92px auto;
+}
+
+.report-section-row {
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: flex-start;
+}
+
+.evidence-index-row {
+  grid-template-columns: minmax(0, 1fr) 92px auto;
+}
+
+.report-issue-row > div,
+.package-content-row > div,
+.report-section-row > div,
+.evidence-index-row > div {
+  min-width: 0;
+}
+
+.report-issue-row > svg,
+.package-content-row > svg,
+.report-section-row > svg {
+  color: var(--primary);
+}
+
+.report-issue-row strong,
+.package-content-row strong,
+.report-section-row strong,
 .evidence-index-row strong {
   display: block;
   color: var(--ink);
   font-size: 13px;
 }
 
+.report-issue-row span,
+.package-content-row span,
+.report-section-row span,
 .evidence-index-row span {
   margin-top: 4px;
   color: var(--muted);
@@ -1136,9 +1177,29 @@ button.graph-node:focus-visible {
   font-size: 11px;
 }
 
+.report-issue-row small,
+.package-content-row small,
+.report-section-row small,
 .evidence-index-row small {
   margin-top: 4px;
   color: var(--primary);
+  font-family: "Fira Code", monospace;
+  font-size: 11px;
+}
+
+.report-section-row .evidence-link-group {
+  grid-column: 2;
+}
+
+.report-overflow-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgba(3, 105, 161, 0.16);
+  border-radius: 8px;
+  color: var(--muted);
+  background: #f8fafc;
   font-family: "Fira Code", monospace;
   font-size: 11px;
 }
@@ -1916,6 +1977,9 @@ button.graph-node:focus-visible {
   }
 
   .report-row,
+  .report-issue-row,
+  .package-content-row,
+  .report-section-row,
   .evidence-index-row,
   .history-row {
     align-items: flex-start;
@@ -1928,6 +1992,10 @@ button.graph-node:focus-visible {
 
   .report-actions {
     justify-content: flex-start;
+  }
+
+  .report-section-row .evidence-link-group {
+    grid-column: auto;
   }
 
   .audit-row {

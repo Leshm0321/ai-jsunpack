@@ -13,10 +13,12 @@ import {
   Download,
   Eye,
   FileCode2,
+  FileJson2,
   FileText,
   Filter,
   GitBranch,
   Link2,
+  ListTree,
   Network,
   Radar,
   RefreshCw,
@@ -110,12 +112,42 @@ interface EvidenceAttachmentEntry {
   stage: JobStatus | string;
 }
 
+interface PackageContentEntry {
+  artifactId: string | null;
+  contentType: string;
+  description: string;
+  included: boolean;
+  path: string;
+  reason: string;
+  size: number | null;
+  source: string;
+}
+
+interface ReportSectionEntry {
+  anchor: string;
+  artifactIds: string[];
+  artifactKinds: string[];
+  evidenceLinks: string[];
+  summary: string;
+  title: string;
+}
+
+interface FailureSummaryEntry {
+  decision: string;
+  failureClass: string;
+  group: string;
+  status: string;
+}
+
 interface EvidenceIndexPayload {
   attachments: EvidenceAttachmentEntry[];
+  failureSummary: FailureSummaryEntry[];
   includedCount: number;
   jobId: string;
   kind: "evidence_index";
   omittedCount: number;
+  packageContents: PackageContentEntry[];
+  reportSections: ReportSectionEntry[];
   schemaVersion: string;
 }
 
@@ -1405,6 +1437,13 @@ function ReportArtifactList({
     (run) => run.failureClass !== "none" || ["best_effort", "fail", "retry"].includes(run.status)
   ).length;
   const attachments = evidenceIndex.payload?.attachments ?? [];
+  const packageContents = evidenceIndex.payload?.packageContents ?? [];
+  const reportSections = evidenceIndex.payload?.reportSections ?? [];
+  const failureSummary =
+    evidenceIndex.payload?.failureSummary.length ? evidenceIndex.payload.failureSummary : buildFailureSummary(evidence, currentJob);
+  const indexedPackageContents = packageContents.length > 0 ? packageContents : buildFallbackPackageContents(attachments);
+  const indexedReportSections = reportSections.length > 0 ? reportSections : buildFallbackReportSections(attachments, artifacts);
+  const riskCount = failureSummary.length || reviewAttention;
 
   return (
     <div className="report-list">
@@ -1415,17 +1454,40 @@ function ReportArtifactList({
         <ReportMetric label="Evidence files" value={String(evidenceIndex.payload?.includedCount ?? 0)} />
       </div>
 
-      <div className={reviewAttention > 0 ? "report-risk-strip warning" : "report-risk-strip"}>
+      <div className={riskCount > 0 ? "report-risk-strip warning" : "report-risk-strip"}>
         <AlertCircle size={17} aria-hidden="true" />
         <div>
           <strong>{currentJob?.failureClass === "none" ? "No job failure class" : currentJob?.failureClass ?? "Awaiting job"}</strong>
           <span>
-            {reviewAttention > 0
-              ? `${reviewAttention} review record${reviewAttention === 1 ? "" : "s"} need attention.`
+            {riskCount > 0
+              ? `${riskCount} packaged failure or review item${riskCount === 1 ? "" : "s"} need attention.`
               : currentJob?.failureReason ?? "Build, review, and runtime evidence decide final package confidence."}
           </span>
         </div>
       </div>
+
+      <section className="report-detail-block" aria-label="Failure summary">
+        <div className="section-heading">
+          <h3>Failure summary</h3>
+          <span>{failureSummary.length}</span>
+        </div>
+        {failureSummary.length > 0 ? (
+          <div className="report-issue-list">
+            {failureSummary.map((item, index) => (
+              <div className="report-issue-row" key={`${item.group}-${item.status}-${item.failureClass}-${index}`}>
+                <div>
+                  <strong>{item.group}</strong>
+                  <span>{item.decision}</span>
+                </div>
+                <StatusToken status={item.status} />
+                <small>{item.failureClass}</small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title="No packaged failures" detail="The latest packaged build, runtime, and review evidence did not add failure observations." />
+        )}
+      </section>
 
       <section className="report-detail-block" aria-label="Report downloads">
         <div className="section-heading">
@@ -1449,6 +1511,91 @@ function ReportArtifactList({
             </div>
           </div>
         ))}
+      </section>
+
+      <section className="report-detail-block" aria-label="Package contents">
+        <div className="section-heading">
+          <h3>Package contents</h3>
+          <span>{evidenceIndex.status === "ready" ? indexedPackageContents.length : evidenceIndex.status}</span>
+        </div>
+        {evidenceIndex.status === "ready" && indexedPackageContents.length > 0 ? (
+          <div className="package-content-list">
+            {indexedPackageContents.map((item) => {
+              const linkedArtifact = item.artifactId ? artifactsById.get(item.artifactId) : null;
+              return (
+                <div className="package-content-row" key={`${item.path}-${item.artifactId ?? item.source}`}>
+                  <FileJson2 size={17} aria-hidden="true" />
+                  <div>
+                    <strong>{item.path}</strong>
+                    <span>{item.description || item.reason}</span>
+                    <small>
+                      {item.source}
+                      {item.size !== null ? ` / ${formatBytes(item.size)}` : ""}
+                    </small>
+                  </div>
+                  <StatusToken status={item.included ? "pass" : "best_effort"} />
+                  <div className="report-actions">
+                    <button
+                      className="secondary-action compact"
+                      type="button"
+                      disabled={!linkedArtifact}
+                      onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
+                    >
+                      <Link2 size={16} aria-hidden="true" />
+                      Locate
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {evidenceIndex.status === "ready" && indexedPackageContents.length === 0 ? (
+          <EmptyState title="No package index" detail="Older evidence indexes do not expose structured package contents." />
+        ) : null}
+      </section>
+
+      <section className="report-detail-block" aria-label="Report evidence map">
+        <div className="section-heading">
+          <h3>Report evidence map</h3>
+          <span>{evidenceIndex.status === "ready" ? indexedReportSections.length : evidenceIndex.status}</span>
+        </div>
+        {evidenceIndex.status === "ready" && indexedReportSections.length > 0 ? (
+          <div className="report-section-list">
+            {indexedReportSections.map((section) => (
+              <div className="report-section-row" key={section.anchor}>
+                <ListTree size={17} aria-hidden="true" />
+                <div>
+                  <strong>{section.title}</strong>
+                  <span>#{section.anchor}</span>
+                  <small>{section.summary}</small>
+                </div>
+                <div className="evidence-link-group">
+                  {section.artifactIds.slice(0, 5).map((artifactId) => {
+                    const linkedArtifact = artifactsById.get(artifactId);
+                    return (
+                      <button
+                        className="evidence-ref-chip"
+                        disabled={!linkedArtifact}
+                        key={artifactId}
+                        type="button"
+                        onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
+                      >
+                        <Link2 size={14} aria-hidden="true" />
+                        {linkedArtifact?.kind ?? "artifact"}
+                        <small>{artifactId}</small>
+                      </button>
+                    );
+                  })}
+                  {section.artifactIds.length > 5 ? <span className="report-overflow-note">{section.artifactIds.length - 5} more</span> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {evidenceIndex.status === "ready" && indexedReportSections.length === 0 ? (
+          <EmptyState title="No report map" detail="Older evidence indexes do not expose report section mappings." />
+        ) : null}
       </section>
 
       <section className="report-detail-block" aria-label="Evidence attachment index">
@@ -2604,13 +2751,182 @@ function parseEvidenceIndexPayload(text: string): EvidenceIndexPayload {
   if (payload.kind !== "evidence_index" || !Array.isArray(payload.attachments)) {
     throw new Error("Artifact is not a valid evidence index.");
   }
+  const attachments = payload.attachments.map(normalizeEvidenceAttachment);
   return {
-    attachments: payload.attachments,
-    includedCount: payload.includedCount ?? payload.attachments.filter((item) => item.included).length,
+    attachments,
+    failureSummary: Array.isArray(payload.failureSummary) ? payload.failureSummary.map(normalizeFailureSummary) : [],
+    includedCount: payload.includedCount ?? attachments.filter((item) => item.included).length,
     jobId: payload.jobId ?? "",
     kind: "evidence_index",
-    omittedCount: payload.omittedCount ?? payload.attachments.filter((item) => !item.included).length,
+    omittedCount: payload.omittedCount ?? attachments.filter((item) => !item.included).length,
+    packageContents: Array.isArray(payload.packageContents) ? payload.packageContents.map(normalizePackageContent) : [],
+    reportSections: Array.isArray(payload.reportSections) ? payload.reportSections.map(normalizeReportSection) : [],
     schemaVersion: payload.schemaVersion ?? "unknown"
+  };
+}
+
+function normalizeEvidenceAttachment(value: EvidenceAttachmentEntry): EvidenceAttachmentEntry {
+  return {
+    artifactId: String(value.artifactId ?? ""),
+    contentType: String(value.contentType ?? "application/octet-stream"),
+    hash: String(value.hash ?? ""),
+    included: Boolean(value.included),
+    kind: String(value.kind ?? "unknown"),
+    packagePath: typeof value.packagePath === "string" ? value.packagePath : null,
+    reason: String(value.reason ?? ""),
+    retentionClass: typeof value.retentionClass === "string" ? value.retentionClass : undefined,
+    sensitivityClass: typeof value.sensitivityClass === "string" ? value.sensitivityClass : undefined,
+    size: typeof value.size === "number" ? value.size : 0,
+    sourceFilename: String(value.sourceFilename ?? ""),
+    stage: String(value.stage ?? "packaging")
+  };
+}
+
+function normalizePackageContent(value: PackageContentEntry): PackageContentEntry {
+  return {
+    artifactId: typeof value.artifactId === "string" ? value.artifactId : null,
+    contentType: String(value.contentType ?? "application/octet-stream"),
+    description: String(value.description ?? ""),
+    included: value.included !== false,
+    path: String(value.path ?? ""),
+    reason: String(value.reason ?? ""),
+    size: typeof value.size === "number" ? value.size : null,
+    source: String(value.source ?? "package")
+  };
+}
+
+function normalizeReportSection(value: ReportSectionEntry): ReportSectionEntry {
+  return {
+    anchor: String(value.anchor ?? ""),
+    artifactIds: Array.isArray(value.artifactIds) ? value.artifactIds.map(String) : [],
+    artifactKinds: Array.isArray(value.artifactKinds) ? value.artifactKinds.map(String) : [],
+    evidenceLinks: Array.isArray(value.evidenceLinks) ? value.evidenceLinks.map(String) : [],
+    summary: String(value.summary ?? ""),
+    title: String(value.title ?? "Report section")
+  };
+}
+
+function normalizeFailureSummary(value: FailureSummaryEntry): FailureSummaryEntry {
+  return {
+    decision: String(value.decision ?? "Validation did not fully pass."),
+    failureClass: String(value.failureClass ?? "unknown"),
+    group: String(value.group ?? "reports"),
+    status: String(value.status ?? "best_effort")
+  };
+}
+
+function buildFailureSummary(evidence: JobEvidence, currentJob: Job | null): FailureSummaryEntry[] {
+  const reviewItems = evidence.reviewRuns
+    .filter((run) => run.failureClass !== "none" || ["best_effort", "fail", "retry"].includes(run.status))
+    .map((run): FailureSummaryEntry => ({
+      decision: run.decision,
+      failureClass: run.failureClass,
+      group: run.reviewType,
+      status: run.status
+    }));
+  if (reviewItems.length > 0) {
+    return reviewItems;
+  }
+  if (currentJob?.failureClass && currentJob.failureClass !== "none") {
+    return [
+      {
+        decision: currentJob.failureReason ?? "Job completed with a non-none failure class.",
+        failureClass: currentJob.failureClass,
+        group: "job",
+        status: currentJob.status
+      }
+    ];
+  }
+  return [];
+}
+
+function buildFallbackPackageContents(attachments: EvidenceAttachmentEntry[]): PackageContentEntry[] {
+  const fixedEntries: PackageContentEntry[] = [
+    fallbackPackageContent("audit-report.md", "audit_report", "Human-readable Markdown audit report."),
+    fallbackPackageContent("audit-report.html", "html_report", "Offline HTML audit report."),
+    fallbackPackageContent("audit.json", "audit_payload", "Structured audit payload."),
+    fallbackPackageContent("evidence-index.json", "evidence_index", "Evidence attachment index."),
+    fallbackPackageContent("artifact-manifest.json", "artifact_manifest", "Artifact manifest."),
+    fallbackPackageContent("runtime-report.json", "runtime_validation", "Runtime validation records."),
+    fallbackPackageContent("review-runs.json", "review_run", "Review records.")
+  ];
+  return [
+    ...fixedEntries,
+    ...attachments.map((attachment): PackageContentEntry => ({
+      artifactId: attachment.artifactId,
+      contentType: attachment.contentType,
+      description: "Evidence attachment collected into the result package.",
+      included: attachment.included,
+      path: attachment.packagePath ?? `evidence/${attachment.kind}/${attachment.artifactId}`,
+      reason: attachment.reason,
+      size: attachment.size,
+      source: String(attachment.kind)
+    }))
+  ];
+}
+
+function fallbackPackageContent(path: string, source: string, description: string): PackageContentEntry {
+  return {
+    artifactId: null,
+    contentType: path.endsWith(".html") ? "text/html" : "application/json",
+    description,
+    included: true,
+    path,
+    reason: "included",
+    size: null,
+    source
+  };
+}
+
+function buildFallbackReportSections(attachments: EvidenceAttachmentEntry[], artifacts: Artifact[]): ReportSectionEntry[] {
+  const artifactIdsByKind = new Map<string, string[]>();
+  artifacts.forEach((artifact) => {
+    artifactIdsByKind.set(artifact.kind, [...(artifactIdsByKind.get(artifact.kind) ?? []), artifact.id]);
+  });
+  const attachmentIds = attachments.filter((item) => item.included).map((item) => item.artifactId);
+  return [
+    fallbackReportSection("Completion Decision", "completion-decision", "Final packaging decision.", ["audit_report", "html_report"], artifactIdsByKind),
+    fallbackReportSection(
+      "Risk And Failure Groups",
+      "risk-and-failure-groups",
+      "Failing or best-effort observations.",
+      ["build_artifact", "runtime_validation", "review_run"],
+      artifactIdsByKind
+    ),
+    fallbackReportSection(
+      "Runtime Compare Difference Summary",
+      "runtime-compare-difference-summary",
+      "Runtime comparison differences and related evidence.",
+      ["runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"],
+      artifactIdsByKind
+    ),
+    {
+      anchor: "evidence-attachment-index",
+      artifactIds: attachmentIds,
+      artifactKinds: [],
+      evidenceLinks: attachmentIds.map((artifactId) => `artifact://${artifactId}`),
+      summary: "Evidence files included in or omitted from the result package.",
+      title: "Evidence Attachment Index"
+    },
+    fallbackReportSection("Reproduction", "reproduction", "Offline inspection commands.", ["result_package", "evidence_index"], artifactIdsByKind)
+  ];
+}
+
+function fallbackReportSection(
+  title: string,
+  anchor: string,
+  summary: string,
+  kinds: string[],
+  artifactIdsByKind: Map<string, string[]>
+): ReportSectionEntry {
+  const artifactIds = kinds.flatMap((kind) => artifactIdsByKind.get(kind) ?? []);
+  return {
+    anchor,
+    artifactIds,
+    artifactKinds: kinds,
+    evidenceLinks: artifactIds.map((artifactId) => `artifact://${artifactId}`),
+    summary,
+    title
   };
 }
 
