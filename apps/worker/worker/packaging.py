@@ -665,11 +665,12 @@ class PackagingRunner:
             return {
                 "cloudMode": job.cloud_mode,
                 "modelContextScope": "sanitized_cloud_or_local",
-                "contextHandling": "desensitized_context_required",
+                "contextHandling": "deterministic_context_redaction",
                 "cloudContextAllowed": True,
                 "limitation": (
-                    "Agent policy marks model context as sanitized; full source redaction remains a later "
-                    "security-hardening step."
+                    "Agent model context uses deterministic source excerpt, evidence reference, memory, "
+                    "path, and symbol redaction; original artifacts remain governed by artifact access "
+                    "and evidence attachment policy."
                 ),
             }
         return {

@@ -329,6 +329,79 @@ class WorkerPipelineTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_desensitized_job_redacts_agent_model_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            asset_root = input_root / "assets"
+            asset_root.mkdir(parents=True)
+            (input_root / "index.html").write_text(
+                '<div id="app"></div><script type="module" src="/assets/secret-app.js"></script>',
+                encoding="utf-8",
+            )
+            (asset_root / "secret-app.js").write_text(
+                "function customerSecretToken(){return 'sensitive'} export { customerSecretToken };",
+                encoding="utf-8",
+            )
+
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(
+                    CreateJobRequest(
+                        project_id="proj",
+                        owner_id="owner",
+                        cloud_mode="desensitized",
+                        config={"agentModel": "provider/model-b", "agentModelProvider": "provider"},
+                    )
+                )
+                runner = RuntimeSmokeRunner(browser_adapter=FakeBrowserAdapter())
+                WorkerPipeline(runtime_smoke_runner=runner).run(job.id, input_path=input_root, store=store)
+                artifacts = store.list_artifacts(job.id)
+                artifact_by_kind = {artifact.kind: artifact for artifact in artifacts}
+                inference_artifact = next(artifact for artifact in artifacts if artifact.kind == "inference_record")
+
+                memory_payload = json.loads(
+                    Path(artifact_by_kind["memory_record"].storage_uri).read_text(encoding="utf-8")
+                )
+                agent_plan_payload = json.loads(
+                    Path(artifact_by_kind["agent_plan"].storage_uri).read_text(encoding="utf-8")
+                )
+                inference_payload = json.loads(Path(inference_artifact.storage_uri).read_text(encoding="utf-8"))
+                model_context_payload = {
+                    "inputSummary": agent_plan_payload["inputSummary"],
+                    "planEvidenceRefs": agent_plan_payload["evidenceRefs"],
+                    "inferenceEvidenceRefs": inference_payload["evidenceRefs"],
+                }
+                serialized_context = json.dumps(model_context_payload, ensure_ascii=False, sort_keys=True)
+
+                self.assertIn("customerSecretToken", memory_payload["content"])
+                self.assertTrue(agent_plan_payload["modelPolicy"]["sanitizedContext"])
+                self.assertTrue(agent_plan_payload["modelPolicy"]["redaction"]["applied"])
+                self.assertEqual(
+                    agent_plan_payload["modelPolicy"]["redaction"]["strategy"],
+                    "deterministic_context_redaction_v1",
+                )
+                self.assertGreater(agent_plan_payload["modelPolicy"]["redaction"]["replacementCount"], 0)
+                self.assertNotIn("customerSecretToken", serialized_context)
+                self.assertNotIn("secret-app.js", serialized_context)
+                self.assertTrue(
+                    any(
+                        str(value).startswith("redacted:symbol:")
+                        for value in agent_plan_payload["inputSummary"]["symbolSample"]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        ref.get("excerpt", "").startswith("redacted:source:")
+                        for ref in inference_payload["evidenceRefs"]
+                    )
+                )
+            finally:
+                store.close()
+
     def test_worker_pipeline_applies_runtime_compare_repair_and_retries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

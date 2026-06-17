@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -80,6 +81,105 @@ class AgentModelPolicy:
 
 
 @dataclass(frozen=True)
+class AgentContextRedactionResult:
+    input_summary: dict[str, Any]
+    memory_excerpt: str
+    evidence_refs: list[EvidenceRef]
+    metadata: dict[str, Any]
+
+
+class AgentContextRedactor:
+    strategy = "deterministic_context_redaction_v1"
+
+    def redact(
+        self,
+        *,
+        policy: AgentModelPolicy,
+        input_summary: dict[str, Any],
+        memory_excerpt: str,
+        evidence_refs: list[EvidenceRef],
+    ) -> AgentContextRedactionResult:
+        if not policy.sanitized_context:
+            return AgentContextRedactionResult(
+                input_summary=input_summary,
+                memory_excerpt=memory_excerpt,
+                evidence_refs=evidence_refs,
+                metadata={
+                    "applied": False,
+                    "strategy": "none",
+                    "scope": [],
+                    "placeholderFormat": None,
+                    "replacementCount": 0,
+                    "replacementCounts": {},
+                    "limitations": [],
+                },
+            )
+
+        counts: dict[str, int] = {}
+        redacted_summary = self._redact_input_summary(input_summary, counts)
+        redacted_memory = self._redact_text(memory_excerpt, "memory", counts) if memory_excerpt else memory_excerpt
+        redacted_refs = [self._redact_evidence_ref(ref, counts) for ref in evidence_refs]
+        return AgentContextRedactionResult(
+            input_summary=redacted_summary,
+            memory_excerpt=redacted_memory,
+            evidence_refs=redacted_refs,
+            metadata={
+                "applied": True,
+                "strategy": self.strategy,
+                "scope": ["inputSummary", "memory", "evidenceRefs"],
+                "placeholderFormat": "redacted:<kind>:<sha256-12>",
+                "replacementCount": sum(counts.values()),
+                "replacementCounts": dict(sorted(counts.items())),
+                "limitations": [
+                    "Original artifacts remain unchanged; redaction applies to model context and audit evidence excerpts.",
+                    "Deterministic placeholders preserve stable references without exposing source text or source-derived names.",
+                ],
+            },
+        )
+
+    def _redact_input_summary(self, input_summary: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+        redacted: dict[str, Any] = {}
+        for key, value in input_summary.items():
+            if key in {"entries", "scripts", "styles", "sourceMaps"}:
+                redacted[key] = self._redact_string_list(value, "path", counts)
+            elif key == "symbolSample":
+                redacted[key] = self._redact_string_list(value, "symbol", counts)
+            else:
+                redacted[key] = value
+        return redacted
+
+    def _redact_evidence_ref(self, ref: EvidenceRef, counts: dict[str, int]) -> EvidenceRef:
+        return EvidenceRef(
+            artifact_id=ref.artifact_id,
+            label=ref.label,
+            locator=self._redact_locator(ref.locator, counts),
+            excerpt=self._redact_text(ref.excerpt, "source", counts) if ref.excerpt else ref.excerpt,
+        )
+
+    def _redact_locator(self, locator: str | None, counts: dict[str, int]) -> str | None:
+        if locator is None:
+            return None
+        if locator.startswith(("artifact:", "memory:", "knowledge:")):
+            return locator
+        if ":" in locator:
+            prefix, value = locator.split(":", 1)
+            return f"{prefix}:{self._redact_text(value, 'locator', counts)}"
+        return self._redact_text(locator, "locator", counts)
+
+    def _redact_string_list(self, value: Any, kind: str, counts: dict[str, int]) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [self._redact_text(item, kind, counts) for item in value if isinstance(item, str)]
+
+    def _redact_text(self, value: str | None, kind: str, counts: dict[str, int]) -> str:
+        if value is None:
+            return ""
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        counts[kind] = counts.get(kind, 0) + 1
+        return f"redacted:{kind}:{digest}"
+
+
+@dataclass(frozen=True)
 class AgentInferenceDraft:
     type: InferenceType
     agent_name: str
@@ -102,6 +202,7 @@ class AgentReviewDraft:
 @dataclass(frozen=True)
 class AgentProviderDraft:
     plan_payload: dict[str, Any]
+    evidence_refs: list[EvidenceRef]
     inferences: list[AgentInferenceDraft]
     review: AgentReviewDraft
     model_provider: str
@@ -247,8 +348,13 @@ class CrewAIAgentProvider:
     tool_name = "crewai.agent_pass"
     tool_version = AGENT_TOOL_VERSION
 
-    def __init__(self, policy_resolver: ModelPolicyResolver | None = None) -> None:
+    def __init__(
+        self,
+        policy_resolver: ModelPolicyResolver | None = None,
+        redactor: AgentContextRedactor | None = None,
+    ) -> None:
         self.policy_resolver = policy_resolver or ModelPolicyResolver()
+        self.redactor = redactor or AgentContextRedactor()
 
     def run(
         self,
@@ -261,27 +367,38 @@ class CrewAIAgentProvider:
         evidence_refs: list[EvidenceRef],
     ) -> AgentProviderDraft:
         policy = self.policy_resolver.resolve(request)
+        redaction = self.redactor.redact(
+            policy=policy,
+            input_summary=self._input_summary(request),
+            memory_excerpt=memory_context.prompt_excerpt,
+            evidence_refs=evidence_refs,
+        )
         plan_payload = self._plan_payload(
             request=request,
             policy=policy,
             memory_artifact_id=memory_artifact_id,
             knowledge_artifact_id=knowledge_artifact_id,
             knowledge_hits=knowledge_hits,
-            evidence_refs=evidence_refs,
+            input_summary=redaction.input_summary,
+            evidence_refs=redaction.evidence_refs,
+            redaction_metadata=redaction.metadata,
         )
         if not policy.allowed:
             return self._policy_denied_draft(
                 request=request,
                 policy=policy,
                 plan_payload=plan_payload,
+                evidence_refs=redaction.evidence_refs,
             )
 
         prompt_context = self._prompt_context(
             request=request,
             policy=policy,
-            memory_context=memory_context,
+            memory_excerpt=redaction.memory_excerpt,
+            input_summary=redaction.input_summary,
             knowledge_hits=knowledge_hits,
-            evidence_refs=evidence_refs,
+            evidence_refs=redaction.evidence_refs,
+            redaction_metadata=redaction.metadata,
         )
         try:
             crew_output = self._run_crewai(prompt_context=prompt_context, policy=policy)
@@ -294,6 +411,7 @@ class CrewAIAgentProvider:
                     "limitations": [*plan_payload["limitations"], str(error)],
                 },
                 error=error,
+                evidence_refs=redaction.evidence_refs,
             )
 
         crew_output = crew_output if crew_output.inferences else self._empty_crewai_output()
@@ -304,6 +422,7 @@ class CrewAIAgentProvider:
                 "plannedAgents": crew_output.planned_agents or plan_payload["plannedAgents"],
                 "limitations": [*plan_payload["limitations"], *crew_output.limitations],
             },
+            evidence_refs=redaction.evidence_refs,
             inferences=[self._draft_from_crewai(inference) for inference in crew_output.inferences],
             review=AgentReviewDraft(
                 status=self._run_status(crew_output.review_status, default="best_effort"),
@@ -432,7 +551,9 @@ class CrewAIAgentProvider:
         memory_artifact_id: str,
         knowledge_artifact_id: str,
         knowledge_hits: list[KnowledgeHit],
+        input_summary: dict[str, Any],
         evidence_refs: list[EvidenceRef],
+        redaction_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         return {
             "kind": "agent_plan",
@@ -446,13 +567,14 @@ class CrewAIAgentProvider:
             "memoryRecordArtifactId": memory_artifact_id,
             "knowledgeEvidenceArtifactId": knowledge_artifact_id,
             "plannedAgents": ["PlannerAgent", "AnalysisAgent", "FrameworkAgent", "RuntimeAgent", "ReviewAgent"],
-            "inputSummary": self._input_summary(request),
+            "inputSummary": input_summary,
             "knowledgeHitIds": [hit.id for hit in knowledge_hits],
             "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in evidence_refs],
             "modelPolicy": {
                 "allowed": policy.allowed,
                 "sanitizedContext": policy.sanitized_context,
                 "denialReason": policy.denial_reason,
+                "redaction": redaction_metadata,
             },
             "runtimeStatus": "planned",
             "limitations": [],
@@ -463,17 +585,20 @@ class CrewAIAgentProvider:
         *,
         request: AgentRuntimeRequest,
         policy: AgentModelPolicy,
-        memory_context: JobMemoryContext,
+        memory_excerpt: str,
+        input_summary: dict[str, Any],
         knowledge_hits: list[KnowledgeHit],
         evidence_refs: list[EvidenceRef],
+        redaction_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         return {
             "jobId": request.job_id,
             "projectId": request.project_id,
             "cloudMode": policy.cloud_mode,
             "sanitizedContext": policy.sanitized_context,
-            "inputSummary": self._input_summary(request),
-            "memory": memory_context.prompt_excerpt,
+            "redactionPolicy": redaction_metadata,
+            "inputSummary": input_summary,
+            "memory": memory_excerpt,
             "knowledgeHits": [
                 {
                     "id": hit.id,
@@ -508,6 +633,7 @@ class CrewAIAgentProvider:
         request: AgentRuntimeRequest,
         policy: AgentModelPolicy,
         plan_payload: dict[str, Any],
+        evidence_refs: list[EvidenceRef],
     ) -> AgentProviderDraft:
         reason = policy.denial_reason or "Agent model policy denied execution."
         return AgentProviderDraft(
@@ -516,6 +642,7 @@ class CrewAIAgentProvider:
                 "runtimeStatus": "policy_denied",
                 "limitations": [reason],
             },
+            evidence_refs=evidence_refs,
             inferences=self._best_effort_inferences(
                 uncertainty=[
                     reason,
@@ -543,10 +670,12 @@ class CrewAIAgentProvider:
         policy: AgentModelPolicy,
         plan_payload: dict[str, Any],
         error: Exception,
+        evidence_refs: list[EvidenceRef],
     ) -> AgentProviderDraft:
         detail = f"CrewAI runtime failed: {error}"
         return AgentProviderDraft(
             plan_payload=plan_payload,
+            evidence_refs=evidence_refs,
             inferences=self._best_effort_inferences(
                 uncertainty=[
                     detail,
@@ -728,7 +857,7 @@ class AgentRuntime:
                     prompt_version=provider_draft.prompt_version,
                     input_artifact_ids=[*request.input_artifact_ids, memory_artifact.id, knowledge_artifact.id],
                     output_artifact_ids=[plan_artifact.id],
-                    evidence_refs=evidence_refs,
+                    evidence_refs=provider_draft.evidence_refs,
                     confidence=draft.confidence,
                     uncertainty_reasons=draft.uncertainty_reasons,
                     alternatives=draft.alternatives,
@@ -757,7 +886,7 @@ class AgentRuntime:
                 status=provider_draft.review.status,
                 decision=provider_draft.review.decision,
                 failure_class=provider_draft.review.failure_class,
-                evidence_refs=evidence_refs,
+                evidence_refs=provider_draft.evidence_refs,
                 repair_instruction_ids=provider_draft.review.repair_instruction_ids,
                 logs_artifact_id=provider_draft.review.logs_artifact_id,
             )

@@ -296,8 +296,9 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 self.assertEqual(model_policy["cloudMode"], "desensitized")
                 self.assertEqual(model_policy["modelContextScope"], "sanitized_cloud_or_local")
+                self.assertEqual(model_policy["contextHandling"], "deterministic_context_redaction")
                 self.assertTrue(model_policy["cloudContextAllowed"])
-                self.assertIn("full source redaction remains", model_policy["limitation"])
+                self.assertIn("deterministic source excerpt", model_policy["limitation"])
             finally:
                 store.close()
 
