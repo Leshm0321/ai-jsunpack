@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { gunzipSync, inflateRawSync } from "node:zlib";
 import { parse } from "@babel/parser";
 import traverseModule, { type NodePath, type TraverseOptions } from "@babel/traverse";
 import type * as t from "@babel/types";
@@ -9,6 +11,14 @@ import type { AstIndex, HeadlessAnalysisResult, InputFileRecord, InputInventory 
 export interface AnalyzeInputConfig {
   jobId?: string;
   rootDir?: string;
+  inputSourceKind?: NormalizedInputPackage["sourceKind"];
+}
+
+export interface NormalizedInputPackage {
+  rootDir: string;
+  sourcePath: string;
+  sourceKind: "directory" | "zip" | "tar" | "tar_gz";
+  cleanup: () => Promise<void>;
 }
 
 export interface ReconstructionPlan {
@@ -65,18 +75,80 @@ const GENERATED_PROJECT_FILES = [
 ];
 
 export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
-  const rootDir = path.resolve(config.rootDir ?? inputPath);
-  const inventory = await buildInputInventory(rootDir);
-  const astIndexes = await Promise.all(
-    inventory.scripts.map(async (scriptPath) => buildAstIndexForFile(path.join(rootDir, scriptPath), rootDir))
-  );
-  const detectedRuntime = detectBundleRuntime(inventory, astIndexes);
+  const normalized = config.rootDir ? undefined : await normalizeInputPackage(inputPath);
+  try {
+    const rootDir = path.resolve(config.rootDir ?? normalized?.rootDir ?? inputPath);
+    const sourceKind = config.inputSourceKind ?? normalized?.sourceKind;
+    const inventory = await buildInputInventory(rootDir);
+    if (sourceKind && sourceKind !== "directory") {
+      inventory.warnings.unshift(`Input ${sourceKind} archive was extracted into a verified temporary workspace.`);
+    }
+    const astIndexes = await Promise.all(
+      inventory.scripts.map(async (scriptPath) => buildAstIndexForFile(path.join(rootDir, scriptPath), rootDir))
+    );
+    const detectedRuntime = detectBundleRuntime(inventory, astIndexes);
+
+    return {
+      inventory,
+      astIndexes,
+      detectedRuntime,
+      artifacts: []
+    };
+  } finally {
+    await normalized?.cleanup();
+  }
+}
+
+export async function normalizeInputPackage(inputPath: string): Promise<NormalizedInputPackage> {
+  const sourcePath = path.resolve(inputPath);
+  const stat = await fs.stat(sourcePath);
+
+  if (stat.isDirectory()) {
+    return {
+      rootDir: sourcePath,
+      sourcePath,
+      sourceKind: "directory",
+      cleanup: async () => {}
+    };
+  }
+
+  if (!stat.isFile()) {
+    throw new Error(`Input path must be a directory or supported archive file: ${inputPath}`);
+  }
+
+  const sourceKind = archiveKindForPath(sourcePath);
+  if (!sourceKind) {
+    throw new Error(`Unsupported input file type. Expected a directory, .zip, .tar, .tar.gz, or .tgz: ${inputPath}`);
+  }
+
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-input-"));
+  let cleaned = false;
+  const cleanup = async () => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  };
+
+  try {
+    const archive = await fs.readFile(sourcePath);
+    if (sourceKind === "zip") {
+      await extractZipArchive(archive, tempRoot);
+    } else {
+      const tarBuffer = sourceKind === "tar_gz" ? gunzipSync(archive) : archive;
+      await extractTarArchive(tarBuffer, tempRoot);
+    }
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 
   return {
-    inventory,
-    astIndexes,
-    detectedRuntime,
-    artifacts: []
+    rootDir: tempRoot,
+    sourcePath,
+    sourceKind,
+    cleanup
   };
 }
 
@@ -296,65 +368,70 @@ export function planReconstruction(
 }
 
 export async function writeProject(plan: ReconstructionPlan, config: WriteProjectConfig): Promise<WriteProjectResult> {
-  const inputRoot = path.resolve(config.inputPath);
-  const projectRoot = assertSafeOutputDir(config.outputDir);
-  await fs.rm(projectRoot, { recursive: true, force: true });
-  await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
-  await fs.mkdir(path.join(projectRoot, "scripts"), { recursive: true });
-  await fs.mkdir(path.join(projectRoot, "public", "original"), { recursive: true });
+  const normalized = await normalizeInputPackage(config.inputPath);
+  try {
+    const inputRoot = path.resolve(normalized.rootDir);
+    const projectRoot = assertSafeOutputDir(config.outputDir);
+    await fs.rm(projectRoot, { recursive: true, force: true });
+    await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "scripts"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "public", "original"), { recursive: true });
 
-  const copiedSourceFiles: string[] = [];
-  for (const sourceFile of plan.sourceFiles) {
-    const safeRelative = safeRelativePath(sourceFile);
-    const sourcePath = path.join(inputRoot, safeRelative);
-    const targetPath = path.join(projectRoot, "public", "original", safeRelative);
-    await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    await fs.copyFile(sourcePath, targetPath);
-    copiedSourceFiles.push(`public/original/${toPosix(safeRelative)}`);
-  }
-
-  const manifest: GeneratedProjectManifest = {
-    kind: "generated_project",
-    jobId: plan.jobId,
-    projectPath: ".",
-    entrypoint: "index.html",
-    generatedFiles: GENERATED_PROJECT_FILES,
-    copiedSourceFiles,
-    sourceRoot: "public/original",
-    limitations: plan.limitations
-  };
-
-  await writeJson(path.join(projectRoot, "package.json"), {
-    name: config.packageName ?? "ai-jsunpack-generated-project",
-    version: "0.0.0",
-    private: true,
-    type: "module",
-    scripts: {
-      build: "node scripts/build.mjs",
-      typecheck: "node scripts/typecheck.mjs"
+    const copiedSourceFiles: string[] = [];
+    for (const sourceFile of plan.sourceFiles) {
+      const safeRelative = safeRelativePath(sourceFile);
+      const sourcePath = path.join(inputRoot, safeRelative);
+      const targetPath = path.join(projectRoot, "public", "original", safeRelative);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.copyFile(sourcePath, targetPath);
+      copiedSourceFiles.push(`public/original/${toPosix(safeRelative)}`);
     }
-  });
-  await writeJson(path.join(projectRoot, "tsconfig.json"), {
-    compilerOptions: {
-      target: "ES2022",
-      module: "ESNext",
-      moduleResolution: "Bundler",
-      strict: true,
-      noEmit: true,
-      resolveJsonModule: true
-    },
-    include: ["src/**/*.ts"]
-  });
-  await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
-  await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
-  await fs.writeFile(path.join(projectRoot, "index.html"), indexHtmlSource(plan, manifest), "utf8");
-  await fs.writeFile(path.join(projectRoot, "scripts", "build.mjs"), buildScriptSource(), "utf8");
-  await fs.writeFile(path.join(projectRoot, "scripts", "typecheck.mjs"), typecheckScriptSource(), "utf8");
 
-  return {
-    projectPath: projectRoot,
-    manifest
-  };
+    const manifest: GeneratedProjectManifest = {
+      kind: "generated_project",
+      jobId: plan.jobId,
+      projectPath: ".",
+      entrypoint: "index.html",
+      generatedFiles: GENERATED_PROJECT_FILES,
+      copiedSourceFiles,
+      sourceRoot: "public/original",
+      limitations: plan.limitations
+    };
+
+    await writeJson(path.join(projectRoot, "package.json"), {
+      name: config.packageName ?? "ai-jsunpack-generated-project",
+      version: "0.0.0",
+      private: true,
+      type: "module",
+      scripts: {
+        build: "node scripts/build.mjs",
+        typecheck: "node scripts/typecheck.mjs"
+      }
+    });
+    await writeJson(path.join(projectRoot, "tsconfig.json"), {
+      compilerOptions: {
+        target: "ES2022",
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        strict: true,
+        noEmit: true,
+        resolveJsonModule: true
+      },
+      include: ["src/**/*.ts"]
+    });
+    await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
+    await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
+    await fs.writeFile(path.join(projectRoot, "index.html"), indexHtmlSource(plan, manifest), "utf8");
+    await fs.writeFile(path.join(projectRoot, "scripts", "build.mjs"), buildScriptSource(), "utf8");
+    await fs.writeFile(path.join(projectRoot, "scripts", "typecheck.mjs"), typecheckScriptSource(), "utf8");
+
+    return {
+      projectPath: projectRoot,
+      manifest
+    };
+  } finally {
+    await normalized.cleanup();
+  }
 }
 
 export async function runHeadlessPipeline(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
@@ -422,6 +499,205 @@ function sha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+function archiveKindForPath(filePath: string): NormalizedInputPackage["sourceKind"] | null {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".zip")) return "zip";
+  if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) return "tar_gz";
+  if (lower.endsWith(".tar")) return "tar";
+  return null;
+}
+
+async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void> {
+  const eocdOffset = findZipEndOfCentralDirectory(archive);
+  const entryCount = archive.readUInt16LE(eocdOffset + 10);
+  const centralDirectorySize = archive.readUInt32LE(eocdOffset + 12);
+  const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16);
+
+  if (entryCount === 0xffff || centralDirectorySize === 0xffffffff || centralDirectoryOffset === 0xffffffff) {
+    throw new Error("Unsupported zip64 archive.");
+  }
+  if (centralDirectoryOffset + centralDirectorySize > archive.length) {
+    throw new Error("Invalid zip archive: central directory is outside the archive.");
+  }
+
+  let cursor = centralDirectoryOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (archive.readUInt32LE(cursor) !== 0x02014b50) {
+      throw new Error("Invalid zip archive: central directory entry is malformed.");
+    }
+
+    const generalPurposeFlag = archive.readUInt16LE(cursor + 8);
+    const compressionMethod = archive.readUInt16LE(cursor + 10);
+    const compressedSize = archive.readUInt32LE(cursor + 20);
+    const uncompressedSize = archive.readUInt32LE(cursor + 24);
+    const fileNameLength = archive.readUInt16LE(cursor + 28);
+    const extraFieldLength = archive.readUInt16LE(cursor + 30);
+    const fileCommentLength = archive.readUInt16LE(cursor + 32);
+    const externalAttributes = archive.readUInt32LE(cursor + 38);
+    const localHeaderOffset = archive.readUInt32LE(cursor + 42);
+    const fileName = archive.subarray(cursor + 46, cursor + 46 + fileNameLength).toString("utf8");
+    cursor += 46 + fileNameLength + extraFieldLength + fileCommentLength;
+
+    const unixMode = externalAttributes >>> 16;
+    if ((unixMode & 0o170000) === 0o120000) {
+      throw new Error(`Unsupported zip archive entry type: symlink ${fileName}`);
+    }
+
+    if ((generalPurposeFlag & 0x01) !== 0) {
+      throw new Error(`Unsupported encrypted zip archive entry: ${fileName}`);
+    }
+
+    const safeRelative = safeArchiveRelativePath(fileName);
+    if (fileName.endsWith("/") || fileName.endsWith("\\")) {
+      await fs.mkdir(resolveInsideRoot(rootDir, safeRelative), { recursive: true });
+      continue;
+    }
+
+    if (localHeaderOffset + 30 > archive.length || archive.readUInt32LE(localHeaderOffset) !== 0x04034b50) {
+      throw new Error(`Invalid zip archive: local file header is malformed for ${fileName}`);
+    }
+    const localNameLength = archive.readUInt16LE(localHeaderOffset + 26);
+    const localExtraLength = archive.readUInt16LE(localHeaderOffset + 28);
+    const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (dataEnd > archive.length) {
+      throw new Error(`Invalid zip archive: compressed data is truncated for ${fileName}`);
+    }
+
+    const compressed = archive.subarray(dataStart, dataEnd);
+    let content: Buffer;
+    if (compressionMethod === 0) {
+      content = Buffer.from(compressed);
+    } else if (compressionMethod === 8) {
+      content = inflateRawSync(compressed);
+    } else {
+      throw new Error(`Unsupported zip compression method ${compressionMethod} for ${fileName}`);
+    }
+
+    if (content.byteLength !== uncompressedSize) {
+      throw new Error(`Invalid zip archive: size mismatch for ${fileName}`);
+    }
+
+    await writeExtractedFile(rootDir, safeRelative, content);
+  }
+}
+
+function findZipEndOfCentralDirectory(archive: Buffer): number {
+  const minimumSize = 22;
+  const maximumCommentSize = 0xffff;
+  const start = Math.max(0, archive.length - minimumSize - maximumCommentSize);
+  for (let offset = archive.length - minimumSize; offset >= start; offset -= 1) {
+    if (archive.readUInt32LE(offset) === 0x06054b50) {
+      return offset;
+    }
+  }
+  throw new Error("Invalid zip archive: end of central directory not found.");
+}
+
+async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void> {
+  let cursor = 0;
+  let pendingLongName: string | null = null;
+  let pendingPaxPath: string | null = null;
+
+  while (cursor + 512 <= archive.length) {
+    const header = archive.subarray(cursor, cursor + 512);
+    cursor += 512;
+
+    if (isZeroBlock(header)) {
+      break;
+    }
+
+    const name = pendingLongName ?? pendingPaxPath ?? tarEntryName(header);
+    pendingLongName = null;
+    pendingPaxPath = null;
+    const size = parseTarOctal(header.subarray(124, 136));
+    const typeFlag = header.subarray(156, 157).toString("ascii");
+    const dataStart = cursor;
+    const dataEnd = dataStart + size;
+    if (dataEnd > archive.length) {
+      throw new Error(`Invalid tar archive: entry data is truncated for ${name}`);
+    }
+    const content = archive.subarray(dataStart, dataEnd);
+    cursor += Math.ceil(size / 512) * 512;
+
+    if (typeFlag === "L") {
+      pendingLongName = trimNulls(content.toString("utf8"));
+      continue;
+    }
+    if (typeFlag === "x") {
+      pendingPaxPath = parsePaxPath(content.toString("utf8"));
+      continue;
+    }
+
+    const safeRelative = safeArchiveRelativePath(name);
+    if (typeFlag === "5") {
+      await fs.mkdir(resolveInsideRoot(rootDir, safeRelative), { recursive: true });
+      continue;
+    }
+    if (typeFlag === "0" || typeFlag === "\0" || typeFlag === "") {
+      await writeExtractedFile(rootDir, safeRelative, content);
+      continue;
+    }
+    if (typeFlag === "1" || typeFlag === "2") {
+      throw new Error(`Unsupported tar archive entry type: link ${name}`);
+    }
+  }
+}
+
+function tarEntryName(header: Buffer): string {
+  const name = trimNulls(header.subarray(0, 100).toString("utf8"));
+  const prefix = trimNulls(header.subarray(345, 500).toString("utf8"));
+  return prefix ? `${prefix}/${name}` : name;
+}
+
+function parseTarOctal(value: Buffer): number {
+  const text = trimNulls(value.toString("ascii")).trim();
+  if (!text) {
+    return 0;
+  }
+  if (!/^[0-7]+$/.test(text)) {
+    throw new Error(`Invalid tar archive: entry size is not octal (${text}).`);
+  }
+  return Number.parseInt(text, 8);
+}
+
+function parsePaxPath(content: string): string | null {
+  let cursor = 0;
+  while (cursor < content.length) {
+    const spaceIndex = content.indexOf(" ", cursor);
+    if (spaceIndex === -1) {
+      return null;
+    }
+    const lengthText = content.slice(cursor, spaceIndex);
+    const recordLength = Number.parseInt(lengthText, 10);
+    if (!Number.isFinite(recordLength) || recordLength <= 0) {
+      return null;
+    }
+    const record = content.slice(spaceIndex + 1, cursor + recordLength);
+    const equalsIndex = record.indexOf("=");
+    if (equalsIndex !== -1 && record.slice(0, equalsIndex) === "path") {
+      return trimNulls(record.slice(equalsIndex + 1).replace(/\n$/, ""));
+    }
+    cursor += recordLength;
+  }
+  return null;
+}
+
+function isZeroBlock(block: Buffer): boolean {
+  return block.every((byte) => byte === 0);
+}
+
+function trimNulls(value: string): string {
+  const nullIndex = value.indexOf("\0");
+  return nullIndex === -1 ? value : value.slice(0, nullIndex);
+}
+
+async function writeExtractedFile(rootDir: string, safeRelative: string, content: Buffer): Promise<void> {
+  const targetPath = resolveInsideRoot(rootDir, safeRelative);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, content);
+}
+
 function assertSafeOutputDir(outputDir: string): string {
   const resolved = path.resolve(outputDir);
   if (resolved === path.parse(resolved).root) {
@@ -431,11 +707,42 @@ function assertSafeOutputDir(outputDir: string): string {
 }
 
 function safeRelativePath(filePath: string): string {
-  const normalized = toPosix(filePath);
-  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath) || normalized.startsWith("../") || normalized.includes("/../")) {
+  try {
+    return safeArchiveRelativePath(filePath);
+  } catch {
     throw new Error(`Unsafe input file path in inventory: ${filePath}`);
   }
-  return normalized;
+}
+
+function safeArchiveRelativePath(filePath: string): string {
+  if (!filePath || filePath.includes("\0")) {
+    throw new Error(`Unsafe archive entry path: ${filePath}`);
+  }
+  const normalizedSeparators = filePath.replace(/\\/g, "/");
+  if (
+    normalizedSeparators.startsWith("/") ||
+    normalizedSeparators.startsWith("//") ||
+    /^[A-Za-z]:($|\/)/.test(normalizedSeparators) ||
+    path.isAbsolute(filePath) ||
+    path.win32.isAbsolute(filePath)
+  ) {
+    throw new Error(`Unsafe archive entry path: ${filePath}`);
+  }
+
+  const parts = normalizedSeparators.split("/").filter((part) => part.length > 0 && part !== ".");
+  if (parts.length === 0 || parts.some((part) => part === "..")) {
+    throw new Error(`Unsafe archive entry path: ${filePath}`);
+  }
+  return parts.join("/");
+}
+
+function resolveInsideRoot(rootDir: string, safeRelative: string): string {
+  const root = path.resolve(rootDir);
+  const target = path.resolve(root, ...safeRelative.split("/"));
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`Unsafe archive entry resolved outside extraction root: ${safeRelative}`);
+  }
+  return target;
 }
 
 function mainTsSource(manifest: GeneratedProjectManifest): string {
@@ -561,5 +868,5 @@ function escapeHtml(value: string): string {
 }
 
 function toPosix(filePath: string): string {
-  return filePath.split(path.sep).join("/");
+  return filePath.replace(/\\/g, "/").split(path.sep).join("/");
 }

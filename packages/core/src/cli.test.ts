@@ -31,6 +31,33 @@ test("core CLI emits inventory and AST artifact payloads", async () => {
   }
 });
 
+test("core CLI analyzes archive input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-zip-"));
+  try {
+    const archivePath = path.join(root, "dist.zip");
+    await writeFile(
+      archivePath,
+      makeZipArchive([
+        { path: "index.html", content: '<script type="module" src="/assets/app.js"></script>' },
+        { path: "assets/app.js", content: "function cliZip(){return 1} export { cliZip };" }
+      ])
+    );
+
+    const output = await runCli(["analyze", archivePath, "--job-id", "job_cli_zip"]);
+    const parsed = JSON.parse(output) as {
+      inventoryArtifactPayload: { inventory: { entries: string[]; scripts: string[]; warnings: string[] } };
+      astIndexArtifactPayload: { astIndexes: Array<{ symbols: Array<{ name: string }> }> };
+    };
+
+    assert.deepEqual(parsed.inventoryArtifactPayload.inventory.entries, ["index.html"]);
+    assert.deepEqual(parsed.inventoryArtifactPayload.inventory.scripts, ["assets/app.js"]);
+    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("zip archive")));
+    assert.ok(parsed.astIndexArtifactPayload.astIndexes[0].symbols.some((symbol) => symbol.name === "cliZip"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("core CLI reconstruct emits plan payload and generated project manifest", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-"));
   try {
@@ -62,6 +89,48 @@ test("core CLI reconstruct emits plan payload and generated project manifest", a
   }
 });
 
+test("core CLI reconstruct accepts archive input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-zip-"));
+  try {
+    const archivePath = path.join(root, "dist.zip");
+    const outputDir = path.join(root, "generated");
+    await writeFile(
+      archivePath,
+      makeZipArchive([
+        { path: "index.html", content: '<script type="module" src="/assets/app.js"></script>' },
+        { path: "assets/app.js", content: "function cliReconstructZip(){return 1} export { cliReconstructZip };" }
+      ])
+    );
+
+    const output = await runCli(["reconstruct", archivePath, "--job-id", "job_cli_reconstruct_zip", "--output-dir", outputDir]);
+    const parsed = JSON.parse(output) as {
+      generatedProjectManifestPayload: { manifest: { copiedSourceFiles: string[]; limitations: string[] } };
+    };
+    const copiedSource = await readFile(path.join(outputDir, "public", "original", "assets", "app.js"), "utf8");
+
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("zip archive")));
+    assert.equal(copiedSource, "function cliReconstructZip(){return 1} export { cliReconstructZip };");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core CLI rejects unsafe archive entries", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-unsafe-"));
+  try {
+    const archivePath = path.join(root, "unsafe.zip");
+    await writeFile(archivePath, makeZipArchive([{ path: "../evil.js", content: "alert(1)" }]));
+
+    await assert.rejects(
+      () => runCli(["analyze", archivePath, "--job-id", "job_cli_unsafe"]),
+      /Unsafe archive entry path/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function runCli(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL("./cli.js", import.meta.url)), ...args], {
@@ -87,4 +156,60 @@ function runCli(args: string[]): Promise<string> {
       reject(new Error(stderr || `Core CLI exited with code ${code}`));
     });
   });
+}
+
+interface ArchiveEntry {
+  path: string;
+  content: string | Buffer;
+}
+
+function makeZipArchive(entries: ArchiveEntry[]): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.path, "utf8");
+    const content = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(content.length, 18);
+    local.writeUInt32LE(content.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, name, content);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(content.length, 20);
+    central.writeUInt32LE(content.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+
+    offset += local.length + name.length + content.length;
+  }
+
+  const localSection = Buffer.concat(localParts);
+  const centralSection = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSection.length, 12);
+  end.writeUInt32LE(localSection.length, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([localSection, centralSection, end]);
 }

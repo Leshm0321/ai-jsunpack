@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { CONTRACT_SCHEMA_VERSION } from "@ai-jsunpack/shared";
-import { analyzeInputPackage, planReconstruction, writeProject } from "./index.js";
+import { analyzeInputPackage, normalizeInputPackage, planReconstruction, writeProject } from "./index.js";
 
 interface CliOptions {
   command?: string;
@@ -57,38 +57,47 @@ async function main(): Promise<void> {
     if (!options.outputDir) {
       throw new Error(usage());
     }
-    const result = await analyzeInputPackage(options.inputPath, { jobId: options.jobId });
-    const plan = planReconstruction(result, { jobId: options.jobId });
-    const generatedProject = await writeProject(plan, {
-      inputPath: options.inputPath,
-      outputDir: options.outputDir
-    });
-    const reconstructionPlanPayload: ArtifactPayload & { plan: typeof plan } = {
-      schemaVersion: CONTRACT_SCHEMA_VERSION,
-      jobId: options.jobId,
-      kind: "reconstruction_plan",
-      plan
-    };
-    const generatedProjectManifestPayload: ArtifactPayload & { manifest: typeof generatedProject.manifest } = {
-      schemaVersion: CONTRACT_SCHEMA_VERSION,
-      jobId: options.jobId,
-      kind: "generated_project",
-      manifest: generatedProject.manifest
-    };
-    process.stdout.write(
-      JSON.stringify(
-        {
-          jobId: options.jobId,
-          schemaVersion: CONTRACT_SCHEMA_VERSION,
-          generatedProjectPath: generatedProject.projectPath,
-          reconstructionPlanPayload,
-          generatedProjectManifestPayload
-        },
-        null,
-        2
-      )
-    );
-    process.stdout.write("\n");
+    const normalized = await normalizeInputPackage(options.inputPath);
+    try {
+      const result = await analyzeInputPackage(normalized.rootDir, {
+        jobId: options.jobId,
+        rootDir: normalized.rootDir,
+        inputSourceKind: normalized.sourceKind
+      });
+      const plan = planReconstruction(result, { jobId: options.jobId });
+      const generatedProject = await writeProject(plan, {
+        inputPath: normalized.rootDir,
+        outputDir: options.outputDir
+      });
+      const reconstructionPlanPayload: ArtifactPayload & { plan: typeof plan } = {
+        schemaVersion: CONTRACT_SCHEMA_VERSION,
+        jobId: options.jobId,
+        kind: "reconstruction_plan",
+        plan
+      };
+      const generatedProjectManifestPayload: ArtifactPayload & { manifest: typeof generatedProject.manifest } = {
+        schemaVersion: CONTRACT_SCHEMA_VERSION,
+        jobId: options.jobId,
+        kind: "generated_project",
+        manifest: generatedProject.manifest
+      };
+      process.stdout.write(
+        JSON.stringify(
+          {
+            jobId: options.jobId,
+            schemaVersion: CONTRACT_SCHEMA_VERSION,
+            generatedProjectPath: generatedProject.projectPath,
+            reconstructionPlanPayload,
+            generatedProjectManifestPayload
+          },
+          null,
+          2
+        )
+      );
+      process.stdout.write("\n");
+    } finally {
+      await normalized.cleanup();
+    }
     return;
   }
 
