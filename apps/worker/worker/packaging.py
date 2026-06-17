@@ -158,6 +158,7 @@ class PackagingRunner:
             "schemaVersion": "2026-06-14",
             "kind": "audit_report",
             "job": job.model_dump(by_alias=True),
+            "policySummary": self._policy_summary(job=job, artifacts=artifacts),
             "artifactManifest": [artifact.model_dump(by_alias=True) for artifact in artifacts],
             "runtimeReports": self._load_json_artifacts(job.id, artifacts, store, "runtime_validation"),
             "runtimeComparisons": self._load_json_artifacts(job.id, artifacts, store, "runtime_comparison"),
@@ -273,6 +274,7 @@ class PackagingRunner:
         evidence_index: dict[str, Any],
     ) -> str:
         job = audit_payload["job"]
+        policy_summary = audit_payload["policySummary"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
         runtime_comparisons = audit_payload["runtimeComparisons"]
@@ -288,6 +290,7 @@ class PackagingRunner:
             f"- Job: `{job['id']}`",
             f"- Final status: `{decision['status']}`",
             f"- Cloud mode: `{job['cloudMode']}`",
+            f"- Access boundary: owner `{policy_summary['accessBoundary']['ownerId']}` / project `{policy_summary['accessBoundary']['projectId']}`",
             f"- Artifacts included: {len(artifact_manifest)}",
             f"- Runtime validations: {len(runtime_reports)}",
             f"- Runtime comparisons: {len(runtime_comparisons)}",
@@ -298,6 +301,10 @@ class PackagingRunner:
             "## Completion Decision",
             "",
             decision["reason"] or "All collected build, review, and runtime validation evidence passed.",
+            "",
+            "## Policy Summary",
+            "",
+            self._policy_summary_markdown(policy_summary),
             "",
             "## Risk And Failure Groups",
             "",
@@ -366,6 +373,7 @@ class PackagingRunner:
         evidence_index: dict[str, Any],
     ) -> str:
         job = audit_payload["job"]
+        policy_summary = audit_payload["policySummary"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
         runtime_comparisons = audit_payload["runtimeComparisons"]
@@ -398,6 +406,8 @@ class PackagingRunner:
                 '<section class="summary" aria-label="Report summary">',
                 self._metric_html("Final status", str(decision["status"]), f"status-{decision['status']}"),
                 self._metric_html("Cloud mode", str(job["cloudMode"])),
+                self._metric_html("Owner", str(policy_summary["accessBoundary"]["ownerId"])),
+                self._metric_html("Project", str(policy_summary["accessBoundary"]["projectId"])),
                 self._metric_html("Artifacts", str(len(artifact_manifest))),
                 self._metric_html("Runtime validations", str(len(runtime_reports))),
                 self._metric_html("Runtime comparisons", str(len(runtime_comparisons))),
@@ -406,6 +416,19 @@ class PackagingRunner:
                 "</section>",
                 "<h2>Completion Decision</h2>",
                 f'<div class="notice">{escape(decision_text)}</div>',
+                "<h2>Policy Summary</h2>",
+                self._html_table(
+                    [policy_summary["modelPolicy"]],
+                    ("cloudMode", "modelContextScope", "contextHandling", "cloudContextAllowed", "limitation"),
+                ),
+                self._html_table(
+                    self._policy_summary_rows(policy_summary["sensitivityCounts"], "sensitivityClass"),
+                    ("sensitivityClass", "count"),
+                ),
+                self._html_table(
+                    self._policy_summary_rows(policy_summary["retentionCounts"], "retentionClass"),
+                    ("retentionClass", "count"),
+                ),
                 "<h2>Risk And Failure Groups</h2>",
                 self._html_table(decision["observations"], ("group", "status", "failureClass", "decision"))
                 if decision["observations"]
@@ -445,6 +468,30 @@ class PackagingRunner:
             cells = "".join(f"<td>{self._html_cell(record.get(column))}</td>" for column in columns)
             rows.append(f"<tr>{cells}</tr>")
         return f"<table>{''.join(rows)}</table>"
+
+    def _policy_summary_markdown(self, policy_summary: dict[str, Any]) -> str:
+        model_policy = policy_summary["modelPolicy"]
+        return "\n".join(
+            [
+                "| Area | Value |",
+                "| --- | --- |",
+                f"| Owner | `{policy_summary['accessBoundary']['ownerId']}` |",
+                f"| Project | `{policy_summary['accessBoundary']['projectId']}` |",
+                f"| Cloud mode | `{model_policy['cloudMode']}` |",
+                f"| Model context scope | `{model_policy['modelContextScope']}` |",
+                f"| Model context handling | `{model_policy['contextHandling']}` |",
+                f"| Cloud context allowed | `{model_policy['cloudContextAllowed']}` |",
+                f"| Policy limitation | {model_policy['limitation']} |",
+                f"| Sensitivity counts | `{self._count_summary(policy_summary['sensitivityCounts'])}` |",
+                f"| Retention counts | `{self._count_summary(policy_summary['retentionCounts'])}` |",
+            ]
+        )
+
+    def _policy_summary_rows(self, counts: dict[str, int], key: str) -> list[dict[str, Any]]:
+        return [{key: name, "count": count} for name, count in sorted(counts.items())]
+
+    def _count_summary(self, counts: dict[str, int]) -> str:
+        return ", ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "none"
 
     def _html_cell(self, value: Any) -> str:
         if value is None:
@@ -575,6 +622,7 @@ class PackagingRunner:
             "schemaVersion": "2026-06-14",
             "kind": "evidence_index",
             "jobId": job.id,
+            "policySummary": self._policy_summary(job=job, artifacts=artifacts),
             "attachmentPolicy": self._evidence_attachment_policy_payload(policy),
             "attachments": attachments,
             "packageContents": package_contents,
@@ -583,6 +631,53 @@ class PackagingRunner:
             "includedCount": sum(1 for item in attachments if item["included"]),
             "omittedCount": sum(1 for item in attachments if not item["included"]),
         }
+
+    def _policy_summary(self, *, job: JobRecord, artifacts: list[ArtifactRecord]) -> dict[str, Any]:
+        return {
+            "accessBoundary": {
+                "ownerId": job.owner_id,
+                "projectId": job.project_id,
+                "enforcement": "api_request_context",
+            },
+            "modelPolicy": self._model_policy_summary(job),
+            "sensitivityCounts": self._artifact_count_by(artifacts, "sensitivity_class"),
+            "retentionCounts": self._artifact_count_by(artifacts, "retention_class"),
+        }
+
+    def _model_policy_summary(self, job: JobRecord) -> dict[str, Any]:
+        if job.cloud_mode == "cloud_allowed":
+            return {
+                "cloudMode": job.cloud_mode,
+                "modelContextScope": "cloud",
+                "contextHandling": "full_context_allowed_when_configured",
+                "cloudContextAllowed": True,
+                "limitation": "Cloud model use still depends on configured model provider credentials.",
+            }
+        if job.cloud_mode == "desensitized":
+            return {
+                "cloudMode": job.cloud_mode,
+                "modelContextScope": "sanitized_cloud_or_local",
+                "contextHandling": "desensitized_context_required",
+                "cloudContextAllowed": True,
+                "limitation": (
+                    "Agent policy marks model context as sanitized; full source redaction remains a later "
+                    "security-hardening step."
+                ),
+            }
+        return {
+            "cloudMode": job.cloud_mode,
+            "modelContextScope": "local",
+            "contextHandling": "local_context_only",
+            "cloudContextAllowed": False,
+            "limitation": "Cloud model context is denied unless the job is created with cloud_allowed or desensitized mode.",
+        }
+
+    def _artifact_count_by(self, artifacts: list[ArtifactRecord], field_name: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for artifact in artifacts:
+            value = str(getattr(artifact, field_name))
+            counts[value] = counts.get(value, 0) + 1
+        return counts
 
     def _package_contents(
         self,

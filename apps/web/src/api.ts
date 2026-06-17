@@ -6,18 +6,23 @@ export interface JobSummary {
 }
 
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
+const configuredUserId = import.meta.env.VITE_API_USER_ID?.trim();
+const configuredProjectId = import.meta.env.VITE_API_PROJECT_ID?.trim();
 
 export const API_BASE_URL = configuredBaseUrl || "http://127.0.0.1:8000";
+export const API_USER_ID = configuredUserId || "local-user";
+export const API_PROJECT_ID = configuredProjectId || "default";
 
 export async function createJob(cloudMode: CloudMode): Promise<JobSummary> {
   return requestJson<JobSummary>("/jobs", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...accessHeaders()
     },
     body: JSON.stringify({
-      projectId: "default",
-      ownerId: "local-user",
+      projectId: API_PROJECT_ID,
+      ownerId: API_USER_ID,
       cloudMode,
       config: {
         source: "web",
@@ -33,6 +38,7 @@ export async function uploadSource(jobId: string, file: File): Promise<JobSummar
 
   return requestJson<JobSummary>(`/jobs/${encodeURIComponent(jobId)}/upload`, {
     method: "POST",
+    headers: accessHeaders(),
     body
   });
 }
@@ -66,7 +72,7 @@ export async function rerunJob(jobId: string): Promise<JobSummary> {
 export async function fetchArtifactText(jobId: string, artifactId: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(
     `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
-    { signal }
+    { headers: accessHeaders(), signal }
   );
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response));
@@ -75,11 +81,24 @@ export async function fetchArtifactText(jobId: string, artifactId: string, signa
 }
 
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      ...accessHeaders(),
+      ...options.headers
+    }
+  });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response));
   }
   return (await response.json()) as T;
+}
+
+function accessHeaders(): Record<string, string> {
+  return {
+    "X-AI-JSUNPACK-USER-ID": API_USER_ID,
+    "X-AI-JSUNPACK-PROJECT-ID": API_PROJECT_ID
+  };
 }
 
 async function responseErrorMessage(response: Response): Promise<string> {

@@ -16,6 +16,8 @@ from .models import (
     FailureClass,
     JobRecord,
     JobStatus,
+    RetentionClass,
+    SensitivityClass,
     new_artifact_id,
     new_job_id,
     utc_now,
@@ -194,6 +196,8 @@ class DatabaseStore:
         producer: str,
         parent_artifact_ids: list[str] | None = None,
         attempt: int = 0,
+        sensitivity_class: SensitivityClass = "source_sensitive",
+        retention_class: RetentionClass = "project",
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -221,8 +225,8 @@ class DatabaseStore:
             "storage_uri": str(target),
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
-            "sensitivity_class": "source_sensitive",
-            "retention_class": "project",
+            "sensitivity_class": sensitivity_class,
+            "retention_class": retention_class,
             "created_at": utc_now(),
         }
         with self.engine.begin() as connection:
@@ -247,6 +251,8 @@ class DatabaseStore:
         producer: str,
         parent_artifact_ids: list[str] | None = None,
         attempt: int = 0,
+        sensitivity_class: SensitivityClass = "source_sensitive",
+        retention_class: RetentionClass = "project",
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -285,8 +291,8 @@ class DatabaseStore:
             "storage_uri": str(target),
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
-            "sensitivity_class": "source_sensitive",
-            "retention_class": "project",
+            "sensitivity_class": sensitivity_class,
+            "retention_class": retention_class,
             "created_at": utc_now(),
         }
         with self.engine.begin() as connection:

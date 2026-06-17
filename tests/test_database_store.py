@@ -26,6 +26,8 @@ class DatabaseStoreTest(unittest.TestCase):
                     content=b'{"ok":true}',
                     content_type="application/json",
                     producer="test.database_store",
+                    sensitivity_class="secret",
+                    retention_class="archive",
                 )
 
                 self.assertEqual(updated.status, "intake")
@@ -43,6 +45,8 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertEqual(persisted_job.status, "intake")
                 self.assertEqual(len(persisted_artifacts), 1)
                 self.assertEqual(persisted_artifacts[0].hash, artifact.hash)
+                self.assertEqual(persisted_artifacts[0].sensitivity_class, "secret")
+                self.assertEqual(persisted_artifacts[0].retention_class, "archive")
             finally:
                 store.close()
                 if reopened is not None:
@@ -69,6 +73,8 @@ class DatabaseStoreTest(unittest.TestCase):
                     source_path=source_dir,
                     content_type="application/vnd.ai-jsunpack.generated-project+directory",
                     producer="test.database_store",
+                    sensitivity_class="derived",
+                    retention_class="archive",
                 )
                 repeated = store.register_artifact_path(
                     job.id,
@@ -84,6 +90,8 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertTrue((Path(artifact.storage_uri) / "src" / "main.ts").exists())
                 self.assertEqual(artifact.hash, repeated.hash)
                 self.assertEqual(artifact.size, len("<h1>Generated</h1>".encode("utf-8")) + len("export const ok = true;".encode("utf-8")))
+                self.assertEqual(artifact.sensitivity_class, "derived")
+                self.assertEqual(artifact.retention_class, "archive")
             finally:
                 store.close()
 

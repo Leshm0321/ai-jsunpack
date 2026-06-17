@@ -126,6 +126,7 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
                 attachments = {item["artifactId"]: item for item in evidence_index["attachments"]}
 
                 self.assertEqual(evidence_index["includedCount"], 1)
@@ -133,6 +134,11 @@ class PackagingRunnerTest(unittest.TestCase):
                 package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
                 self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "runtime_error")
+                self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["ownerId"], "local-user")
+                self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["projectId"], "default")
+                self.assertEqual(evidence_index["policySummary"]["modelPolicy"]["cloudMode"], "local_only")
+                self.assertFalse(evidence_index["policySummary"]["modelPolicy"]["cloudContextAllowed"])
+                self.assertEqual(audit_payload["policySummary"], evidence_index["policySummary"])
                 self.assertTrue(attachments[runtime_trace.id]["included"])
                 self.assertFalse(attachments[build_log.id]["included"])
                 self.assertFalse(attachments[runtime_screenshot.id]["included"])
@@ -157,6 +163,9 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", names)
                 self.assertNotIn(f"evidence/build_log/{build_log.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_screenshot/{runtime_screenshot.id}.png", names)
+                report_text = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
+                self.assertIn("## Policy Summary", report_text)
+                self.assertIn("Cloud context allowed", report_text)
             finally:
                 store.close()
 
@@ -246,6 +255,10 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertTrue(attachments[scenario.id]["included"])
                 self.assertEqual(attachments[scenario.id]["sensitivityClass"], "derived")
                 self.assertEqual(attachments[scenario.id]["retentionClass"], "archive")
+                self.assertEqual(evidence_index["policySummary"]["sensitivityCounts"]["derived"], 3)
+                self.assertEqual(evidence_index["policySummary"]["sensitivityCounts"]["source_sensitive"], 1)
+                self.assertEqual(evidence_index["policySummary"]["retentionCounts"]["archive"], 3)
+                self.assertEqual(evidence_index["policySummary"]["retentionCounts"]["ephemeral"], 1)
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
@@ -256,6 +269,37 @@ class PackagingRunnerTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_packaging_policy_summary_records_desensitized_context_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(cloud_mode="desensitized"))
+                store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="runtime_compare",
+                    filename="trace.json",
+                    content=b'{"trace":true}',
+                    content_type="application/json",
+                    producer="test",
+                    sensitivity_class="derived",
+                )
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                model_policy = evidence_index["policySummary"]["modelPolicy"]
+
+                self.assertEqual(model_policy["cloudMode"], "desensitized")
+                self.assertEqual(model_policy["modelContextScope"], "sanitized_cloud_or_local")
+                self.assertTrue(model_policy["cloudContextAllowed"])
+                self.assertIn("full source redaction remains", model_policy["limitation"])
+            finally:
+                store.close()
+
     def _set_artifact_policy_metadata(self, store, artifact_id: str, *, sensitivity_class: str, retention_class: str) -> None:
         with store.engine.begin() as connection:
             connection.execute(
@@ -263,6 +307,10 @@ class PackagingRunnerTest(unittest.TestCase):
                 .where(artifacts_table.c.id == artifact_id)
                 .values(sensitivity_class=sensitivity_class, retention_class=retention_class)
             )
+
+    def _read_zip_json(self, package_path: str, name: str):
+        with zipfile.ZipFile(package_path) as archive:
+            return json.loads(archive.read(name).decode("utf-8"))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,14 @@ class ApiEndpointTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        self.access_headers = {
+            "X-AI-JSUNPACK-USER-ID": "owner",
+            "X-AI-JSUNPACK-PROJECT-ID": "proj",
+        }
+        self.other_access_headers = {
+            "X-AI-JSUNPACK-USER-ID": "other-owner",
+            "X-AI-JSUNPACK-PROJECT-ID": "proj",
+        }
         self.store = create_store(
             database_url=f"sqlite:///{(self.root / 'metadata.db').as_posix()}",
             artifact_root=self.root / "artifacts",
@@ -37,6 +45,7 @@ class ApiEndpointTest(unittest.TestCase):
                 "cloudMode": "local_only",
                 "config": {"source": "api-test"},
             },
+            headers=self.access_headers,
         )
 
         self.assertEqual(created.status_code, 200)
@@ -49,6 +58,7 @@ class ApiEndpointTest(unittest.TestCase):
         uploaded = self.client.post(
             f"/jobs/{job_id}/upload",
             files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=self.access_headers,
         )
 
         self.assertEqual(uploaded.status_code, 200)
@@ -60,7 +70,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(uploaded_body["job"]["inputArtifactId"], uploaded_body["artifacts"][0]["id"])
         self.assertTrue(Path(uploaded_body["artifacts"][0]["storageUri"]).exists())
 
-        fetched = self.client.get(f"/jobs/{job_id}")
+        fetched = self.client.get(f"/jobs/{job_id}", headers=self.access_headers)
 
         self.assertEqual(fetched.status_code, 200)
         fetched_body = fetched.json()
@@ -79,7 +89,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(uploaded.status_code, 404)
 
     def test_runtime_validation_report_and_artifact_download_endpoints(self):
-        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
         payload = {
@@ -106,9 +116,9 @@ class ApiEndpointTest(unittest.TestCase):
             producer="test.api",
         )
 
-        listed = self.client.get(f"/jobs/{job_id}/runtime-validations")
-        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest")
-        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{report_artifact.id}/download")
+        listed = self.client.get(f"/jobs/{job_id}/runtime-validations", headers=self.access_headers)
+        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest", headers=self.access_headers)
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{report_artifact.id}/download", headers=self.access_headers)
 
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(latest.status_code, 200)
@@ -118,7 +128,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(downloaded.json(), payload)
 
     def test_agent_audit_record_endpoints(self):
-        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
         evidence_ref = {
@@ -196,9 +206,9 @@ class ApiEndpointTest(unittest.TestCase):
             producer="test.api",
         )
 
-        inference_response = self.client.get(f"/jobs/{job_id}/inference-records")
-        review_response = self.client.get(f"/jobs/{job_id}/review-runs")
-        tool_call_response = self.client.get(f"/jobs/{job_id}/tool-calls")
+        inference_response = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.access_headers)
+        review_response = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.access_headers)
+        tool_call_response = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.access_headers)
 
         self.assertEqual(inference_response.status_code, 200)
         self.assertEqual(review_response.status_code, 200)
@@ -216,12 +226,14 @@ class ApiEndpointTest(unittest.TestCase):
                 "cloudMode": "local_only",
                 "config": {"source": "api-test", "nested": {"enabled": True}},
             },
+            headers=self.access_headers,
         )
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
         uploaded = self.client.post(
             f"/jobs/{job_id}/upload",
             files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=self.access_headers,
         )
         self.assertEqual(uploaded.status_code, 200)
         audit_artifact = self.store.write_artifact(
@@ -269,11 +281,14 @@ class ApiEndpointTest(unittest.TestCase):
             parent_artifact_ids=[audit_artifact.id],
         )
 
-        audit_download = self.client.get(f"/jobs/{job_id}/reports/audit")
-        package_download = self.client.get(f"/jobs/{job_id}/result-package")
-        html_download = self.client.get(f"/jobs/{job_id}/artifacts/{html_artifact.id}/download")
-        evidence_index_download = self.client.get(f"/jobs/{job_id}/artifacts/{evidence_index_artifact.id}/download")
-        rerun = self.client.post(f"/jobs/{job_id}/rerun")
+        audit_download = self.client.get(f"/jobs/{job_id}/reports/audit", headers=self.access_headers)
+        package_download = self.client.get(f"/jobs/{job_id}/result-package", headers=self.access_headers)
+        html_download = self.client.get(f"/jobs/{job_id}/artifacts/{html_artifact.id}/download", headers=self.access_headers)
+        evidence_index_download = self.client.get(
+            f"/jobs/{job_id}/artifacts/{evidence_index_artifact.id}/download",
+            headers=self.access_headers,
+        )
+        rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.access_headers)
 
         self.assertEqual(audit_download.status_code, 200)
         self.assertEqual(package_download.status_code, 200)
@@ -296,12 +311,12 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(Path(rerun_artifact["storageUri"]).read_bytes(), b"zip-bytes")
 
     def test_missing_runtime_validation_and_artifact_download_return_404(self):
-        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
 
-        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest")
-        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/artifact_missing/download")
+        latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest", headers=self.access_headers)
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/artifact_missing/download", headers=self.access_headers)
         missing_inferences = self.client.get("/jobs/job_missing/inference-records")
         missing_reviews = self.client.get("/jobs/job_missing/review-runs")
         missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls")
@@ -319,16 +334,16 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(missing_rerun.status_code, 404)
 
     def test_rerun_without_source_input_returns_400(self):
-        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
 
-        rerun = self.client.post(f"/jobs/{job_id}/rerun")
+        rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.access_headers)
 
         self.assertEqual(rerun.status_code, 400)
 
     def test_directory_artifact_download_returns_400_until_packaged(self):
-        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"})
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
         generated = self.root / "generated"
@@ -344,7 +359,7 @@ class ApiEndpointTest(unittest.TestCase):
             producer="test.api",
         )
 
-        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{artifact.id}/download")
+        downloaded = self.client.get(f"/jobs/{job_id}/artifacts/{artifact.id}/download", headers=self.access_headers)
 
         self.assertEqual(downloaded.status_code, 400)
 
@@ -359,6 +374,68 @@ class ApiEndpointTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["access-control-allow-origin"], "http://127.0.0.1:5173")
+
+    def test_job_access_requires_matching_owner_and_project_headers(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        artifact = self.store.write_artifact(
+            job_id,
+            kind="audit_report",
+            stage="packaging",
+            filename="audit-report.md",
+            content=b"# Audit\n",
+            content_type="text/markdown; charset=utf-8",
+            producer="test.api",
+        )
+
+        create_mismatched_owner = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.other_access_headers,
+        )
+        fetched = self.client.get(f"/jobs/{job_id}", headers=self.other_access_headers)
+        uploaded = self.client.post(
+            f"/jobs/{job_id}/upload",
+            files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=self.other_access_headers,
+        )
+        downloaded = self.client.get(
+            f"/jobs/{job_id}/artifacts/{artifact.id}/download",
+            headers=self.other_access_headers,
+        )
+        audit_download = self.client.get(f"/jobs/{job_id}/reports/audit", headers=self.other_access_headers)
+        rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.other_access_headers)
+        inferences = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.other_access_headers)
+        reviews = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.other_access_headers)
+        tools = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.other_access_headers)
+        runtime = self.client.get(f"/jobs/{job_id}/runtime-validations", headers=self.other_access_headers)
+
+        self.assertEqual(create_mismatched_owner.status_code, 403)
+        self.assertEqual(fetched.status_code, 403)
+        self.assertEqual(uploaded.status_code, 403)
+        self.assertEqual(downloaded.status_code, 403)
+        self.assertEqual(audit_download.status_code, 403)
+        self.assertEqual(rerun.status_code, 403)
+        self.assertEqual(inferences.status_code, 403)
+        self.assertEqual(reviews.status_code, 403)
+        self.assertEqual(tools.status_code, 403)
+        self.assertEqual(runtime.status_code, 403)
+
+    def test_create_allows_missing_project_header_but_read_uses_project_boundary(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers={"X-AI-JSUNPACK-USER-ID": "owner"},
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+
+        missing_project = self.client.get(f"/jobs/{job_id}", headers={"X-AI-JSUNPACK-USER-ID": "owner"})
+        matching_project = self.client.get(f"/jobs/{job_id}", headers=self.access_headers)
+
+        self.assertEqual(missing_project.status_code, 403)
+        self.assertEqual(matching_project.status_code, 200)
 
 
 if __name__ == "__main__":
