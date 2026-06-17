@@ -10,8 +10,12 @@ from sqlalchemy.engine import Engine
 
 from .artifact_store import (
     ArtifactStore,
+    ArtifactStoreConfigurationError,
+    Boto3ObjectStorageClient,
     LocalArtifactStore,
+    ObjectStorageClient,
     S3CompatibleArtifactStore,
+    artifact_lifecycle_rules,
 )
 from .models import (
     ArtifactKind,
@@ -37,9 +41,18 @@ ARTIFACT_ROOT_ENV = "AI_JSUNPACK_ARTIFACT_ROOT"
 ARTIFACT_STORE_ENV = "AI_JSUNPACK_ARTIFACT_STORE"
 ARTIFACT_S3_BUCKET_ENV = "AI_JSUNPACK_ARTIFACT_S3_BUCKET"
 ARTIFACT_S3_PREFIX_ENV = "AI_JSUNPACK_ARTIFACT_S3_PREFIX"
+ARTIFACT_S3_ENDPOINT_URL_ENV = "AI_JSUNPACK_ARTIFACT_S3_ENDPOINT_URL"
+ARTIFACT_S3_REGION_ENV = "AI_JSUNPACK_ARTIFACT_S3_REGION"
+ARTIFACT_S3_ACCESS_KEY_ID_ENV = "AI_JSUNPACK_ARTIFACT_S3_ACCESS_KEY_ID"
+ARTIFACT_S3_SECRET_ACCESS_KEY_ENV = "AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY"
+ARTIFACT_S3_SESSION_TOKEN_ENV = "AI_JSUNPACK_ARTIFACT_S3_SESSION_TOKEN"
+ARTIFACT_S3_ADDRESSING_STYLE_ENV = "AI_JSUNPACK_ARTIFACT_S3_ADDRESSING_STYLE"
+ARTIFACT_S3_PRESIGN_TTL_SECONDS_ENV = "AI_JSUNPACK_ARTIFACT_S3_PRESIGN_TTL_SECONDS"
+ARTIFACT_S3_LIFECYCLE_ENABLED_ENV = "AI_JSUNPACK_ARTIFACT_S3_LIFECYCLE_ENABLED"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://ai_jsunpack:ai_jsunpack@127.0.0.1:5432/ai_jsunpack"
 CONTRACT_SCHEMA_VERSION = "2026-06-14"
 EPHEMERAL_RETENTION_DAYS = 7
+DEFAULT_PRESIGN_TTL_SECONDS = 3600
 
 RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
     "source_input": "source",
@@ -276,9 +289,25 @@ class DatabaseStore:
             job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
         if job_row is None:
             raise KeyError(f"Job not found: {job_id}")
-        stored = self.artifact_store.write_bytes(job_id=job_id, artifact_id=artifact_id, filename=filename, content=content)
         resolved_retention_class = retention_class or default_retention_class(kind)
         resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
+        metadata, tags = artifact_object_metadata(
+            job_id=job_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            stage=stage,
+            producer=producer,
+            sensitivity_class=sensitivity_class,
+            retention_class=resolved_retention_class,
+        )
+        stored = self.artifact_store.write_bytes(
+            job_id=job_id,
+            artifact_id=artifact_id,
+            filename=filename,
+            content=content,
+            metadata=metadata,
+            tags=tags,
+        )
         row = {
             "id": artifact_id,
             "job_id": job_id,
@@ -335,9 +364,25 @@ class DatabaseStore:
         source = Path(source_path)
         if not source.exists():
             raise FileNotFoundError(f"Artifact source path does not exist: {source}")
-        stored = self.artifact_store.copy_path(job_id=job_id, artifact_id=artifact_id, filename=filename, source_path=source)
         resolved_retention_class = retention_class or default_retention_class(kind)
         resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
+        metadata, tags = artifact_object_metadata(
+            job_id=job_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            stage=stage,
+            producer=producer,
+            sensitivity_class=sensitivity_class,
+            retention_class=resolved_retention_class,
+        )
+        stored = self.artifact_store.copy_path(
+            job_id=job_id,
+            artifact_id=artifact_id,
+            filename=filename,
+            source_path=source,
+            metadata=metadata,
+            tags=tags,
+        )
 
         row = {
             "id": artifact_id,
@@ -519,13 +564,107 @@ def normalize_cleanup_reason(reason: str) -> str:
     return stripped or "retention cleanup"
 
 
-def create_artifact_store(artifact_root: Path | str) -> ArtifactStore:
+def artifact_object_metadata(
+    *,
+    job_id: str,
+    artifact_id: str,
+    kind: ArtifactKind,
+    stage: JobStatus,
+    producer: str,
+    sensitivity_class: SensitivityClass,
+    retention_class: RetentionClass,
+) -> tuple[dict[str, str], dict[str, str]]:
+    metadata = {
+        "job-id": job_id,
+        "artifact-id": artifact_id,
+        "artifact-kind": kind,
+        "stage": stage,
+        "producer": producer,
+        "sensitivity-class": sensitivity_class,
+        "retention-class": retention_class,
+    }
+    tags = {
+        "jobId": job_id,
+        "artifactId": artifact_id,
+        "artifactKind": kind,
+        "stage": stage,
+        "sensitivityClass": sensitivity_class,
+        "retentionClass": retention_class,
+    }
+    return metadata, tags
+
+
+def create_artifact_store(
+    artifact_root: Path | str,
+    *,
+    object_client: ObjectStorageClient | None = None,
+) -> ArtifactStore:
     backend = os.getenv(ARTIFACT_STORE_ENV, "local").strip().lower()
     if backend in {"s3", "minio"}:
         bucket = os.getenv(ARTIFACT_S3_BUCKET_ENV, "").strip()
         prefix = os.getenv(ARTIFACT_S3_PREFIX_ENV, "").strip()
-        return S3CompatibleArtifactStore(bucket=bucket, prefix=prefix)
+        if not bucket:
+            raise ArtifactStoreConfigurationError("S3-compatible artifact store requires a bucket name.")
+        presign_ttl_seconds = parse_positive_int_env(
+            ARTIFACT_S3_PRESIGN_TTL_SECONDS_ENV,
+            DEFAULT_PRESIGN_TTL_SECONDS,
+        )
+        client = object_client or Boto3ObjectStorageClient(
+            endpoint_url=optional_env(ARTIFACT_S3_ENDPOINT_URL_ENV),
+            region_name=optional_env(ARTIFACT_S3_REGION_ENV),
+            access_key_id=optional_env(ARTIFACT_S3_ACCESS_KEY_ID_ENV),
+            secret_access_key=optional_env(ARTIFACT_S3_SECRET_ACCESS_KEY_ENV),
+            session_token=optional_env(ARTIFACT_S3_SESSION_TOKEN_ENV),
+            addressing_style=optional_env(ARTIFACT_S3_ADDRESSING_STYLE_ENV) or "auto",
+        )
+        if parse_bool_env(ARTIFACT_S3_LIFECYCLE_ENABLED_ENV, False):
+            configure_s3_lifecycle(client=client, bucket=bucket, prefix=prefix)
+        return S3CompatibleArtifactStore(
+            bucket=bucket,
+            prefix=prefix,
+            client=client,
+            presign_ttl_seconds=presign_ttl_seconds,
+        )
     return LocalArtifactStore(artifact_root)
+
+
+def configure_s3_lifecycle(*, client: ObjectStorageClient, bucket: str, prefix: str) -> None:
+    if not bucket:
+        raise ArtifactStoreConfigurationError("S3 artifact lifecycle requires a bucket name.")
+    configurator = getattr(client, "configure_lifecycle_rules", None)
+    if not callable(configurator):
+        raise ArtifactStoreConfigurationError("S3 artifact lifecycle requires a client with lifecycle support.")
+    configurator(bucket, artifact_lifecycle_rules(prefix=prefix, ephemeral_days=EPHEMERAL_RETENTION_DAYS))
+
+
+def optional_env(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    return value or None
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ArtifactStoreConfigurationError(f"{name} must be a boolean value.")
+
+
+def parse_positive_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ArtifactStoreConfigurationError(f"{name} must be an integer.") from error
+    if parsed <= 0:
+        raise ArtifactStoreConfigurationError(f"{name} must be greater than zero.")
+    return parsed
 
 
 def create_store(

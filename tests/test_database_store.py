@@ -1,10 +1,106 @@
+import os
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
-from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
+from apps.api.app.artifact_store import (
+    Boto3ObjectStorageClient,
+    InMemoryObjectStorageClient,
+    S3CompatibleArtifactStore,
+    artifact_lifecycle_rules,
+)
 from apps.api.app.models import CreateJobRequest, RetentionCleanupRequest
-from apps.api.app.store import create_store
+from apps.api.app.store import create_artifact_store, create_store
+
+
+class FakeS3Error(Exception):
+    def __init__(self, code: str, status_code: int = 400) -> None:
+        super().__init__(code)
+        self.response = {
+            "Error": {"Code": code},
+            "ResponseMetadata": {"HTTPStatusCode": status_code},
+        }
+
+
+class FakeS3Paginator:
+    def __init__(self, client: "FakeS3Client") -> None:
+        self.client = client
+
+    def paginate(self, *, Bucket: str, Prefix: str):
+        yield {
+            "Contents": [
+                {"Key": key}
+                for item_bucket, key in sorted(self.client.objects)
+                if item_bucket == Bucket and key.startswith(Prefix)
+            ]
+        }
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+        self.put_requests: list[dict[str, object]] = []
+        self.deleted: list[tuple[str, str]] = []
+        self.lifecycle_rules: list[dict[str, object]] | None = None
+        self.existing_lifecycle_rules: list[dict[str, object]] | None = None
+
+    def put_object(self, **kwargs):
+        bucket = str(kwargs["Bucket"])
+        key = str(kwargs["Key"])
+        body = kwargs["Body"]
+        self.objects[(bucket, key)] = body
+        self.put_requests.append(kwargs)
+
+    def get_object(self, **kwargs):
+        bucket = str(kwargs["Bucket"])
+        key = str(kwargs["Key"])
+        if (bucket, key) not in self.objects:
+            raise FakeS3Error("NoSuchKey", 404)
+        return {"Body": BytesIO(self.objects[(bucket, key)])}
+
+    def head_object(self, **kwargs):
+        bucket = str(kwargs["Bucket"])
+        key = str(kwargs["Key"])
+        if (bucket, key) not in self.objects:
+            raise FakeS3Error("404", 404)
+        return {}
+
+    def get_paginator(self, operation_name: str):
+        self.assert_operation(operation_name, "list_objects_v2")
+        return FakeS3Paginator(self)
+
+    def delete_object(self, **kwargs):
+        bucket = str(kwargs["Bucket"])
+        key = str(kwargs["Key"])
+        self.deleted.append((bucket, key))
+        self.objects.pop((bucket, key), None)
+
+    def generate_presigned_url(self, client_method: str, *, Params: dict[str, str], ExpiresIn: int):
+        self.assert_operation(client_method, "get_object")
+        return f"https://signed.example/{Params['Bucket']}/{Params['Key']}?ttl={ExpiresIn}"
+
+    def get_bucket_lifecycle_configuration(self, **kwargs):
+        if self.existing_lifecycle_rules is None:
+            raise FakeS3Error("NoSuchLifecycleConfiguration", 404)
+        return {"Rules": self.existing_lifecycle_rules}
+
+    def put_bucket_lifecycle_configuration(self, **kwargs):
+        self.lifecycle_rules = kwargs["LifecycleConfiguration"]["Rules"]
+
+    def assert_operation(self, actual: str, expected: str) -> None:
+        if actual != expected:
+            raise AssertionError(f"Expected {expected}, got {actual}")
+
+
+class LifecycleInMemoryObjectStorageClient(InMemoryObjectStorageClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lifecycle_rules: list[dict[str, object]] = []
+
+    def configure_lifecycle_rules(self, bucket: str, rules: list[dict[str, object]]) -> None:
+        self.lifecycle_rules = rules
 
 
 class DatabaseStoreTest(unittest.TestCase):
@@ -126,8 +222,105 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertTrue(store.artifact_is_file(artifact))
                 self.assertIsNone(store.artifact_local_path(artifact))
                 self.assertEqual(store.artifact_suffix(artifact), ".json")
+                object_key = next(iter(object_client.objects))[1]
+                self.assertEqual(object_client.metadata[("artifact-bucket", object_key)]["retention-class"], "archive")
+                self.assertEqual(object_client.tags[("artifact-bucket", object_key)]["retentionClass"], "archive")
+                self.assertEqual(object_client.tags[("artifact-bucket", object_key)]["artifactKind"], "source_input")
             finally:
                 store.close()
+
+    def test_boto3_object_storage_client_supports_io_signing_and_lifecycle_rules(self):
+        fake_s3 = FakeS3Client()
+        client = Boto3ObjectStorageClient(s3_client=fake_s3)
+
+        client.put_object(
+            "artifact-bucket",
+            "prefix/job/artifact.json",
+            b'{"ok":true}',
+            metadata={"retention-class": "ephemeral"},
+            tags={"retentionClass": "ephemeral", "artifactKind": "build_log"},
+        )
+
+        self.assertTrue(client.object_exists("artifact-bucket", "prefix/job/artifact.json"))
+        self.assertEqual(client.get_object("artifact-bucket", "prefix/job/artifact.json"), b'{"ok":true}')
+        self.assertEqual(client.list_objects("artifact-bucket", "prefix/"), ["prefix/job/artifact.json"])
+        self.assertEqual(
+            client.presigned_get_object_url(
+                "artifact-bucket",
+                "prefix/job/artifact.json",
+                expires_in_seconds=120,
+            ),
+            "https://signed.example/artifact-bucket/prefix/job/artifact.json?ttl=120",
+        )
+        self.assertEqual(fake_s3.put_requests[0]["Metadata"], {"retention-class": "ephemeral"})
+        self.assertEqual(
+            fake_s3.put_requests[0]["Tagging"],
+            "retentionClass=ephemeral&artifactKind=build_log",
+        )
+
+        fake_s3.existing_lifecycle_rules = [
+            {"ID": "external-backup", "Status": "Enabled"},
+            {"ID": "ai-jsunpack-old", "Status": "Enabled"},
+        ]
+        client.configure_lifecycle_rules(
+            "artifact-bucket",
+            artifact_lifecycle_rules(prefix="team/artifacts", ephemeral_days=7),
+        )
+
+        self.assertEqual(len(fake_s3.lifecycle_rules), 2)
+        self.assertEqual(fake_s3.lifecycle_rules[0]["ID"], "external-backup")
+        self.assertEqual(fake_s3.lifecycle_rules[1]["ID"], "ai-jsunpack-ephemeral-artifacts")
+        self.assertEqual(
+            fake_s3.lifecycle_rules[1]["Filter"]["And"]["Tags"],
+            [{"Key": "retentionClass", "Value": "ephemeral"}],
+        )
+
+        client.delete_object("artifact-bucket", "prefix/job/artifact.json")
+        self.assertFalse(client.object_exists("artifact-bucket", "prefix/job/artifact.json"))
+        self.assertEqual(fake_s3.deleted, [("artifact-bucket", "prefix/job/artifact.json")])
+
+    def test_s3_compatible_store_presigns_object_reads(self):
+        object_client = InMemoryObjectStorageClient()
+        artifact_store = S3CompatibleArtifactStore(
+            bucket="artifact-bucket",
+            prefix="signed",
+            client=object_client,
+            presign_ttl_seconds=90,
+        )
+        stored = artifact_store.write_bytes(
+            job_id="job_1",
+            artifact_id="artifact_1",
+            filename="audit.md",
+            content=b"# Audit",
+        )
+
+        self.assertEqual(
+            artifact_store.presigned_read_url(stored.storage_uri),
+            "https://object-storage.local/artifact-bucket/signed/job_1/artifact_1-audit.md?expires=90",
+        )
+
+    def test_create_artifact_store_uses_s3_env_configuration_and_lifecycle(self):
+        object_client = LifecycleInMemoryObjectStorageClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {
+                    "AI_JSUNPACK_ARTIFACT_STORE": "minio",
+                    "AI_JSUNPACK_ARTIFACT_S3_BUCKET": "artifact-bucket",
+                    "AI_JSUNPACK_ARTIFACT_S3_PREFIX": "deploy/prod",
+                    "AI_JSUNPACK_ARTIFACT_S3_PRESIGN_TTL_SECONDS": "600",
+                    "AI_JSUNPACK_ARTIFACT_S3_LIFECYCLE_ENABLED": "true",
+                },
+                clear=False,
+            ):
+                artifact_store = create_artifact_store(Path(temp_dir), object_client=object_client)
+
+        self.assertIsInstance(artifact_store, S3CompatibleArtifactStore)
+        self.assertEqual(artifact_store.bucket, "artifact-bucket")
+        self.assertEqual(artifact_store.prefix, "deploy/prod")
+        self.assertEqual(artifact_store.presign_ttl_seconds, 600)
+        self.assertEqual(object_client.lifecycle_rules[0]["Expiration"], {"Days": 7})
+        self.assertEqual(object_client.lifecycle_rules[0]["Filter"]["And"]["Prefix"], "deploy/prod/")
 
     def test_retention_cleanup_previews_and_deletes_local_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
