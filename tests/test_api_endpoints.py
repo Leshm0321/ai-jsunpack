@@ -342,6 +342,63 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(downloaded.content, b"# Object Audit\n")
         self.assertEqual(downloaded.headers["content-type"], "text/markdown; charset=utf-8")
 
+    def test_retention_cleanup_endpoint_previews_and_deletes_artifacts(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        artifact = self.store.write_artifact(
+            job_id,
+            kind="build_log",
+            stage="building",
+            filename="build.log",
+            content=b"build log",
+            content_type="text/plain",
+            producer="test.api",
+        )
+
+        preview = self.client.post(
+            f"/jobs/{job_id}/retention/cleanup",
+            json={
+                "dryRun": True,
+                "categories": ["logs"],
+                "retentionClasses": [],
+                "deleteExpired": False,
+                "reason": "preview logs",
+            },
+            headers=self.access_headers,
+        )
+        still_downloadable = self.client.get(
+            f"/jobs/{job_id}/artifacts/{artifact.id}/download",
+            headers=self.access_headers,
+        )
+        deleted = self.client.post(
+            f"/jobs/{job_id}/retention/cleanup",
+            json={
+                "dryRun": False,
+                "categories": ["logs"],
+                "retentionClasses": [],
+                "deleteExpired": False,
+                "reason": "delete logs",
+            },
+            headers=self.access_headers,
+        )
+        missing_download = self.client.get(
+            f"/jobs/{job_id}/artifacts/{artifact.id}/download",
+            headers=self.access_headers,
+        )
+        fetched = self.client.get(f"/jobs/{job_id}", headers=self.access_headers)
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["candidateCount"], 1)
+        self.assertEqual(preview.json()["deletedCount"], 0)
+        self.assertEqual(still_downloadable.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["candidateCount"], 1)
+        self.assertEqual(deleted.json()["deletedCount"], 1)
+        self.assertEqual(missing_download.status_code, 404)
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["artifacts"], [])
+
     def test_missing_runtime_validation_and_artifact_download_return_404(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
@@ -355,6 +412,10 @@ class ApiEndpointTest(unittest.TestCase):
         missing_audit = self.client.get("/jobs/job_missing/reports/audit")
         missing_package = self.client.get("/jobs/job_missing/result-package")
         missing_rerun = self.client.post("/jobs/job_missing/rerun")
+        missing_cleanup = self.client.post(
+            "/jobs/job_missing/retention/cleanup",
+            json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
+        )
 
         self.assertEqual(latest.status_code, 404)
         self.assertEqual(downloaded.status_code, 404)
@@ -364,6 +425,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(missing_audit.status_code, 404)
         self.assertEqual(missing_package.status_code, 404)
         self.assertEqual(missing_rerun.status_code, 404)
+        self.assertEqual(missing_cleanup.status_code, 404)
 
     def test_rerun_without_source_input_returns_400(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
@@ -442,6 +504,11 @@ class ApiEndpointTest(unittest.TestCase):
         reviews = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.other_access_headers)
         tools = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.other_access_headers)
         runtime = self.client.get(f"/jobs/{job_id}/runtime-validations", headers=self.other_access_headers)
+        cleanup = self.client.post(
+            f"/jobs/{job_id}/retention/cleanup",
+            json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
+            headers=self.other_access_headers,
+        )
 
         self.assertEqual(create_mismatched_owner.status_code, 403)
         self.assertEqual(fetched.status_code, 403)
@@ -453,6 +520,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(reviews.status_code, 403)
         self.assertEqual(tools.status_code, 403)
         self.assertEqual(runtime.status_code, 403)
+        self.assertEqual(cleanup.status_code, 403)
 
     def test_create_allows_missing_project_header_but_read_uses_project_boundary(self):
         created = self.client.post(

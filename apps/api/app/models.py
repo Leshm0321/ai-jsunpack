@@ -76,6 +76,7 @@ FailureClass = Literal[
 ]
 SensitivityClass = Literal["public", "derived", "source_sensitive", "secret"]
 RetentionClass = Literal["ephemeral", "project", "archive"]
+RetentionCategory = Literal["source", "derived", "package", "logs", "screenshots", "memory"]
 InferenceType = Literal["naming", "module_split", "type_inference", "framework", "dead_code", "runtime", "repair"]
 InferenceValidationStatus = Literal["unverified", "accepted", "rejected", "needs_review"]
 ReviewType = Literal["build", "typecheck", "runtime_smoke", "runtime_compare", "agent_review"]
@@ -176,6 +177,9 @@ class ArtifactRecord(ContractModel):
     sensitivity_class: SensitivityClass
     retention_class: RetentionClass
     created_at: str
+    expires_at: str | None = None
+    deleted_at: str | None = None
+    deletion_reason: str | None = None
 
 
 class EvidenceRef(ContractModel):
@@ -455,6 +459,38 @@ class MemoryRecord(ContractModel):
     source_artifact_ids: list[str]
     sensitivity_class: SensitivityClass
     retention_class: RetentionClass
+
+
+class RetentionCleanupRequest(ContractModel):
+    dry_run: bool = True
+    categories: list[RetentionCategory] = Field(default_factory=list)
+    retention_classes: list[RetentionClass] = Field(default_factory=list)
+    delete_expired: bool = True
+    reason: str = "retention cleanup"
+    now: str | None = None
+
+
+class RetentionCleanupItem(ContractModel):
+    artifact_id: str
+    kind: ArtifactKind
+    category: RetentionCategory
+    retention_class: RetentionClass
+    storage_uri: str
+    deleted: bool
+    reason: str
+    error: str | None = None
+
+
+class RetentionCleanupResult(ContractModel):
+    job_id: str
+    dry_run: bool
+    requested_at: str
+    candidate_count: int = Field(ge=0)
+    deleted_count: int = Field(ge=0)
+    skipped_count: int = Field(ge=0)
+    error_count: int = Field(ge=0)
+    items: list[RetentionCleanupItem]
+    errors: list[str]
 
 
 class RepairAction(ContractModel):

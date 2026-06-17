@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, insert, select, update
+from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 
 from .artifact_store import (
@@ -19,7 +20,11 @@ from .models import (
     FailureClass,
     JobRecord,
     JobStatus,
+    RetentionCategory,
     RetentionClass,
+    RetentionCleanupItem,
+    RetentionCleanupRequest,
+    RetentionCleanupResult,
     SensitivityClass,
     new_artifact_id,
     new_job_id,
@@ -34,6 +39,27 @@ ARTIFACT_S3_BUCKET_ENV = "AI_JSUNPACK_ARTIFACT_S3_BUCKET"
 ARTIFACT_S3_PREFIX_ENV = "AI_JSUNPACK_ARTIFACT_S3_PREFIX"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://ai_jsunpack:ai_jsunpack@127.0.0.1:5432/ai_jsunpack"
 CONTRACT_SCHEMA_VERSION = "2026-06-14"
+EPHEMERAL_RETENTION_DAYS = 7
+
+RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
+    "source_input": "source",
+    "result_package": "package",
+    "audit_report": "package",
+    "html_report": "package",
+    "evidence_index": "package",
+    "build_log": "logs",
+    "runtime_trace": "logs",
+    "runtime_screenshot": "screenshots",
+    "memory_record": "memory",
+}
+DEFAULT_RETENTION_BY_CATEGORY: dict[RetentionCategory, RetentionClass] = {
+    "source": "archive",
+    "derived": "project",
+    "package": "archive",
+    "logs": "ephemeral",
+    "screenshots": "ephemeral",
+    "memory": "project",
+}
 
 metadata = MetaData()
 
@@ -73,6 +99,9 @@ artifacts_table = Table(
     Column("sensitivity_class", String, nullable=False),
     Column("retention_class", String, nullable=False),
     Column("created_at", String, nullable=False),
+    Column("expires_at", String, nullable=True),
+    Column("deleted_at", String, nullable=True),
+    Column("deletion_reason", String, nullable=True),
 )
 
 
@@ -94,6 +123,7 @@ class DatabaseStore:
         if self._schema_ready:
             return
         metadata.create_all(self.engine)
+        self._ensure_artifacts_lifecycle_columns()
         self._schema_ready = True
 
     def close(self) -> None:
@@ -158,9 +188,12 @@ class DatabaseStore:
         *,
         kind: ArtifactKind | None = None,
         stage: JobStatus | None = None,
+        include_deleted: bool = False,
     ) -> list[ArtifactRecord]:
         self.initialize()
         query = select(artifacts_table).where(artifacts_table.c.job_id == job_id)
+        if not include_deleted:
+            query = query.where(artifacts_table.c.deleted_at.is_(None))
         if kind is not None:
             query = query.where(artifacts_table.c.kind == kind)
         if stage is not None:
@@ -175,16 +208,17 @@ class DatabaseStore:
             )
         return [self._artifact_from_row(row) for row in rows]
 
-    def get_artifact(self, job_id: str, artifact_id: str) -> ArtifactRecord | None:
+    def get_artifact(self, job_id: str, artifact_id: str, *, include_deleted: bool = False) -> ArtifactRecord | None:
         self.initialize()
+        query = select(artifacts_table).where(
+            artifacts_table.c.job_id == job_id,
+            artifacts_table.c.id == artifact_id,
+        )
+        if not include_deleted:
+            query = query.where(artifacts_table.c.deleted_at.is_(None))
         with self.engine.begin() as connection:
             row = (
-                connection.execute(
-                    select(artifacts_table).where(
-                        artifacts_table.c.job_id == job_id,
-                        artifacts_table.c.id == artifact_id,
-                    )
-                )
+                connection.execute(query)
                 .mappings()
                 .first()
             )
@@ -233,7 +267,8 @@ class DatabaseStore:
         parent_artifact_ids: list[str] | None = None,
         attempt: int = 0,
         sensitivity_class: SensitivityClass = "source_sensitive",
-        retention_class: RetentionClass = "project",
+        retention_class: RetentionClass | None = None,
+        expires_at: str | None = None,
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -242,6 +277,8 @@ class DatabaseStore:
         if job_row is None:
             raise KeyError(f"Job not found: {job_id}")
         stored = self.artifact_store.write_bytes(job_id=job_id, artifact_id=artifact_id, filename=filename, content=content)
+        resolved_retention_class = retention_class or default_retention_class(kind)
+        resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
         row = {
             "id": artifact_id,
             "job_id": job_id,
@@ -256,8 +293,11 @@ class DatabaseStore:
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
-            "retention_class": retention_class,
+            "retention_class": resolved_retention_class,
             "created_at": utc_now(),
+            "expires_at": resolved_expires_at,
+            "deleted_at": None,
+            "deletion_reason": None,
         }
         with self.engine.begin() as connection:
             connection.execute(insert(artifacts_table).values(**row))
@@ -282,7 +322,8 @@ class DatabaseStore:
         parent_artifact_ids: list[str] | None = None,
         attempt: int = 0,
         sensitivity_class: SensitivityClass = "source_sensitive",
-        retention_class: RetentionClass = "project",
+        retention_class: RetentionClass | None = None,
+        expires_at: str | None = None,
     ) -> ArtifactRecord:
         self.initialize()
         artifact_id = new_artifact_id()
@@ -295,6 +336,8 @@ class DatabaseStore:
         if not source.exists():
             raise FileNotFoundError(f"Artifact source path does not exist: {source}")
         stored = self.artifact_store.copy_path(job_id=job_id, artifact_id=artifact_id, filename=filename, source_path=source)
+        resolved_retention_class = retention_class or default_retention_class(kind)
+        resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
 
         row = {
             "id": artifact_id,
@@ -310,12 +353,98 @@ class DatabaseStore:
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
-            "retention_class": retention_class,
+            "retention_class": resolved_retention_class,
             "created_at": utc_now(),
+            "expires_at": resolved_expires_at,
+            "deleted_at": None,
+            "deletion_reason": None,
         }
         with self.engine.begin() as connection:
             connection.execute(insert(artifacts_table).values(**row))
         return self._artifact_from_row(row)
+
+    def cleanup_retention(self, job_id: str, request: RetentionCleanupRequest) -> RetentionCleanupResult:
+        self.initialize()
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(f"Job not found: {job_id}")
+
+        requested_at = request.now or utc_now()
+        now = parse_timestamp(requested_at)
+        active_artifacts = self.list_artifacts(job_id)
+        candidates = [
+            artifact
+            for artifact in active_artifacts
+            if cleanup_matches(artifact=artifact, request=request, now=now)
+        ]
+        reason = normalize_cleanup_reason(request.reason)
+        items: list[RetentionCleanupItem] = []
+        errors: list[str] = []
+        deleted_count = 0
+
+        for artifact in candidates:
+            category = retention_category_for_kind(artifact.kind)
+            if request.dry_run:
+                items.append(
+                    RetentionCleanupItem(
+                        artifact_id=artifact.id,
+                        kind=artifact.kind,
+                        category=category,
+                        retention_class=artifact.retention_class,
+                        storage_uri=artifact.storage_uri,
+                        deleted=False,
+                        reason="dry_run",
+                    )
+                )
+                continue
+
+            try:
+                self.artifact_store.delete(artifact.storage_uri)
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        update(artifacts_table)
+                        .where(artifacts_table.c.id == artifact.id)
+                        .values(deleted_at=requested_at, deletion_reason=reason)
+                    )
+                deleted_count += 1
+                items.append(
+                    RetentionCleanupItem(
+                        artifact_id=artifact.id,
+                        kind=artifact.kind,
+                        category=category,
+                        retention_class=artifact.retention_class,
+                        storage_uri=artifact.storage_uri,
+                        deleted=True,
+                        reason=reason,
+                    )
+                )
+            except Exception as error:
+                message = f"{artifact.id}: {error}"
+                errors.append(message)
+                items.append(
+                    RetentionCleanupItem(
+                        artifact_id=artifact.id,
+                        kind=artifact.kind,
+                        category=category,
+                        retention_class=artifact.retention_class,
+                        storage_uri=artifact.storage_uri,
+                        deleted=False,
+                        reason=reason,
+                        error=str(error),
+                    )
+                )
+
+        return RetentionCleanupResult(
+            job_id=job_id,
+            dry_run=request.dry_run,
+            requested_at=requested_at,
+            candidate_count=len(candidates),
+            deleted_count=deleted_count,
+            skipped_count=len(active_artifacts) - len(candidates),
+            error_count=len(errors),
+            items=items,
+            errors=errors,
+        )
 
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)
@@ -323,7 +452,71 @@ class DatabaseStore:
 
     def _artifact_from_row(self, row: Any) -> ArtifactRecord:
         data = dict(row)
+        data.setdefault("expires_at", None)
+        data.setdefault("deleted_at", None)
+        data.setdefault("deletion_reason", None)
         return ArtifactRecord.model_validate(data)
+
+    def _ensure_artifacts_lifecycle_columns(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("artifacts")}
+        lifecycle_columns = {
+            "expires_at": "VARCHAR",
+            "deleted_at": "VARCHAR",
+            "deletion_reason": "VARCHAR",
+        }
+        with self.engine.begin() as connection:
+            for column_name, column_type in lifecycle_columns.items():
+                if column_name not in existing_columns:
+                    connection.execute(text(f"ALTER TABLE artifacts ADD COLUMN {column_name} {column_type}"))
+
+
+def retention_category_for_kind(kind: str) -> RetentionCategory:
+    return RETENTION_CATEGORY_BY_KIND.get(kind, "derived")
+
+
+def default_retention_class(kind: str) -> RetentionClass:
+    return DEFAULT_RETENTION_BY_CATEGORY[retention_category_for_kind(kind)]
+
+
+def default_expires_at(retention_class: RetentionClass) -> str | None:
+    if retention_class != "ephemeral":
+        return None
+    return (datetime.now(timezone.utc) + timedelta(days=EPHEMERAL_RETENTION_DAYS)).isoformat()
+
+
+def cleanup_matches(*, artifact: ArtifactRecord, request: RetentionCleanupRequest, now: datetime) -> bool:
+    categories = set(request.categories)
+    retention_classes = set(request.retention_classes)
+    has_selector = bool(categories or retention_classes)
+
+    if request.delete_expired and not artifact_is_expired(artifact, now):
+        return False
+    if not request.delete_expired and not has_selector:
+        return False
+    if categories and retention_category_for_kind(artifact.kind) not in categories:
+        return False
+    if retention_classes and artifact.retention_class not in retention_classes:
+        return False
+    return True
+
+
+def artifact_is_expired(artifact: ArtifactRecord, now: datetime) -> bool:
+    if not artifact.expires_at:
+        return False
+    return parse_timestamp(artifact.expires_at) <= now
+
+
+def parse_timestamp(value: str) -> datetime:
+    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def normalize_cleanup_reason(reason: str) -> str:
+    stripped = reason.strip()
+    return stripped or "retention cleanup"
 
 
 def create_artifact_store(artifact_root: Path | str) -> ArtifactStore:

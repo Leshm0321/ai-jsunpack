@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
-from apps.api.app.models import CreateJobRequest
+from apps.api.app.models import CreateJobRequest, RetentionCleanupRequest
 from apps.api.app.store import create_store
 
 
@@ -126,6 +126,154 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertTrue(store.artifact_is_file(artifact))
                 self.assertIsNone(store.artifact_local_path(artifact))
                 self.assertEqual(store.artifact_suffix(artifact), ".json")
+            finally:
+                store.close()
+
+    def test_retention_cleanup_previews_and_deletes_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_url = f"sqlite:///{(root / 'metadata.db').as_posix()}"
+            artifact_root = root / "artifacts"
+
+            store = create_store(database_url=database_url, artifact_root=artifact_root)
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                source = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="input.zip",
+                    content=b"source",
+                    content_type="application/zip",
+                    producer="test.database_store",
+                )
+                log = store.write_artifact(
+                    job.id,
+                    kind="build_log",
+                    stage="building",
+                    filename="build.log",
+                    content=b"log",
+                    content_type="text/plain",
+                    producer="test.database_store",
+                )
+
+                self.assertEqual(source.retention_class, "archive")
+                self.assertIsNone(source.expires_at)
+                self.assertEqual(log.retention_class, "ephemeral")
+                self.assertIsNotNone(log.expires_at)
+
+                preview = store.cleanup_retention(
+                    job.id,
+                    RetentionCleanupRequest(
+                        dry_run=True,
+                        categories=["logs"],
+                        delete_expired=False,
+                        reason="preview logs",
+                    ),
+                )
+                self.assertEqual(preview.candidate_count, 1)
+                self.assertEqual(preview.deleted_count, 0)
+                self.assertTrue(Path(log.storage_uri).exists())
+                self.assertIsNotNone(store.get_artifact(job.id, log.id))
+
+                deleted = store.cleanup_retention(
+                    job.id,
+                    RetentionCleanupRequest(
+                        dry_run=False,
+                        categories=["logs"],
+                        delete_expired=False,
+                        reason="delete logs",
+                    ),
+                )
+
+                self.assertEqual(deleted.candidate_count, 1)
+                self.assertEqual(deleted.deleted_count, 1)
+                self.assertFalse(Path(log.storage_uri).exists())
+                self.assertIsNone(store.get_artifact(job.id, log.id))
+                self.assertEqual([artifact.id for artifact in store.list_artifacts(job.id)], [source.id])
+                deleted_record = store.get_artifact(job.id, log.id, include_deleted=True)
+                self.assertIsNotNone(deleted_record)
+                self.assertEqual(deleted_record.deletion_reason, "delete logs")
+                self.assertIsNotNone(deleted_record.deleted_at)
+            finally:
+                store.close()
+
+    def test_retention_cleanup_deletes_directory_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_url = f"sqlite:///{(root / 'metadata.db').as_posix()}"
+            artifact_root = root / "artifacts"
+            source_dir = root / "generated"
+            source_dir.mkdir()
+            (source_dir / "index.html").write_text("<h1>Generated</h1>", encoding="utf-8")
+
+            store = create_store(database_url=database_url, artifact_root=artifact_root)
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                artifact = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=source_dir,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test.database_store",
+                )
+
+                result = store.cleanup_retention(
+                    job.id,
+                    RetentionCleanupRequest(
+                        dry_run=False,
+                        categories=["derived"],
+                        delete_expired=False,
+                        reason="delete derived",
+                    ),
+                )
+
+                self.assertEqual(result.deleted_count, 1)
+                self.assertFalse(Path(artifact.storage_uri).exists())
+                self.assertIsNone(store.get_artifact(job.id, artifact.id))
+            finally:
+                store.close()
+
+    def test_retention_cleanup_deletes_s3_compatible_objects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_url = f"sqlite:///{(root / 'metadata.db').as_posix()}"
+            object_client = InMemoryObjectStorageClient()
+            artifact_store = S3CompatibleArtifactStore(bucket="artifact-bucket", prefix="retention", client=object_client)
+
+            store = create_store(
+                database_url=database_url,
+                artifact_root=root / "artifacts",
+                artifact_store=artifact_store,
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                artifact = store.write_artifact(
+                    job.id,
+                    kind="build_log",
+                    stage="building",
+                    filename="build.log",
+                    content=b"log",
+                    content_type="text/plain",
+                    producer="test.database_store",
+                )
+                self.assertTrue(store.artifact_exists(artifact))
+
+                result = store.cleanup_retention(
+                    job.id,
+                    RetentionCleanupRequest(
+                        dry_run=False,
+                        categories=["logs"],
+                        delete_expired=False,
+                        reason="delete object logs",
+                    ),
+                )
+
+                self.assertEqual(result.deleted_count, 1)
+                self.assertFalse(object_client.objects)
+                self.assertIsNone(store.get_artifact(job.id, artifact.id))
             finally:
                 store.close()
 

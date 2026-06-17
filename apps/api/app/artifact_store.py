@@ -36,6 +36,9 @@ class ObjectStorageClient(Protocol):
     def list_objects(self, bucket: str, prefix: str) -> list[str]:
         ...
 
+    def delete_object(self, bucket: str, key: str) -> None:
+        ...
+
 
 class ArtifactStore(Protocol):
     def write_bytes(self, *, job_id: str, artifact_id: str, filename: str, content: bytes) -> StoredArtifactRef:
@@ -66,6 +69,9 @@ class ArtifactStore(Protocol):
         ...
 
     def suffix(self, storage_uri: str) -> str:
+        ...
+
+    def delete(self, storage_uri: str) -> None:
         ...
 
 
@@ -128,6 +134,20 @@ class LocalArtifactStore:
 
     def suffix(self, storage_uri: str) -> str:
         return Path(storage_uri).suffix
+
+    def delete(self, storage_uri: str) -> None:
+        target = Path(storage_uri)
+        root = self.root.resolve()
+        resolved = target.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ArtifactStoreError(f"Refusing to delete artifact outside store root: {storage_uri}")
+        if not target.exists() and not target.is_symlink():
+            return
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+            return
+        if target.is_dir():
+            shutil.rmtree(target)
 
     def _target_path(self, *, job_id: str, artifact_id: str, filename: str) -> Path:
         job_dir = self.root / job_id
@@ -220,6 +240,14 @@ class S3CompatibleArtifactStore:
     def suffix(self, storage_uri: str) -> str:
         return PurePosixPath(self.filename(storage_uri)).suffix
 
+    def delete(self, storage_uri: str) -> None:
+        bucket, key = self._parse_uri(storage_uri)
+        if storage_uri.endswith("/"):
+            for object_key in self._client().list_objects(bucket, key.rstrip("/") + "/"):
+                self._client().delete_object(bucket, object_key)
+            return
+        self._client().delete_object(bucket, key)
+
     def _client(self) -> ObjectStorageClient:
         if self.client is None:
             raise ArtifactStoreConfigurationError(
@@ -260,6 +288,9 @@ class InMemoryObjectStorageClient:
 
     def list_objects(self, bucket: str, prefix: str) -> list[str]:
         return sorted(key for item_bucket, key in self.objects if item_bucket == bucket and key.startswith(prefix))
+
+    def delete_object(self, bucket: str, key: str) -> None:
+        self.objects.pop((bucket, key), None)
 
 
 def hash_directory(directory: Path) -> tuple[str, int]:

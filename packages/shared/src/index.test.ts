@@ -6,6 +6,7 @@ import {
   FAILURE_CLASSES,
   JOB_STATUSES,
   RETENTION_CLASSES,
+  RETENTION_CATEGORIES,
   SENSITIVITY_CLASSES,
   SHARED_CONTRACT_EXAMPLES,
   SHARED_JSON_SCHEMAS
@@ -18,6 +19,10 @@ test("shared schemas reuse the canonical enum constants", () => {
   assert.deepEqual(SHARED_JSON_SCHEMAS.artifact.properties?.kind?.enum, ARTIFACT_KINDS);
   assert.deepEqual(SHARED_JSON_SCHEMAS.artifact.properties?.sensitivityClass?.enum, SENSITIVITY_CLASSES);
   assert.deepEqual(SHARED_JSON_SCHEMAS.artifact.properties?.retentionClass?.enum, RETENTION_CLASSES);
+  assert.deepEqual(
+    SHARED_JSON_SCHEMAS.retentionCleanupRequest.properties?.categories?.items?.enum,
+    RETENTION_CATEGORIES
+  );
 });
 
 test("shared examples cover each schema required field without extra keys", () => {

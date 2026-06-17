@@ -13,6 +13,8 @@ from .models import (
     InferenceRecord,
     JobRecord,
     JobSummary,
+    RetentionCleanupRequest,
+    RetentionCleanupResult,
     ReviewRun,
     RuntimeValidationRun,
     ToolCall,
@@ -220,6 +222,22 @@ def rerun_job(
     )
     job = store.update_status(created.id, "intake")
     return JobSummary(job=job, artifacts=store.list_artifacts(created.id))
+
+
+@app.post("/jobs/{job_id}/retention/cleanup", response_model=RetentionCleanupResult)
+def cleanup_retention(
+    job_id: str,
+    request: RetentionCleanupRequest,
+    x_ai_jsunpack_user_id: str | None = Header(default=None),
+    x_ai_jsunpack_project_id: str | None = Header(default=None),
+) -> RetentionCleanupResult:
+    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    try:
+        return store.cleanup_retention(job_id, request)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/jobs/{job_id}/artifacts/{artifact_id}/download")

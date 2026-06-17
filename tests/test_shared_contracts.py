@@ -57,6 +57,7 @@ class SharedContractAlignmentTest(unittest.TestCase):
         self.assertEqual(list(get_args(models.FailureClass)), expected["failureClass"])
         self.assertEqual(list(get_args(models.SensitivityClass)), expected["sensitivityClass"])
         self.assertEqual(list(get_args(models.RetentionClass)), expected["retentionClass"])
+        self.assertEqual(list(get_args(models.RetentionCategory)), expected["retentionCategory"])
 
     def test_pydantic_models_validate_typescript_contract_examples(self):
         model_by_example = {
@@ -71,6 +72,8 @@ class SharedContractAlignmentTest(unittest.TestCase):
             "runtimeValidationRun": models.RuntimeValidationRun,
             "toolCall": models.ToolCall,
             "memoryRecord": models.MemoryRecord,
+            "retentionCleanupRequest": models.RetentionCleanupRequest,
+            "retentionCleanupResult": models.RetentionCleanupResult,
             "repairInstruction": models.RepairInstruction,
         }
 

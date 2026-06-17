@@ -81,6 +81,9 @@ export type SensitivityClass = (typeof SENSITIVITY_CLASSES)[number];
 export const RETENTION_CLASSES = ["ephemeral", "project", "archive"] as const;
 export type RetentionClass = (typeof RETENTION_CLASSES)[number];
 
+export const RETENTION_CATEGORIES = ["source", "derived", "package", "logs", "screenshots", "memory"] as const;
+export type RetentionCategory = (typeof RETENTION_CATEGORIES)[number];
+
 export interface Artifact {
   id: string;
   jobId: string;
@@ -97,6 +100,9 @@ export interface Artifact {
   sensitivityClass: SensitivityClass;
   retentionClass: RetentionClass;
   createdAt: string;
+  expiresAt?: string | null;
+  deletedAt?: string | null;
+  deletionReason?: string | null;
 }
 
 export interface Job {
@@ -397,6 +403,38 @@ export interface MemoryRecord {
   retentionClass: RetentionClass;
 }
 
+export interface RetentionCleanupRequest {
+  dryRun: boolean;
+  categories: RetentionCategory[];
+  retentionClasses: RetentionClass[];
+  deleteExpired: boolean;
+  reason: string;
+  now?: string | null;
+}
+
+export interface RetentionCleanupItem {
+  artifactId: string;
+  kind: ArtifactKind;
+  category: RetentionCategory;
+  retentionClass: RetentionClass;
+  storageUri: string;
+  deleted: boolean;
+  reason: string;
+  error?: string | null;
+}
+
+export interface RetentionCleanupResult {
+  jobId: string;
+  dryRun: boolean;
+  requestedAt: string;
+  candidateCount: number;
+  deletedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  items: RetentionCleanupItem[];
+  errors: string[];
+}
+
 export interface RepairAction {
   action: "add_package_script" | "mirror_original_static_entry";
   path: string;
@@ -481,6 +519,14 @@ const stringSchema = { type: "string" } as const satisfies JsonSchema;
 const numberSchema = { type: "number" } as const satisfies JsonSchema;
 const booleanSchema = { type: "boolean" } as const satisfies JsonSchema;
 const stringArraySchema = { type: "array", items: stringSchema } as const satisfies JsonSchema;
+const retentionCategoriesArraySchema = {
+  type: "array",
+  items: { type: "string", enum: RETENTION_CATEGORIES }
+} as const satisfies JsonSchema;
+const retentionClassesArraySchema = {
+  type: "array",
+  items: { type: "string", enum: RETENTION_CLASSES }
+} as const satisfies JsonSchema;
 const evidenceRefsSchema = {
   type: "array",
   items: {
@@ -778,7 +824,8 @@ export const SHARED_CONTRACT_ENUMS = {
   artifactKind: ARTIFACT_KINDS,
   failureClass: FAILURE_CLASSES,
   sensitivityClass: SENSITIVITY_CLASSES,
-  retentionClass: RETENTION_CLASSES
+  retentionClass: RETENTION_CLASSES,
+  retentionCategory: RETENTION_CATEGORIES
 } as const;
 
 export const SHARED_JSON_SCHEMAS = {
@@ -816,7 +863,10 @@ export const SHARED_JSON_SCHEMAS = {
       producer: stringSchema,
       sensitivityClass: { type: "string", enum: SENSITIVITY_CLASSES },
       retentionClass: { type: "string", enum: RETENTION_CLASSES },
-      createdAt: { type: "string", format: "date-time" }
+      createdAt: { type: "string", format: "date-time" },
+      expiresAt: { type: "string", format: "date-time" },
+      deletedAt: { type: "string", format: "date-time" },
+      deletionReason: stringSchema
     },
     required: [
       "id",
@@ -834,6 +884,68 @@ export const SHARED_JSON_SCHEMAS = {
       "sensitivityClass",
       "retentionClass",
       "createdAt"
+    ],
+    additionalProperties: false
+  },
+  retentionCleanupRequest: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/retention-cleanup-request.json",
+    title: "RetentionCleanupRequest",
+    type: "object",
+    properties: {
+      dryRun: booleanSchema,
+      categories: retentionCategoriesArraySchema,
+      retentionClasses: retentionClassesArraySchema,
+      deleteExpired: booleanSchema,
+      reason: stringSchema,
+      now: { type: "string", format: "date-time" }
+    },
+    required: ["dryRun", "categories", "retentionClasses", "deleteExpired", "reason"],
+    additionalProperties: false
+  },
+  retentionCleanupResult: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/retention-cleanup-result.json",
+    title: "RetentionCleanupResult",
+    type: "object",
+    properties: {
+      jobId: stringSchema,
+      dryRun: booleanSchema,
+      requestedAt: { type: "string", format: "date-time" },
+      candidateCount: { type: "integer", minimum: 0 },
+      deletedCount: { type: "integer", minimum: 0 },
+      skippedCount: { type: "integer", minimum: 0 },
+      errorCount: { type: "integer", minimum: 0 },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            artifactId: stringSchema,
+            kind: { type: "string", enum: ARTIFACT_KINDS },
+            category: { type: "string", enum: RETENTION_CATEGORIES },
+            retentionClass: { type: "string", enum: RETENTION_CLASSES },
+            storageUri: stringSchema,
+            deleted: booleanSchema,
+            reason: stringSchema,
+            error: stringSchema
+          },
+          required: ["artifactId", "kind", "category", "retentionClass", "storageUri", "deleted", "reason"],
+          additionalProperties: false
+        }
+      },
+      errors: stringArraySchema
+    },
+    required: [
+      "jobId",
+      "dryRun",
+      "requestedAt",
+      "candidateCount",
+      "deletedCount",
+      "skippedCount",
+      "errorCount",
+      "items",
+      "errors"
     ],
     additionalProperties: false
   },
@@ -1219,7 +1331,10 @@ export const EXAMPLE_ARTIFACT = {
   producer: "contract.test",
   sensitivityClass: "source_sensitive",
   retentionClass: "project",
-  createdAt: exampleTimestamp
+  createdAt: exampleTimestamp,
+  expiresAt: null,
+  deletedAt: null,
+  deletionReason: null
 } as const satisfies Artifact;
 
 export const EXAMPLE_JOB = {
@@ -1556,6 +1671,38 @@ export const EXAMPLE_MEMORY_RECORD = {
   retentionClass: "project"
 } as const satisfies MemoryRecord;
 
+export const EXAMPLE_RETENTION_CLEANUP_REQUEST = {
+  dryRun: true,
+  categories: ["logs", "screenshots", "memory"],
+  retentionClasses: ["ephemeral", "project"],
+  deleteExpired: true,
+  reason: "contract cleanup preview",
+  now: exampleTimestamp
+} as const satisfies RetentionCleanupRequest;
+
+export const EXAMPLE_RETENTION_CLEANUP_RESULT = {
+  jobId: EXAMPLE_JOB.id,
+  dryRun: true,
+  requestedAt: exampleTimestamp,
+  candidateCount: 1,
+  deletedCount: 0,
+  skippedCount: 2,
+  errorCount: 0,
+  items: [
+    {
+      artifactId: EXAMPLE_ARTIFACT.id,
+      kind: EXAMPLE_ARTIFACT.kind,
+      category: "derived",
+      retentionClass: EXAMPLE_ARTIFACT.retentionClass,
+      storageUri: EXAMPLE_ARTIFACT.storageUri,
+      deleted: false,
+      reason: "dry_run",
+      error: null
+    }
+  ],
+  errors: []
+} as const satisfies RetentionCleanupResult;
+
 export const EXAMPLE_REPAIR_INSTRUCTION = {
   id: "repair_contract_example",
   jobId: EXAMPLE_JOB.id,
@@ -1589,5 +1736,7 @@ export const SHARED_CONTRACT_EXAMPLES = {
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,
+  retentionCleanupRequest: EXAMPLE_RETENTION_CLEANUP_REQUEST,
+  retentionCleanupResult: EXAMPLE_RETENTION_CLEANUP_RESULT,
   repairInstruction: EXAMPLE_REPAIR_INSTRUCTION
 } as const;
