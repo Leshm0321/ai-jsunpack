@@ -18,8 +18,11 @@ from uuid import uuid4
 
 from apps.api.app.models import (
     ArtifactRecord,
+    EvidenceRef,
     FailureClass,
     NetworkPolicy,
+    RepairInstruction,
+    ReviewRun,
     RunStatus,
     RuntimeCaptureSummary,
     RuntimeCollectionDiff,
@@ -708,6 +711,257 @@ class RuntimeCompareResult:
             *[artifact.id for artifact in self.screenshot_artifacts],
         ]
         return list(dict.fromkeys(ordered))
+
+
+@dataclass(frozen=True)
+class RuntimeCompareReviewGateResult:
+    enabled: bool
+    triggered: bool
+    review_artifact: ArtifactRecord | None
+    repair_artifact: ArtifactRecord | None
+    message: str
+
+    @property
+    def artifact_ids(self) -> list[str]:
+        return [
+            artifact.id
+            for artifact in (self.review_artifact, self.repair_artifact)
+            if artifact is not None
+        ]
+
+
+class RuntimeCompareReviewGate:
+    """Turns runtime comparison differences into review and repair evidence."""
+
+    def run(
+        self,
+        *,
+        job_id: str,
+        store,
+        comparison_artifacts: list[ArtifactRecord],
+        job_config: dict[str, Any] | None = None,
+        parent_artifact_ids: list[str] | None = None,
+    ) -> RuntimeCompareReviewGateResult:
+        policy = self._policy(job_config)
+        if not policy["enabled"]:
+            return RuntimeCompareReviewGateResult(
+                enabled=False,
+                triggered=False,
+                review_artifact=None,
+                repair_artifact=None,
+                message="Runtime compare review gate disabled by job configuration.",
+            )
+
+        store.update_status(job_id, "reviewing")
+        parents = parent_artifact_ids or [artifact.id for artifact in comparison_artifacts]
+        comparisons = [
+            (artifact, self._load_comparison(job_id=job_id, store=store, artifact=artifact))
+            for artifact in comparison_artifacts
+        ]
+        gate_observations = [
+            observation
+            for artifact, comparison in comparisons
+            for observation in self._gate_observations(artifact=artifact, comparison=comparison, policy=policy)
+        ]
+        if not comparisons:
+            gate_observations.append("No runtime comparison artifacts were available for review gate evaluation.")
+        triggered = bool(gate_observations)
+        evidence_refs = [
+            self._evidence_ref(artifact=artifact, comparison=comparison)
+            for artifact, comparison in comparisons
+        ]
+        repair_artifact = None
+        if triggered:
+            repair_instruction = RepairInstruction(
+                id=f"repair_{uuid4().hex[:12]}",
+                job_id=job_id,
+                attempt=1,
+                target_stage="runtime_compare",
+                failure_class="runtime_error",
+                input_artifact_ids=[artifact.id for artifact, _ in comparisons],
+                evidence_refs=evidence_refs,
+                actions=[],
+                status="planned",
+                risk_level="medium",
+                decision=(
+                    "Runtime comparison differences require Review/Fix handling before the "
+                    "reconstructed project can be treated as behaviorally equivalent. No "
+                    "deterministic runtime repair action was applied in this pass."
+                ),
+            )
+            repair_artifact = store.write_artifact(
+                job_id,
+                kind="repair_instruction",
+                stage="repairing",
+                filename="runtime-compare-repair-instruction.json",
+                content=repair_instruction.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+                content_type="application/json",
+                producer="worker.runtime_compare_review",
+                parent_artifact_ids=parents,
+                attempt=1,
+            )
+
+        decision = self._decision(
+            comparisons=comparisons,
+            gate_observations=gate_observations,
+            policy=policy,
+        )
+        review_run = ReviewRun(
+            id=f"review_{uuid4().hex[:12]}",
+            job_id=job_id,
+            attempt=0,
+            review_type="runtime_compare",
+            status="fail" if triggered else "pass",
+            decision=decision,
+            failure_class="runtime_error" if triggered else "none",
+            evidence_refs=evidence_refs,
+            repair_instruction_ids=[repair_artifact.id] if repair_artifact is not None else [],
+            logs_artifact_id=None,
+        )
+        review_parent_ids = [*parents]
+        if repair_artifact is not None:
+            review_parent_ids.append(repair_artifact.id)
+        review_artifact = store.write_artifact(
+            job_id,
+            kind="review_run",
+            stage="reviewing",
+            filename="runtime-compare-review.json",
+            content=review_run.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+            content_type="application/json",
+            producer="worker.runtime_compare_review",
+            parent_artifact_ids=review_parent_ids,
+        )
+        if triggered:
+            store.update_status(job_id, "repairing")
+
+        return RuntimeCompareReviewGateResult(
+            enabled=True,
+            triggered=triggered,
+            review_artifact=review_artifact,
+            repair_artifact=repair_artifact,
+            message=decision,
+        )
+
+    def _load_comparison(self, *, job_id: str, store, artifact: ArtifactRecord) -> RuntimeComparisonReport:
+        payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+        return RuntimeComparisonReport.model_validate(payload)
+
+    def _policy(self, job_config: dict[str, Any] | None) -> dict[str, Any]:
+        runtime_compare = job_config.get("runtimeCompare") if isinstance(job_config, dict) else None
+        if not isinstance(runtime_compare, dict) and isinstance(job_config, dict):
+            runtime_compare = job_config
+        review_gate = runtime_compare.get("reviewGate") if isinstance(runtime_compare, dict) else None
+        review_gate = review_gate if isinstance(review_gate, dict) else {}
+        return {
+            "enabled": self._bool_config(review_gate.get("enabled"), default=True),
+            "failOnDomChanged": self._bool_config(review_gate.get("failOnDomChanged"), default=True),
+            "failOnNetworkChanged": self._bool_config(review_gate.get("failOnNetworkChanged"), default=True),
+            "failOnConsoleChanged": self._bool_config(review_gate.get("failOnConsoleChanged"), default=True),
+            "failOnScreenshotChanged": self._bool_config(review_gate.get("failOnScreenshotChanged"), default=True),
+            "maxChangedPixelRatio": self._float_config(review_gate.get("maxChangedPixelRatio"), default=0.0),
+        }
+
+    def _gate_observations(
+        self,
+        *,
+        artifact: ArtifactRecord,
+        comparison: RuntimeComparisonReport,
+        policy: dict[str, Any],
+    ) -> list[str]:
+        differences = comparison.differences
+        scope = self._scope_label(comparison)
+        observations: list[str] = []
+        if comparison.status in {"fail", "retry"}:
+            observations.append(f"{scope}: runtime comparison status is {comparison.status}.")
+        if policy["failOnDomChanged"] and differences.dom_changed:
+            count = len(differences.dom_differences) or len(differences.changed_dom_fields)
+            observations.append(f"{scope}: DOM changed across {count} field(s).")
+        if policy["failOnNetworkChanged"] and differences.network_changed:
+            observations.append(
+                f"{scope}: network changed with "
+                f"{len(differences.original_only_requests)} original-only and "
+                f"{len(differences.reconstructed_only_requests)} reconstructed-only request(s)."
+            )
+        if policy["failOnConsoleChanged"] and differences.console_changed:
+            observations.append(
+                f"{scope}: console changed with "
+                f"{len(differences.original_only_console)} original-only and "
+                f"{len(differences.reconstructed_only_console)} reconstructed-only line(s)."
+            )
+        screenshot_reason = self._screenshot_gate_reason(differences, policy)
+        if screenshot_reason:
+            observations.append(f"{scope}: {screenshot_reason}")
+        return [f"{artifact.id} {observation}" for observation in observations]
+
+    def _screenshot_gate_reason(self, differences: RuntimeDifferenceSet, policy: dict[str, Any]) -> str | None:
+        if not policy["failOnScreenshotChanged"]:
+            return None
+        screenshot = differences.screenshot_diff
+        if screenshot.pixel_diff_status == "compared":
+            changed_ratio = screenshot.changed_pixel_ratio or 0.0
+            max_ratio = policy["maxChangedPixelRatio"]
+            if changed_ratio > max_ratio:
+                return f"screenshot pixel diff ratio {changed_ratio:.6f} exceeded {max_ratio:.6f}."
+            return None
+        if screenshot.changed is True:
+            reason = screenshot.reason or "screenshot hash or size changed while pixel diff was unavailable."
+            return f"screenshot changed without comparable pixel diff ({reason})"
+        return None
+
+    def _decision(
+        self,
+        *,
+        comparisons: list[tuple[ArtifactRecord, RuntimeComparisonReport]],
+        gate_observations: list[str],
+        policy: dict[str, Any],
+    ) -> str:
+        if not comparisons:
+            return "Runtime compare review gate could not find comparison evidence to evaluate."
+        if not gate_observations:
+            return (
+                "Runtime compare review gate passed across "
+                f"{len(comparisons)} comparison artifact(s); configured thresholds were not exceeded."
+            )
+        observations = "; ".join(gate_observations[:5])
+        if len(gate_observations) > 5:
+            observations += f"; plus {len(gate_observations) - 5} additional observation(s)"
+        return (
+            "Runtime compare review gate blocked automatic behavioral equivalence: "
+            f"{observations}. Policy: dom={policy['failOnDomChanged']}, "
+            f"network={policy['failOnNetworkChanged']}, console={policy['failOnConsoleChanged']}, "
+            f"screenshot={policy['failOnScreenshotChanged']}, "
+            f"maxChangedPixelRatio={policy['maxChangedPixelRatio']}."
+        )
+
+    def _evidence_ref(self, *, artifact: ArtifactRecord, comparison: RuntimeComparisonReport) -> EvidenceRef:
+        return EvidenceRef(
+            artifact_id=artifact.id,
+            label=f"Runtime comparison: {self._scope_label(comparison)}",
+            locator=f"artifact://{artifact.id}",
+            excerpt=self._comparison_excerpt(comparison),
+        )
+
+    def _comparison_excerpt(self, comparison: RuntimeComparisonReport) -> str:
+        differences = comparison.differences
+        return (
+            f"status={comparison.status}; dom={differences.dom_changed}; "
+            f"network={differences.network_changed}; console={differences.console_changed}; "
+            f"screenshot={differences.screenshot_changed}"
+        )
+
+    def _scope_label(self, comparison: RuntimeComparisonReport) -> str:
+        scope = comparison.differences.comparison_scope
+        viewport = scope.viewport
+        viewport_label = f"{viewport.name or 'viewport'} {viewport.width}x{viewport.height}" if viewport else "viewport unknown"
+        return f"{scope.scenario_name} / {viewport_label}"
+
+    def _bool_config(self, value: Any, *, default: bool) -> bool:
+        return value if isinstance(value, bool) else default
+
+    def _float_config(self, value: Any, *, default: float) -> float:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0.0, float(value))
+        return default
 
 
 class RuntimeCompareRunner(RuntimeSmokeRunner):

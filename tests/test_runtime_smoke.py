@@ -8,6 +8,7 @@ from apps.api.app.store import create_store
 from apps.worker.worker.runtime_smoke import (
     BrowserSmokeCapture,
     BrowserSmokeRequest,
+    RuntimeCompareReviewGate,
     RuntimeCompareRunner,
     RuntimeSmokeRunner,
     _encode_png_rgba,
@@ -303,6 +304,145 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                     {("load", "mobile"), ("load", "desktop"), ("body", "mobile"), ("body", "desktop")},
                 )
                 self.assertEqual([request.viewport.width for request in adapter.requests[:4]], [375, 375, 1365, 1365])
+            finally:
+                store.close()
+
+    def test_runtime_compare_review_gate_writes_review_and_repair_instruction_for_differences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                compare_result = RuntimeCompareRunner(browser_adapter=SequencedBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={"name": "gate scenario"},
+                )
+
+                gate_result = RuntimeCompareReviewGate().run(
+                    job_id=job.id,
+                    store=store,
+                    comparison_artifacts=compare_result.comparison_artifacts,
+                    parent_artifact_ids=compare_result.artifact_ids,
+                )
+
+                review_artifacts = store.list_artifacts(job.id, kind="review_run")
+                repair_artifacts = store.list_artifacts(job.id, kind="repair_instruction")
+                review_payload = json.loads(store.read_artifact(job.id, gate_result.review_artifact.id))
+                repair_payload = json.loads(store.read_artifact(job.id, gate_result.repair_artifact.id))
+
+                self.assertTrue(gate_result.enabled)
+                self.assertTrue(gate_result.triggered)
+                self.assertEqual(len(review_artifacts), 1)
+                self.assertEqual(len(repair_artifacts), 1)
+                self.assertEqual(review_payload["reviewType"], "runtime_compare")
+                self.assertEqual(review_payload["status"], "fail")
+                self.assertEqual(review_payload["failureClass"], "runtime_error")
+                self.assertEqual(review_payload["repairInstructionIds"], [gate_result.repair_artifact.id])
+                self.assertEqual(review_payload["evidenceRefs"][0]["artifactId"], compare_result.comparison_artifact.id)
+                self.assertIn("blocked automatic behavioral equivalence", review_payload["decision"])
+                self.assertEqual(repair_payload["targetStage"], "runtime_compare")
+                self.assertEqual(repair_payload["status"], "planned")
+                self.assertEqual(repair_payload["actions"], [])
+                self.assertEqual(repair_payload["inputArtifactIds"], [compare_result.comparison_artifact.id])
+            finally:
+                store.close()
+
+    def test_runtime_compare_review_gate_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                compare_result = RuntimeCompareRunner(browser_adapter=SequencedBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                )
+
+                gate_result = RuntimeCompareReviewGate().run(
+                    job_id=job.id,
+                    store=store,
+                    comparison_artifacts=compare_result.comparison_artifacts,
+                    job_config={"runtimeCompare": {"reviewGate": {"enabled": False}}},
+                    parent_artifact_ids=compare_result.artifact_ids,
+                )
+
+                self.assertFalse(gate_result.enabled)
+                self.assertFalse(gate_result.triggered)
+                self.assertEqual(store.list_artifacts(job.id, kind="review_run"), [])
+                self.assertEqual(store.list_artifacts(job.id, kind="repair_instruction"), [])
+            finally:
+                store.close()
+
+    def test_runtime_compare_review_gate_respects_pixel_ratio_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                compare_result = RuntimeCompareRunner(browser_adapter=PixelDiffBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={"name": "pixel threshold", "viewport": {"name": "tiny", "width": 2, "height": 1}},
+                )
+
+                gate_result = RuntimeCompareReviewGate().run(
+                    job_id=job.id,
+                    store=store,
+                    comparison_artifacts=compare_result.comparison_artifacts,
+                    job_config={
+                        "runtimeCompare": {
+                            "reviewGate": {
+                                "failOnDomChanged": False,
+                                "failOnNetworkChanged": False,
+                                "failOnConsoleChanged": False,
+                                "maxChangedPixelRatio": 0.5,
+                            }
+                        }
+                    },
+                    parent_artifact_ids=compare_result.artifact_ids,
+                )
+                review_payload = json.loads(store.read_artifact(job.id, gate_result.review_artifact.id))
+
+                self.assertTrue(gate_result.enabled)
+                self.assertFalse(gate_result.triggered)
+                self.assertEqual(review_payload["reviewType"], "runtime_compare")
+                self.assertEqual(review_payload["status"], "pass")
+                self.assertEqual(review_payload["repairInstructionIds"], [])
+                self.assertEqual(store.list_artifacts(job.id, kind="repair_instruction"), [])
             finally:
                 store.close()
 

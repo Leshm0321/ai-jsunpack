@@ -84,6 +84,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(any(event.status == "typechecking" for event in run.events))
                 self.assertTrue(any(event.status == "runtime_smoke" for event in run.events))
                 self.assertTrue(any(event.status == "runtime_compare" for event in run.events))
+                self.assertTrue(any(event.status == "reviewing" for event in run.events))
                 self.assertTrue(any(event.status == "packaging" for event in run.events))
                 self.assertEqual(run.events[-1].status, "completed_best_effort")
                 self.assertIsNotNone(persisted_job)
@@ -155,6 +156,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 typecheck_review_artifact, typecheck_review_payload = next(
                     (artifact, payload) for artifact, payload in review_payloads if payload["reviewType"] == "typecheck"
                 )
+                runtime_compare_review_artifact, runtime_compare_review_payload = next(
+                    (artifact, payload)
+                    for artifact, payload in review_payloads
+                    if payload["reviewType"] == "runtime_compare"
+                )
                 build_log_artifact, build_log_payload = next(
                     (artifact, payload) for artifact, payload in build_log_payloads if payload["reviewType"] == "build"
                 )
@@ -221,6 +227,13 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(typecheck_review_payload["logsArtifactId"], typecheck_log_artifact.id)
                 self.assertEqual(build_review_payload["evidenceRefs"][0]["artifactId"], build_artifact.id)
                 self.assertEqual(typecheck_review_payload["evidenceRefs"][0]["artifactId"], typecheck_artifact.id)
+                self.assertEqual(runtime_compare_review_payload["status"], "pass")
+                self.assertEqual(runtime_compare_review_payload["failureClass"], "none")
+                self.assertEqual(runtime_compare_review_payload["repairInstructionIds"], [])
+                self.assertEqual(
+                    runtime_compare_review_payload["evidenceRefs"][0]["artifactId"],
+                    artifact_by_kind["runtime_comparison"].id,
+                )
                 self.assertIn(generated_project_artifact.id, build_log_artifact.parent_artifact_ids)
                 self.assertIn(generated_project_artifact.id, typecheck_log_artifact.parent_artifact_ids)
                 self.assertIn(build_log_artifact.id, build_artifact.parent_artifact_ids)
@@ -252,6 +265,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(typecheck_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
                 self.assertIn(typecheck_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                self.assertIn(runtime_compare_review_artifact.id, artifact_by_kind["audit_report"].parent_artifact_ids)
                 audit_report = Path(artifact_by_kind["audit_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("# AI JS Unpack Audit Report", audit_report)
                 self.assertIn("completed_best_effort", audit_report)

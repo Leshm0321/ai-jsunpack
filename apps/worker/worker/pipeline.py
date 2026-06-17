@@ -9,7 +9,7 @@ from .agent_runtime import AgentRuntime, AgentRuntimeError, AgentRuntimeRequest
 from .build_validation import BuildValidationError, BuildValidationRunner
 from .core_bridge import CoreBridge, CoreBridgeError
 from .reconstruction import ReconstructionError, ReconstructionRunner
-from .runtime_smoke import RuntimeCompareRunner, RuntimeSmokeRunner
+from .runtime_smoke import RuntimeCompareReviewGate, RuntimeCompareRunner, RuntimeSmokeRunner
 from .packaging import PackagingError, PackagingRunner
 
 
@@ -84,6 +84,7 @@ class WorkerPipeline:
         build_validation_runner: BuildValidationRunner | None = None,
         runtime_smoke_runner: RuntimeSmokeRunner | None = None,
         runtime_compare_runner: RuntimeCompareRunner | None = None,
+        runtime_compare_review_gate: RuntimeCompareReviewGate | None = None,
         packaging_runner: PackagingRunner | None = None,
     ) -> None:
         self.core_bridge = core_bridge or CoreBridge()
@@ -96,6 +97,7 @@ class WorkerPipeline:
             timeout_ms=self.runtime_smoke_runner.timeout_ms,
             sandbox_runner=self.runtime_smoke_runner.sandbox_runner,
         )
+        self.runtime_compare_review_gate = runtime_compare_review_gate or RuntimeCompareReviewGate()
         self.packaging_runner = packaging_runner or PackagingRunner()
 
     def run(self, job_id: str, input_path: Path | str | None = None, store=None) -> PipelineRun:
@@ -204,12 +206,27 @@ class WorkerPipeline:
                 ],
             )
             run.transition("runtime_compare", runtime_compare_result.message)
+            runtime_compare_gate_result = self.runtime_compare_review_gate.run(
+                job_id=job_id,
+                store=store,
+                comparison_artifacts=runtime_compare_result.comparison_artifacts,
+                job_config=job.config,
+                parent_artifact_ids=runtime_compare_result.artifact_ids,
+            )
+            if runtime_compare_gate_result.enabled:
+                run.transition("reviewing", runtime_compare_gate_result.message)
+                if runtime_compare_gate_result.triggered:
+                    run.transition(
+                        "repairing",
+                        "Runtime compare review produced repair evidence for follow-up Review/Fix.",
+                    )
             packaging_parent_ids = [
                 *validation_parent_ids,
                 *build_validation_result.artifact_ids,
                 runtime_result.trace_artifact.id,
                 runtime_result.report_artifact.id,
                 *runtime_compare_result.artifact_ids,
+                *runtime_compare_gate_result.artifact_ids,
             ]
             if runtime_result.screenshot_artifact is not None:
                 packaging_parent_ids.append(runtime_result.screenshot_artifact.id)
