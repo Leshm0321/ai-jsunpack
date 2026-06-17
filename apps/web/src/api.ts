@@ -8,10 +8,12 @@ export interface JobSummary {
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
 const configuredUserId = import.meta.env.VITE_API_USER_ID?.trim();
 const configuredProjectId = import.meta.env.VITE_API_PROJECT_ID?.trim();
+const configuredAuthToken = import.meta.env.VITE_API_AUTH_TOKEN?.trim();
 
 export const API_BASE_URL = configuredBaseUrl || "http://127.0.0.1:8000";
 export const API_USER_ID = configuredUserId || "local-user";
 export const API_PROJECT_ID = configuredProjectId || "default";
+export const API_AUTH_TOKEN = configuredAuthToken || "";
 
 export async function createJob(cloudMode: CloudMode): Promise<JobSummary> {
   return requestJson<JobSummary>("/jobs", {
@@ -95,10 +97,7 @@ async function requestJson<T>(path: string, options: RequestInit = {}): Promise<
 }
 
 function accessHeaders(): Record<string, string> {
-  return {
-    "X-AI-JSUNPACK-USER-ID": API_USER_ID,
-    "X-AI-JSUNPACK-PROJECT-ID": API_PROJECT_ID
-  };
+  return API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {};
 }
 
 async function responseErrorMessage(response: Response): Promise<string> {

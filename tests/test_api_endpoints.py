@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.app import main as api_main
 from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
+from apps.api.app.auth import AUTH_SECRET_ENV, create_auth_token
 from apps.api.app.store import create_store
 
 
@@ -16,14 +18,12 @@ class ApiEndpointTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        self.access_headers = {
-            "X-AI-JSUNPACK-USER-ID": "owner",
-            "X-AI-JSUNPACK-PROJECT-ID": "proj",
-        }
-        self.other_access_headers = {
-            "X-AI-JSUNPACK-USER-ID": "other-owner",
-            "X-AI-JSUNPACK-PROJECT-ID": "proj",
-        }
+        self.auth_secret = "test-auth-secret"
+        self.original_auth_secret = os.environ.get(AUTH_SECRET_ENV)
+        os.environ[AUTH_SECRET_ENV] = self.auth_secret
+        self.access_headers = self.auth_headers("owner", {"proj": "owner"})
+        self.viewer_headers = self.auth_headers("viewer", {"proj": "viewer"})
+        self.other_access_headers = self.auth_headers("other-owner", {"other-proj": "owner"})
         self.store = create_store(
             database_url=f"sqlite:///{(self.root / 'metadata.db').as_posix()}",
             artifact_root=self.root / "artifacts",
@@ -35,7 +35,31 @@ class ApiEndpointTest(unittest.TestCase):
     def tearDown(self):
         api_main.store = self.original_store
         self.store.close()
+        if self.original_auth_secret is None:
+            os.environ.pop(AUTH_SECRET_ENV, None)
+        else:
+            os.environ[AUTH_SECRET_ENV] = self.original_auth_secret
         self.temp_dir.cleanup()
+
+    def auth_headers(
+        self,
+        subject: str,
+        projects: dict[str, str],
+        *,
+        kind: str = "user",
+        service_roles: list[str] | None = None,
+        ttl_seconds: int = 3600,
+        secret: str | None = None,
+    ) -> dict[str, str]:
+        token = create_auth_token(
+            subject=subject,
+            projects=projects,
+            kind=kind,
+            service_roles=service_roles,
+            ttl_seconds=ttl_seconds,
+            secret=secret or self.auth_secret,
+        )
+        return {"Authorization": f"Bearer {token}"}
 
     def test_create_upload_and_get_job_summary(self):
         created = self.client.post(
@@ -80,10 +104,11 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(fetched_body["artifacts"][0]["contentType"], "application/zip")
 
     def test_missing_job_returns_404(self):
-        fetched = self.client.get("/jobs/job_missing")
+        fetched = self.client.get("/jobs/job_missing", headers=self.access_headers)
         uploaded = self.client.post(
             "/jobs/job_missing/upload",
             files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=self.access_headers,
         )
 
         self.assertEqual(fetched.status_code, 404)
@@ -406,15 +431,16 @@ class ApiEndpointTest(unittest.TestCase):
 
         latest = self.client.get(f"/jobs/{job_id}/runtime-validations/latest", headers=self.access_headers)
         downloaded = self.client.get(f"/jobs/{job_id}/artifacts/artifact_missing/download", headers=self.access_headers)
-        missing_inferences = self.client.get("/jobs/job_missing/inference-records")
-        missing_reviews = self.client.get("/jobs/job_missing/review-runs")
-        missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls")
-        missing_audit = self.client.get("/jobs/job_missing/reports/audit")
-        missing_package = self.client.get("/jobs/job_missing/result-package")
-        missing_rerun = self.client.post("/jobs/job_missing/rerun")
+        missing_inferences = self.client.get("/jobs/job_missing/inference-records", headers=self.access_headers)
+        missing_reviews = self.client.get("/jobs/job_missing/review-runs", headers=self.access_headers)
+        missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls", headers=self.access_headers)
+        missing_audit = self.client.get("/jobs/job_missing/reports/audit", headers=self.access_headers)
+        missing_package = self.client.get("/jobs/job_missing/result-package", headers=self.access_headers)
+        missing_rerun = self.client.post("/jobs/job_missing/rerun", headers=self.access_headers)
         missing_cleanup = self.client.post(
             "/jobs/job_missing/retention/cleanup",
             json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
+            headers=self.access_headers,
         )
 
         self.assertEqual(latest.status_code, 404)
@@ -469,7 +495,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["access-control-allow-origin"], "http://127.0.0.1:5173")
 
-    def test_job_access_requires_matching_owner_and_project_headers(self):
+    def test_job_access_requires_project_membership_and_owner_matches_user_create(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
@@ -486,7 +512,7 @@ class ApiEndpointTest(unittest.TestCase):
         create_mismatched_owner = self.client.post(
             "/jobs",
             json={"projectId": "proj", "ownerId": "owner"},
-            headers=self.other_access_headers,
+            headers=self.auth_headers("other-owner", {"proj": "owner"}),
         )
         fetched = self.client.get(f"/jobs/{job_id}", headers=self.other_access_headers)
         uploaded = self.client.post(
@@ -522,20 +548,82 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(runtime.status_code, 403)
         self.assertEqual(cleanup.status_code, 403)
 
-    def test_create_allows_missing_project_header_but_read_uses_project_boundary(self):
+    def test_authentication_rejects_missing_bad_and_expired_tokens(self):
+        missing = self.client.get("/jobs/job_missing")
+        bad_signature = self.client.get(
+            "/jobs/job_missing",
+            headers=self.auth_headers("owner", {"proj": "owner"}, secret="wrong-secret"),
+        )
+        expired = self.client.get(
+            "/jobs/job_missing",
+            headers=self.auth_headers("owner", {"proj": "owner"}, ttl_seconds=-60),
+        )
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(bad_signature.status_code, 401)
+        self.assertEqual(expired.status_code, 401)
+
+    def test_viewer_can_read_but_cannot_write_job_resources(self):
         created = self.client.post(
             "/jobs",
             json={"projectId": "proj", "ownerId": "owner"},
-            headers={"X-AI-JSUNPACK-USER-ID": "owner"},
+            headers=self.access_headers,
         )
         self.assertEqual(created.status_code, 200)
         job_id = created.json()["job"]["id"]
 
-        missing_project = self.client.get(f"/jobs/{job_id}", headers={"X-AI-JSUNPACK-USER-ID": "owner"})
-        matching_project = self.client.get(f"/jobs/{job_id}", headers=self.access_headers)
+        fetched = self.client.get(f"/jobs/{job_id}", headers=self.viewer_headers)
+        uploaded = self.client.post(
+            f"/jobs/{job_id}/upload",
+            files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=self.viewer_headers,
+        )
+        rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.viewer_headers)
+        cleanup = self.client.post(
+            f"/jobs/{job_id}/retention/cleanup",
+            json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
+            headers=self.viewer_headers,
+        )
 
-        self.assertEqual(missing_project.status_code, 403)
-        self.assertEqual(matching_project.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(uploaded.status_code, 403)
+        self.assertEqual(rerun.status_code, 403)
+        self.assertEqual(cleanup.status_code, 403)
+
+    def test_service_token_requires_service_role_for_project_access(self):
+        service_without_role = self.auth_headers(
+            "worker-service",
+            {"proj": "maintainer"},
+            kind="service",
+        )
+        service_with_role = self.auth_headers(
+            "worker-service",
+            {"proj": "maintainer"},
+            kind="service",
+            service_roles=["worker"],
+        )
+
+        rejected = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=service_without_role,
+        )
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=service_with_role,
+        )
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(created.status_code, 200)
+
+        job_id = created.json()["job"]["id"]
+        uploaded = self.client.post(
+            f"/jobs/{job_id}/upload",
+            files={"file": ("dist.zip", b"zip-bytes", "application/zip")},
+            headers=service_with_role,
+        )
+
+        self.assertEqual(uploaded.status_code, 200)
 
 
 if __name__ == "__main__":

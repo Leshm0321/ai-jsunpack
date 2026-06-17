@@ -3,10 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
+from .auth import AccessContext, ProjectRole, SERVICE_ROLE_WORKER, require_access
 from .models import (
     ArtifactRecord,
     CreateJobRequest,
@@ -25,8 +26,6 @@ app = FastAPI(title="AI JS Unpack API", version="0.1.0")
 
 DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"]
 CORS_ORIGINS_ENV = "AI_JSUNPACK_CORS_ORIGINS"
-LOCAL_USER_ID = "local-user"
-LOCAL_PROJECT_ID = "default"
 
 
 def configured_cors_origins() -> list[str]:
@@ -53,10 +52,8 @@ def health() -> dict[str, str]:
 @app.post("/jobs", response_model=JobSummary)
 def create_job(
     request: CreateJobRequest,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> JobSummary:
-    access = access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id)
     require_create_access(request, access)
     job = store.create_job(request)
     return JobSummary(job=job, artifacts=[])
@@ -66,10 +63,9 @@ def create_job(
 async def upload_source(
     job_id: str,
     file: UploadFile = File(...),
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> JobSummary:
-    job = require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    job = require_job(job_id, access, minimum_role="maintainer")
 
     content = await file.read()
     store.write_artifact(
@@ -88,20 +84,18 @@ async def upload_source(
 @app.get("/jobs/{job_id}", response_model=JobSummary)
 def get_job(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> JobSummary:
-    job = require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    job = require_job(job_id, access)
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
 
 @app.get("/jobs/{job_id}/runtime-validations", response_model=list[RuntimeValidationRun])
 def list_runtime_validations(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> list[RuntimeValidationRun]:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind="runtime_validation")
     return [runtime_validation_from_artifact(job_id, artifact) for artifact in artifacts]
 
@@ -109,10 +103,9 @@ def list_runtime_validations(
 @app.get("/jobs/{job_id}/inference-records", response_model=list[InferenceRecord])
 def list_inference_records(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> list[InferenceRecord]:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind="inference_record")
     return [inference_record_from_artifact(job_id, artifact) for artifact in artifacts]
 
@@ -120,10 +113,9 @@ def list_inference_records(
 @app.get("/jobs/{job_id}/review-runs", response_model=list[ReviewRun])
 def list_review_runs(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> list[ReviewRun]:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind="review_run")
     return [review_run_from_artifact(job_id, artifact) for artifact in artifacts]
 
@@ -131,10 +123,9 @@ def list_review_runs(
 @app.get("/jobs/{job_id}/tool-calls", response_model=list[ToolCall])
 def list_tool_calls(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> list[ToolCall]:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind="tool_call")
     return [tool_call_from_artifact(job_id, artifact) for artifact in artifacts]
 
@@ -142,10 +133,9 @@ def list_tool_calls(
 @app.get("/jobs/{job_id}/runtime-validations/latest", response_model=RuntimeValidationRun)
 def get_latest_runtime_validation(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> RuntimeValidationRun:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind="runtime_validation")
     validations = [runtime_validation_from_artifact(job_id, artifact) for artifact in artifacts]
     if not validations:
@@ -156,14 +146,13 @@ def get_latest_runtime_validation(
 @app.get("/jobs/{job_id}/reports/audit")
 def download_latest_audit_report(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> FileResponse:
     artifact = latest_artifact_or_404(
         job_id,
         "audit_report",
         "Audit report not found",
-        access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id),
+        access,
     )
     return file_response_for_artifact(artifact, filename="audit-report.md")
 
@@ -171,14 +160,13 @@ def download_latest_audit_report(
 @app.get("/jobs/{job_id}/result-package")
 def download_latest_result_package(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> FileResponse:
     artifact = latest_artifact_or_404(
         job_id,
         "result_package",
         "Result package not found",
-        access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id),
+        access,
     )
     return file_response_for_artifact(artifact, filename="result-package.zip")
 
@@ -186,10 +174,9 @@ def download_latest_result_package(
 @app.post("/jobs/{job_id}/rerun", response_model=JobSummary)
 def rerun_job(
     job_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> JobSummary:
-    source_job = require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    source_job = require_job(job_id, access, minimum_role="maintainer")
     if source_job.input_artifact_id is None:
         raise HTTPException(status_code=400, detail="Job has no source input artifact to rerun")
 
@@ -228,10 +215,9 @@ def rerun_job(
 def cleanup_retention(
     job_id: str,
     request: RetentionCleanupRequest,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> RetentionCleanupResult:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access, minimum_role="maintainer")
     try:
         return store.cleanup_retention(job_id, request)
     except ValueError as error:
@@ -244,17 +230,16 @@ def cleanup_retention(
 def download_artifact(
     job_id: str,
     artifact_id: str,
-    x_ai_jsunpack_user_id: str | None = Header(default=None),
-    x_ai_jsunpack_project_id: str | None = Header(default=None),
+    access: AccessContext = Depends(require_access),
 ) -> FileResponse:
-    require_job(job_id, access_context(x_ai_jsunpack_user_id, x_ai_jsunpack_project_id))
+    require_job(job_id, access)
     artifact = store.get_artifact(job_id, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return file_response_for_artifact(artifact)
 
 
-def latest_artifact_or_404(job_id: str, kind: str, detail: str, access: dict[str, str]) -> ArtifactRecord:
+def latest_artifact_or_404(job_id: str, kind: str, detail: str, access: AccessContext) -> ArtifactRecord:
     require_job(job_id, access)
     artifacts = store.list_artifacts(job_id, kind=kind)
     if not artifacts:
@@ -287,35 +272,25 @@ def source_filename(source_artifact: ArtifactRecord) -> str:
     return f"rerun-source-input{suffix}" if suffix else "rerun-source-input"
 
 
-def access_context(user_id: str | None, project_id: str | None) -> dict[str, str]:
-    return {
-        "user_id": normalize_header_value(user_id) or LOCAL_USER_ID,
-        "project_id": normalize_header_value(project_id) or "",
-    }
-
-
-def normalize_header_value(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def require_create_access(request: CreateJobRequest, access: dict[str, str]) -> None:
-    if request.owner_id != access["user_id"]:
+def require_create_access(request: CreateJobRequest, access: AccessContext) -> None:
+    require_project_role(access, request.project_id, "maintainer")
+    if access.kind == "user" and request.owner_id != access.subject:
         raise HTTPException(status_code=403, detail="Caller is not allowed to create jobs for this owner")
-    if access["project_id"] and request.project_id != access["project_id"]:
-        raise HTTPException(status_code=403, detail="Caller is not allowed to create jobs for this project")
 
 
-def require_job(job_id: str, access: dict[str, str]) -> JobRecord:
+def require_job(job_id: str, access: AccessContext, *, minimum_role: ProjectRole = "viewer") -> JobRecord:
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    project_id = access["project_id"] or LOCAL_PROJECT_ID
-    if job.owner_id != access["user_id"] or job.project_id != project_id:
-        raise HTTPException(status_code=403, detail="Caller is not allowed to access this job")
+    require_project_role(access, job.project_id, minimum_role)
     return job
+
+
+def require_project_role(access: AccessContext, project_id: str, minimum_role: ProjectRole) -> None:
+    if access.kind == "service" and not access.has_service_role(SERVICE_ROLE_WORKER):
+        raise HTTPException(status_code=403, detail="Service credential is not allowed to access this API")
+    if not access.has_project_role(project_id, minimum_role):
+        raise HTTPException(status_code=403, detail="Caller is not allowed to access this project")
 
 
 def runtime_validation_from_artifact(job_id: str, artifact: ArtifactRecord) -> RuntimeValidationRun:
