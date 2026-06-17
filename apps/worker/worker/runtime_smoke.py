@@ -49,8 +49,41 @@ class PngImage:
     rgba: bytes
 
 
+@dataclass(frozen=True)
+class RuntimeImageDiffPolicy:
+    pixel_threshold: int = 0
+    threshold_mode: str = "per_channel_rgba"
+    max_changed_pixel_ratio: float = 0.0
+
+
+@dataclass(frozen=True)
+class RuntimeCompareMatrixItem:
+    scenario: RuntimeScenario
+    image_diff_policy: RuntimeImageDiffPolicy
+    requested_index: int
+
+
 class PngDecodeError(ValueError):
     pass
+
+
+def _detect_image_format(content: bytes | None) -> str | None:
+    if content is None:
+        return None
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "webp"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if content.startswith(b"BM"):
+        return "bmp"
+    prefix = content[:128].lstrip().lower()
+    if prefix.startswith(b"<svg") or prefix.startswith(b"<?xml") and b"<svg" in prefix:
+        return "svg"
+    return "unknown"
 
 
 def _decode_png_rgba(content: bytes) -> PngImage:
@@ -84,10 +117,11 @@ def _decode_png_rgba(content: bytes) -> PngImage:
 
     if width < 1 or height < 1 or not idat_chunks:
         raise PngDecodeError("PNG is missing image metadata or pixel data.")
-    if bit_depth != 8 or color_type not in {2, 6} or compression != 0 or filter_method != 0 or interlace != 0:
-        raise PngDecodeError("PNG pixel diff supports only 8-bit non-interlaced RGB/RGBA screenshots.")
+    if bit_depth != 8 or color_type not in {0, 2, 4, 6} or compression != 0 or filter_method != 0 or interlace != 0:
+        raise PngDecodeError("PNG pixel diff supports only 8-bit non-interlaced grayscale/RGB/RGBA screenshots.")
 
-    channels = 4 if color_type == 6 else 3
+    channels_by_color_type = {0: 1, 2: 3, 4: 2, 6: 4}
+    channels = channels_by_color_type[color_type]
     stride = width * channels
     try:
         raw = zlib.decompress(b"".join(idat_chunks))
@@ -114,10 +148,21 @@ def _decode_png_rgba(content: bytes) -> PngImage:
     out = 0
     for row in rows:
         for index in range(0, len(row), channels):
-            rgba[out] = row[index]
-            rgba[out + 1] = row[index + 1]
-            rgba[out + 2] = row[index + 2]
-            rgba[out + 3] = row[index + 3] if channels == 4 else 255
+            if color_type == 0:
+                rgba[out] = row[index]
+                rgba[out + 1] = row[index]
+                rgba[out + 2] = row[index]
+                rgba[out + 3] = 255
+            elif color_type == 4:
+                rgba[out] = row[index]
+                rgba[out + 1] = row[index]
+                rgba[out + 2] = row[index]
+                rgba[out + 3] = row[index + 1]
+            else:
+                rgba[out] = row[index]
+                rgba[out + 1] = row[index + 1]
+                rgba[out + 2] = row[index + 2]
+                rgba[out + 3] = row[index + 3] if color_type == 6 else 255
             out += 4
     return PngImage(width=width, height=height, rgba=bytes(rgba))
 
@@ -852,13 +897,16 @@ class RuntimeCompareReviewGate:
             runtime_compare = job_config
         review_gate = runtime_compare.get("reviewGate") if isinstance(runtime_compare, dict) else None
         review_gate = review_gate if isinstance(review_gate, dict) else {}
+        image_diff = runtime_compare.get("imageDiff") if isinstance(runtime_compare, dict) else None
+        image_diff = image_diff if isinstance(image_diff, dict) else {}
+        default_ratio = self._float_config(image_diff.get("maxChangedPixelRatio"), default=0.0)
         return {
             "enabled": self._bool_config(review_gate.get("enabled"), default=True),
             "failOnDomChanged": self._bool_config(review_gate.get("failOnDomChanged"), default=True),
             "failOnNetworkChanged": self._bool_config(review_gate.get("failOnNetworkChanged"), default=True),
             "failOnConsoleChanged": self._bool_config(review_gate.get("failOnConsoleChanged"), default=True),
             "failOnScreenshotChanged": self._bool_config(review_gate.get("failOnScreenshotChanged"), default=True),
-            "maxChangedPixelRatio": self._float_config(review_gate.get("maxChangedPixelRatio"), default=0.0),
+            "maxChangedPixelRatio": self._float_config(review_gate.get("maxChangedPixelRatio"), default=default_ratio),
         }
 
     def _gate_observations(
@@ -977,26 +1025,38 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids or []
         store.update_status(job_id, "runtime_compare")
-        matrix = self._scenario_matrix_from_config(job_id=job_id, config=scenario_config)
+        matrix, matrix_plan = self._scenario_matrix_from_config(job_id=job_id, config=scenario_config)
+        matrix_trace_artifact = self._write_matrix_trace_if_pruned(
+            job_id=job_id,
+            store=store,
+            parent_artifact_ids=parents,
+            matrix_plan=matrix_plan,
+        )
+        matrix_limitation = self._matrix_limitation(matrix_plan)
+        run_parent_ids = [*parents, *([matrix_trace_artifact.id] if matrix_trace_artifact else [])]
         results = [
             self._run_single_compare(
                 job_id=job_id,
                 store=store,
                 original_input_path=original_input_path,
                 reconstructed_input_path=reconstructed_input_path,
-                scenario=scenario,
-                pixel_threshold=pixel_threshold,
+                scenario=item.scenario,
+                image_diff_policy=item.image_diff_policy,
                 matrix_index=index,
-                parent_artifact_ids=parents,
+                matrix_limitation=matrix_limitation,
+                parent_artifact_ids=run_parent_ids,
             )
-            for index, (scenario, pixel_threshold) in enumerate(matrix)
+            for index, item in enumerate(matrix)
         ]
 
         primary = results[0]
         validations = [result.validation for result in results]
         scenario_artifacts = [result.scenario_artifact for result in results]
         comparison_artifacts = [result.comparison_artifact for result in results]
-        trace_artifacts = [result.trace_artifact for result in results]
+        trace_artifacts = [
+            *([matrix_trace_artifact] if matrix_trace_artifact else []),
+            *[result.trace_artifact for result in results],
+        ]
         report_artifacts = [result.report_artifact for result in results]
         screenshot_artifacts = [artifact for result in results for artifact in result.screenshot_artifacts]
         statuses = {validation.status for validation in validations}
@@ -1027,8 +1087,9 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         original_input_path: Path | str | None,
         reconstructed_input_path: Path | str | None,
         scenario: RuntimeScenario,
-        pixel_threshold: int,
+        image_diff_policy: RuntimeImageDiffPolicy,
         matrix_index: int,
+        matrix_limitation: str | None,
         parent_artifact_ids: list[str],
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids
@@ -1077,7 +1138,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             reconstructed_size=reconstructed["screenshot_size"],
             original_bytes=original["screenshot_bytes"],
             reconstructed_bytes=reconstructed["screenshot_bytes"],
-            pixel_threshold=pixel_threshold,
+            image_diff_policy=image_diff_policy,
             filename_suffix=artifact_suffix,
             parent_artifact_ids=[
                 *parents,
@@ -1094,6 +1155,11 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             "scenarioArtifactId": scenario_artifact.id,
             "scenarioName": scenario.name,
             "viewport": scenario.viewport.model_dump(by_alias=True) if scenario.viewport else None,
+            "imageDiffPolicy": {
+                "pixelThreshold": image_diff_policy.pixel_threshold,
+                "thresholdMode": image_diff_policy.threshold_mode,
+                "maxChangedPixelRatio": image_diff_policy.max_changed_pixel_ratio,
+            },
             "original": original["summary"].model_dump(by_alias=True),
             "reconstructed": reconstructed["summary"].model_dump(by_alias=True),
         }
@@ -1126,7 +1192,11 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             differences=differences,
             screenshot_artifact_ids=[artifact.id for artifact in screenshot_artifacts],
             trace_artifact_ids=[trace_artifact.id],
-            limitations=[*original["summary"].limitations, *reconstructed["summary"].limitations],
+            limitations=[
+                *original["summary"].limitations,
+                *reconstructed["summary"].limitations,
+                *([matrix_limitation] if matrix_limitation else []),
+            ],
         )
         comparison_artifact = store.write_artifact(
             job_id,
@@ -1189,12 +1259,20 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             message=f"Runtime compare completed with status {status}.",
         )
 
-    def _scenario_matrix_from_config(self, *, job_id: str, config: dict[str, Any] | None) -> list[tuple[RuntimeScenario, int]]:
+    def _scenario_matrix_from_config(
+        self,
+        *,
+        job_id: str,
+        config: dict[str, Any] | None,
+    ) -> tuple[list[RuntimeCompareMatrixItem], dict[str, Any]]:
         payload = dict(config or {})
         is_matrix = any(key in payload for key in ("runtimeCompare", "runtimeScenario", "scenarios", "runtimeScenarios", "viewports", "viewportMatrix"))
         if "runtimeCompare" in payload and isinstance(payload["runtimeCompare"], dict):
             payload = dict(payload["runtimeCompare"])
 
+        max_runs = self._max_matrix_runs_from_config(payload)
+        selection = self._matrix_selection_from_config(payload)
+        requested_matrix: list[RuntimeCompareMatrixItem] = []
         if is_matrix:
             scenario_payloads = payload.get("scenarios", payload.get("runtimeScenarios"))
             if scenario_payloads is None and isinstance(payload.get("runtimeScenario"), dict):
@@ -1210,22 +1288,54 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 payload.get("viewports", payload.get("viewportMatrix", payload.get("viewport"))),
                 default=True,
             )
-            global_threshold = self._pixel_threshold_from_config(payload, default=0)
-            matrix: list[tuple[RuntimeScenario, int]] = []
+            global_policy = self._image_diff_policy_from_config(payload)
             for scenario_payload in scenario_payloads:
                 scenario_dict = dict(scenario_payload) if isinstance(scenario_payload, dict) else {}
                 scenario_viewports = self._viewports_from_config(
                     scenario_dict.get("viewports", scenario_dict.get("viewportMatrix", scenario_dict.get("viewport"))),
                     default=False,
                 ) or global_viewports
-                threshold = self._pixel_threshold_from_config(scenario_dict, default=global_threshold)
+                policy = self._image_diff_policy_from_config(scenario_dict, default=global_policy)
                 for viewport in scenario_viewports:
                     scenario_config = dict(scenario_dict)
                     scenario_config["viewport"] = viewport.model_dump(by_alias=True)
-                    matrix.append((self._scenario_from_config(job_id=job_id, config=scenario_config), threshold))
-            return matrix or [(self._scenario_from_config(job_id=job_id, config=None), 0)]
+                    requested_matrix.append(
+                        RuntimeCompareMatrixItem(
+                            scenario=self._scenario_from_config(job_id=job_id, config=scenario_config),
+                            image_diff_policy=policy,
+                            requested_index=len(requested_matrix),
+                        )
+                    )
+        else:
+            requested_matrix.append(
+                RuntimeCompareMatrixItem(
+                    scenario=self._scenario_from_config(job_id=job_id, config=payload),
+                    image_diff_policy=self._image_diff_policy_from_config(payload),
+                    requested_index=0,
+                )
+            )
 
-        return [(self._scenario_from_config(job_id=job_id, config=payload), self._pixel_threshold_from_config(payload, default=0))]
+        if not requested_matrix:
+            requested_matrix = [
+                RuntimeCompareMatrixItem(
+                    scenario=self._scenario_from_config(job_id=job_id, config=None),
+                    image_diff_policy=RuntimeImageDiffPolicy(),
+                    requested_index=0,
+                )
+            ]
+        selected_matrix = self._select_matrix_runs(requested_matrix, max_runs=max_runs, selection=selection)
+        selected_indexes = {item.requested_index for item in selected_matrix}
+        omitted_matrix = [item for item in requested_matrix if item.requested_index not in selected_indexes]
+        matrix_plan = {
+            "requestedRunCount": len(requested_matrix),
+            "selectedRunCount": len(selected_matrix),
+            "omittedRunCount": len(omitted_matrix),
+            "maxMatrixRuns": max_runs,
+            "matrixSelection": selection,
+            "selectedRuns": [self._matrix_item_summary(item) for item in selected_matrix],
+            "omittedRuns": [self._matrix_item_summary(item) for item in omitted_matrix],
+        }
+        return selected_matrix, matrix_plan
 
     def _viewports_from_config(self, value: Any, *, default: bool) -> list[RuntimeViewport]:
         if value is None:
@@ -1237,12 +1347,137 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             return viewports or ([RuntimeViewport(**DEFAULT_VIEWPORT)] if default else [])
         return [RuntimeViewport(**DEFAULT_VIEWPORT)] if default else []
 
-    def _pixel_threshold_from_config(self, payload: dict[str, Any], *, default: int) -> int:
-        value = payload.get("pixelDiffThreshold", payload.get("pixelThreshold", default))
+    def _image_diff_policy_from_config(
+        self,
+        payload: dict[str, Any],
+        *,
+        default: RuntimeImageDiffPolicy | None = None,
+    ) -> RuntimeImageDiffPolicy:
+        fallback = default or RuntimeImageDiffPolicy()
+        image_diff = payload.get("imageDiff") if isinstance(payload, dict) else None
+        image_diff = image_diff if isinstance(image_diff, dict) else {}
+        pixel_threshold = self._int_config(
+            self._first_config(
+                image_diff,
+                ("channelThreshold", "pixelThreshold", "pixelDiffThreshold"),
+                self._first_config(payload, ("pixelDiffThreshold", "pixelThreshold"), fallback.pixel_threshold),
+            ),
+            default=fallback.pixel_threshold,
+        )
+        return RuntimeImageDiffPolicy(
+            pixel_threshold=pixel_threshold,
+            threshold_mode=self._threshold_mode_from_config(image_diff.get("thresholdMode"), default=fallback.threshold_mode),
+            max_changed_pixel_ratio=self._float_config(
+                image_diff.get("maxChangedPixelRatio"),
+                default=fallback.max_changed_pixel_ratio,
+            ),
+        )
+
+    def _first_config(self, payload: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+        for key in keys:
+            if key in payload:
+                return payload[key]
+        return default
+
+    def _threshold_mode_from_config(self, value: Any, *, default: str) -> str:
+        if value == "per_channel_rgba":
+            return value
+        return default
+
+    def _int_config(self, value: Any, *, default: int) -> int:
         try:
+            if isinstance(value, bool):
+                return default
             return max(0, int(value))
         except (TypeError, ValueError):
             return default
+
+    def _float_config(self, value: Any, *, default: float) -> float:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0.0, float(value))
+        return default
+
+    def _max_matrix_runs_from_config(self, payload: dict[str, Any]) -> int:
+        return max(1, self._int_config(payload.get("maxMatrixRuns", payload.get("max_matrix_runs", 24)), default=24))
+
+    def _matrix_selection_from_config(self, payload: dict[str, Any]) -> str:
+        value = payload.get("matrixSelection", payload.get("matrix_selection", "balanced"))
+        return value if value in {"balanced", "ordered"} else "balanced"
+
+    def _select_matrix_runs(
+        self,
+        matrix: list[RuntimeCompareMatrixItem],
+        *,
+        max_runs: int,
+        selection: str,
+    ) -> list[RuntimeCompareMatrixItem]:
+        if len(matrix) <= max_runs:
+            return matrix
+        if selection == "ordered":
+            return matrix[:max_runs]
+        if max_runs == 1:
+            return [matrix[0]]
+        selected_indexes = {
+            round(position * (len(matrix) - 1) / (max_runs - 1))
+            for position in range(max_runs)
+        }
+        for index in range(len(matrix)):
+            if len(selected_indexes) >= max_runs:
+                break
+            selected_indexes.add(index)
+        return [matrix[index] for index in sorted(selected_indexes)[:max_runs]]
+
+    def _write_matrix_trace_if_pruned(
+        self,
+        *,
+        job_id: str,
+        store,
+        parent_artifact_ids: list[str],
+        matrix_plan: dict[str, Any],
+    ) -> ArtifactRecord | None:
+        if matrix_plan["omittedRunCount"] <= 0:
+            return None
+        payload = {
+            "kind": "runtime_trace",
+            "jobId": job_id,
+            "target": "runtime_compare_matrix",
+            **matrix_plan,
+        }
+        return store.write_artifact(
+            job_id,
+            kind="runtime_trace",
+            stage="runtime_compare",
+            filename="runtime-compare-matrix.json",
+            content=self._json_bytes(payload),
+            content_type="application/json",
+            producer="worker.runtime_compare",
+            parent_artifact_ids=parent_artifact_ids,
+        )
+
+    def _matrix_limitation(self, matrix_plan: dict[str, Any]) -> str | None:
+        if matrix_plan["omittedRunCount"] <= 0:
+            return None
+        return (
+            "Runtime compare matrix was pruned from "
+            f"{matrix_plan['requestedRunCount']} to {matrix_plan['selectedRunCount']} run(s) "
+            f"by maxMatrixRuns={matrix_plan['maxMatrixRuns']} using "
+            f"{matrix_plan['matrixSelection']} selection; "
+            f"{matrix_plan['omittedRunCount']} run(s) were omitted."
+        )
+
+    def _matrix_item_summary(self, item: RuntimeCompareMatrixItem) -> dict[str, Any]:
+        viewport = item.scenario.viewport
+        return {
+            "requestedIndex": item.requested_index,
+            "scenarioId": item.scenario.id,
+            "scenarioName": item.scenario.name,
+            "viewport": viewport.model_dump(by_alias=True) if viewport else None,
+            "imageDiffPolicy": {
+                "pixelThreshold": item.image_diff_policy.pixel_threshold,
+                "thresholdMode": item.image_diff_policy.threshold_mode,
+                "maxChangedPixelRatio": item.image_diff_policy.max_changed_pixel_ratio,
+            },
+        }
 
     def _scenario_from_config(self, *, job_id: str, config: dict[str, Any] | None) -> RuntimeScenario:
         payload = dict(config or {})
@@ -1428,7 +1663,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         reconstructed_size: int | None,
         original_bytes: bytes | None,
         reconstructed_bytes: bytes | None,
-        pixel_threshold: int,
+        image_diff_policy: RuntimeImageDiffPolicy,
         filename_suffix: str,
         parent_artifact_ids: list[str],
     ) -> tuple[RuntimeScreenshotDiff, ArtifactRecord | None]:
@@ -1437,6 +1672,8 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             if original_hash is None or reconstructed_hash is None
             else original_hash != reconstructed_hash
         )
+        original_format = _detect_image_format(original_bytes)
+        reconstructed_format = _detect_image_format(reconstructed_bytes)
         if original_bytes is None or reconstructed_bytes is None:
             return (
                 RuntimeScreenshotDiff(
@@ -1445,9 +1682,35 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     reconstructed_hash=reconstructed_hash,
                     original_size_bytes=original_size,
                     reconstructed_size_bytes=reconstructed_size,
+                    original_format=original_format,
+                    reconstructed_format=reconstructed_format,
                     pixel_diff_status="unavailable",
-                    threshold=pixel_threshold,
+                    threshold=image_diff_policy.pixel_threshold,
+                    threshold_mode=image_diff_policy.threshold_mode,
+                    max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
                     reason="One or both runtime comparison screenshots were unavailable.",
+                ),
+                None,
+            )
+        if original_format != "png" or reconstructed_format != "png":
+            return (
+                RuntimeScreenshotDiff(
+                    changed=changed if changed is not None else hash_changed,
+                    original_hash=original_hash,
+                    reconstructed_hash=reconstructed_hash,
+                    original_size_bytes=original_size,
+                    reconstructed_size_bytes=reconstructed_size,
+                    original_format=original_format,
+                    reconstructed_format=reconstructed_format,
+                    pixel_diff_status="unavailable",
+                    threshold=image_diff_policy.pixel_threshold,
+                    threshold_mode=image_diff_policy.threshold_mode,
+                    max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
+                    reason=(
+                        "Runtime comparison pixel diff currently supports PNG screenshots only; "
+                        f"detected original={original_format or 'missing'} and "
+                        f"reconstructed={reconstructed_format or 'missing'}."
+                    ),
                 ),
                 None,
             )
@@ -1463,8 +1726,12 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     reconstructed_hash=reconstructed_hash,
                     original_size_bytes=original_size,
                     reconstructed_size_bytes=reconstructed_size,
+                    original_format=original_format,
+                    reconstructed_format=reconstructed_format,
                     pixel_diff_status="unavailable",
-                    threshold=pixel_threshold,
+                    threshold=image_diff_policy.pixel_threshold,
+                    threshold_mode=image_diff_policy.threshold_mode,
+                    max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
                     reason=str(error),
                 ),
                 None,
@@ -1478,8 +1745,12 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     reconstructed_hash=reconstructed_hash,
                     original_size_bytes=original_size,
                     reconstructed_size_bytes=reconstructed_size,
+                    original_format=original_format,
+                    reconstructed_format=reconstructed_format,
                     pixel_diff_status="unavailable",
-                    threshold=pixel_threshold,
+                    threshold=image_diff_policy.pixel_threshold,
+                    threshold_mode=image_diff_policy.threshold_mode,
+                    max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
                     width=original_image.width,
                     height=original_image.height,
                     reason=(
@@ -1495,7 +1766,8 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         changed_pixels = 0
         for index in range(0, len(original_image.rgba), 4):
             if any(
-                abs(original_image.rgba[index + channel] - reconstructed_image.rgba[index + channel]) > pixel_threshold
+                abs(original_image.rgba[index + channel] - reconstructed_image.rgba[index + channel])
+                > image_diff_policy.pixel_threshold
                 for channel in range(4)
             ):
                 changed_pixels += 1
@@ -1522,11 +1794,15 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 reconstructed_hash=reconstructed_hash,
                 original_size_bytes=original_size,
                 reconstructed_size_bytes=reconstructed_size,
+                original_format=original_format,
+                reconstructed_format=reconstructed_format,
                 pixel_diff_status="compared",
                 pixel_count=pixel_count,
                 changed_pixel_count=changed_pixels,
                 changed_pixel_ratio=changed_pixels / pixel_count if pixel_count else 0,
-                threshold=pixel_threshold,
+                threshold=image_diff_policy.pixel_threshold,
+                threshold_mode=image_diff_policy.threshold_mode,
+                max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
                 width=original_image.width,
                 height=original_image.height,
                 diff_artifact_id=diff_artifact.id,

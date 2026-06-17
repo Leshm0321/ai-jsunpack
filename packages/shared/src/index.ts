@@ -281,11 +281,15 @@ export interface RuntimeScreenshotDiff {
   reconstructedHash?: string | null;
   originalSizeBytes?: number | null;
   reconstructedSizeBytes?: number | null;
+  originalFormat?: string | null;
+  reconstructedFormat?: string | null;
   pixelDiffStatus: "compared" | "unavailable";
   pixelCount?: number | null;
   changedPixelCount?: number | null;
   changedPixelRatio?: number | null;
   threshold?: number | null;
+  thresholdMode?: string | null;
+  maxChangedPixelRatio?: number | null;
   width?: number | null;
   height?: number | null;
   diffArtifactId?: string | null;
@@ -670,11 +674,15 @@ const runtimeScreenshotDiffSchema = {
     reconstructedHash: stringSchema,
     originalSizeBytes: { type: "integer", minimum: 0 },
     reconstructedSizeBytes: { type: "integer", minimum: 0 },
+    originalFormat: stringSchema,
+    reconstructedFormat: stringSchema,
     pixelDiffStatus: { type: "string", enum: ["compared", "unavailable"] },
     pixelCount: { type: "integer", minimum: 0 },
     changedPixelCount: { type: "integer", minimum: 0 },
     changedPixelRatio: { type: "number", minimum: 0 },
     threshold: { type: "integer", minimum: 0 },
+    thresholdMode: stringSchema,
+    maxChangedPixelRatio: { type: "number", minimum: 0 },
     width: { type: "integer", minimum: 1 },
     height: { type: "integer", minimum: 1 },
     diffArtifactId: stringSchema,
@@ -1446,11 +1454,15 @@ export const EXAMPLE_RUNTIME_COMPARISON_REPORT = {
       reconstructedHash: "sha256-original",
       originalSizeBytes: 2048,
       reconstructedSizeBytes: 2048,
+      originalFormat: "png",
+      reconstructedFormat: "png",
       pixelDiffStatus: "compared",
       pixelCount: 1048320,
       changedPixelCount: 0,
       changedPixelRatio: 0,
       threshold: 0,
+      thresholdMode: "per_channel_rgba",
+      maxChangedPixelRatio: 0,
       width: 1365,
       height: 768,
       diffArtifactId: "artifact_runtime_diff_screenshot_example",

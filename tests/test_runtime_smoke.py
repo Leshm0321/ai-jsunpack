@@ -66,6 +66,22 @@ class PixelDiffBrowserAdapter:
         )
 
 
+class NonPngBrowserAdapter:
+    def __init__(self) -> None:
+        self.requests: list[BrowserSmokeRequest] = []
+
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        index = len(self.requests)
+        self.requests.append(request)
+        request.screenshot_path.write_bytes(
+            b"\xff\xd8\xff\xe0runtime-original" if index % 2 == 0 else b"\xff\xd8\xff\xe0runtime-reconstructed"
+        )
+        return BrowserSmokeCapture(
+            responses=[f"200 {request.entry_url}"],
+            dom_summary={"title": "same", "nodeCount": 2},
+        )
+
+
 class RuntimeSmokeRunnerTest(unittest.TestCase):
     def test_runtime_smoke_persists_report_trace_and_screenshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -249,6 +265,86 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_runtime_compare_applies_image_diff_threshold_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                RuntimeCompareRunner(browser_adapter=PixelDiffBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={
+                        "name": "thresholded pixels",
+                        "viewport": {"name": "tiny", "width": 2, "height": 1},
+                        "imageDiff": {"channelThreshold": 255, "maxChangedPixelRatio": 0.25},
+                    },
+                )
+
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                comparison_payload = json.loads(store.read_artifact(job.id, comparisons[0].id))
+                screenshot_diff = comparison_payload["differences"]["screenshotDiff"]
+
+                self.assertEqual(screenshot_diff["pixelDiffStatus"], "compared")
+                self.assertEqual(screenshot_diff["threshold"], 255)
+                self.assertEqual(screenshot_diff["thresholdMode"], "per_channel_rgba")
+                self.assertEqual(screenshot_diff["maxChangedPixelRatio"], 0.25)
+                self.assertEqual(screenshot_diff["originalFormat"], "png")
+                self.assertEqual(screenshot_diff["reconstructedFormat"], "png")
+                self.assertEqual(screenshot_diff["changedPixelCount"], 0)
+                self.assertEqual(screenshot_diff["changed"], False)
+            finally:
+                store.close()
+
+    def test_runtime_compare_records_non_png_screenshot_degradation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                result = RuntimeCompareRunner(browser_adapter=NonPngBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={"name": "jpeg degradation"},
+                )
+
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                screenshots = store.list_artifacts(job.id, kind="runtime_screenshot")
+                comparison_payload = json.loads(store.read_artifact(job.id, comparisons[0].id))
+                screenshot_diff = comparison_payload["differences"]["screenshotDiff"]
+
+                self.assertEqual(result.validation.status, "pass")
+                self.assertEqual(len(screenshots), 2)
+                self.assertEqual(screenshot_diff["pixelDiffStatus"], "unavailable")
+                self.assertEqual(screenshot_diff["originalFormat"], "jpeg")
+                self.assertEqual(screenshot_diff["reconstructedFormat"], "jpeg")
+                self.assertEqual(screenshot_diff["changed"], True)
+                self.assertIn("PNG screenshots only", screenshot_diff["reason"])
+            finally:
+                store.close()
+
     def test_runtime_compare_runs_scenario_viewport_matrix(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -304,6 +400,63 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                     {("load", "mobile"), ("load", "desktop"), ("body", "mobile"), ("body", "desktop")},
                 )
                 self.assertEqual([request.viewport.width for request in adapter.requests[:4]], [375, 375, 1365, 1365])
+            finally:
+                store.close()
+
+    def test_runtime_compare_prunes_large_matrix_and_writes_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = SequencedBrowserAdapter()
+                result = RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={
+                        "scenarios": [{"name": "load"}, {"name": "body"}, {"name": "ready"}],
+                        "viewports": [
+                            {"name": "mobile", "width": 375, "height": 667},
+                            {"name": "desktop", "width": 1365, "height": 768},
+                        ],
+                        "maxMatrixRuns": 2,
+                        "matrixSelection": "ordered",
+                    },
+                )
+
+                traces = store.list_artifacts(job.id, kind="runtime_trace")
+                comparisons = store.list_artifacts(job.id, kind="runtime_comparison")
+                comparison_payloads = [json.loads(store.read_artifact(job.id, artifact.id)) for artifact in comparisons]
+                trace_payloads = [json.loads(store.read_artifact(job.id, artifact.id)) for artifact in traces]
+                matrix_trace = next(payload for payload in trace_payloads if payload.get("target") == "runtime_compare_matrix")
+
+                self.assertEqual(len(adapter.requests), 4)
+                self.assertEqual(len(result.validations), 2)
+                self.assertEqual(len(result.comparison_artifacts), 2)
+                self.assertEqual(len(traces), 3)
+                self.assertEqual(matrix_trace["requestedRunCount"], 6)
+                self.assertEqual(matrix_trace["selectedRunCount"], 2)
+                self.assertEqual(matrix_trace["omittedRunCount"], 4)
+                self.assertEqual(matrix_trace["maxMatrixRuns"], 2)
+                self.assertEqual(matrix_trace["matrixSelection"], "ordered")
+                self.assertEqual([run["scenarioName"] for run in matrix_trace["selectedRuns"]], ["load", "load"])
+                self.assertTrue(
+                    all(
+                        any("matrix was pruned from 6 to 2" in limitation for limitation in payload["limitations"])
+                        for payload in comparison_payloads
+                    )
+                )
             finally:
                 store.close()
 
@@ -442,6 +595,54 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(review_payload["reviewType"], "runtime_compare")
                 self.assertEqual(review_payload["status"], "pass")
                 self.assertEqual(review_payload["repairInstructionIds"], [])
+                self.assertEqual(store.list_artifacts(job.id, kind="repair_instruction"), [])
+            finally:
+                store.close()
+
+    def test_runtime_compare_review_gate_uses_image_diff_ratio_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Original</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Reconstructed</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                compare_result = RuntimeCompareRunner(browser_adapter=PixelDiffBrowserAdapter()).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                    scenario_config={"name": "image diff default", "viewport": {"name": "tiny", "width": 2, "height": 1}},
+                )
+
+                gate_result = RuntimeCompareReviewGate().run(
+                    job_id=job.id,
+                    store=store,
+                    comparison_artifacts=compare_result.comparison_artifacts,
+                    job_config={
+                        "runtimeCompare": {
+                            "imageDiff": {"maxChangedPixelRatio": 0.5},
+                            "reviewGate": {
+                                "failOnDomChanged": False,
+                                "failOnNetworkChanged": False,
+                                "failOnConsoleChanged": False,
+                            },
+                        }
+                    },
+                    parent_artifact_ids=compare_result.artifact_ids,
+                )
+                review_payload = json.loads(store.read_artifact(job.id, gate_result.review_artifact.id))
+
+                self.assertTrue(gate_result.enabled)
+                self.assertFalse(gate_result.triggered)
+                self.assertEqual(review_payload["status"], "pass")
                 self.assertEqual(store.list_artifacts(job.id, kind="repair_instruction"), [])
             finally:
                 store.close()

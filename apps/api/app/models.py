@@ -347,11 +347,15 @@ class RuntimeScreenshotDiff(ContractModel):
     reconstructed_hash: str | None = None
     original_size_bytes: int | None = Field(default=None, ge=0)
     reconstructed_size_bytes: int | None = Field(default=None, ge=0)
+    original_format: str | None = None
+    reconstructed_format: str | None = None
     pixel_diff_status: Literal["compared", "unavailable"]
     pixel_count: int | None = Field(default=None, ge=0)
     changed_pixel_count: int | None = Field(default=None, ge=0)
     changed_pixel_ratio: float | None = Field(default=None, ge=0)
     threshold: int | None = Field(default=None, ge=0)
+    threshold_mode: str | None = None
+    max_changed_pixel_ratio: float | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     diff_artifact_id: str | None = None
