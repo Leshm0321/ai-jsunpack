@@ -7,6 +7,7 @@ from pathlib import Path
 
 from packages.sandbox import (
     ContainerSandboxRunner,
+    FirecrackerSandboxRunner,
     LocalSandboxRunner,
     ProfileOnlySandboxRunner,
     SandboxCommand,
@@ -256,7 +257,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
     def test_profile_only_runner_denies_execution_without_fallback(self):
         runner = ProfileOnlySandboxRunner(
             SandboxPolicy(allowed_commands=((sys.executable,),)),
-            runner_kind="firecracker",
+            runner_kind="gvisor",
         )
 
         result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('no fallback')")))
@@ -264,8 +265,101 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(result.failure_class, "sandbox_denied")
         self.assertIsNone(result.exit_code)
         self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "gvisor")
+        self.assertIn("does not include a gVisor execution adapter", result.denied_reason or "")
+
+    def test_firecracker_runner_requires_configured_launcher(self):
+        runner = FirecrackerSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),)))
+
+        result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('no launcher')")))
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertIsNone(result.exit_code)
+        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
         self.assertEqual(result.resource_policy.runner_kind, "firecracker")
-        self.assertIn("does not include a Firecracker execution adapter", result.denied_reason or "")
+        self.assertIn("runner command is not configured", result.denied_reason or "")
+
+    def test_firecracker_runner_delegates_to_launcher_protocol(self):
+        secret_name = "AI_JSUNPACK_TEST_SECRET"
+        os.environ[secret_name] = "secret"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                fake_launcher = Path(temp_dir) / "fake_firecracker_launcher.py"
+                request_path = Path(temp_dir) / "launcher-request.json"
+                fake_launcher.write_text(
+                    (
+                        "import json, os, pathlib, sys\n"
+                        "request = json.loads(sys.stdin.read())\n"
+                        f"pathlib.Path({str(request_path)!r}).write_text(json.dumps(request, sort_keys=True), encoding='utf-8')\n"
+                        "print(json.dumps({\n"
+                        "  'stdout': json.dumps({'argv': request['command'], 'hasSecret': 'AI_JSUNPACK_TEST_SECRET' in os.environ}),\n"
+                        "  'stderr': '',\n"
+                        "  'exitCode': 0,\n"
+                        "  'timedOut': False,\n"
+                        "  'outputTruncated': False,\n"
+                        "  'failureClass': 'none'\n"
+                        "}))\n"
+                    ),
+                    encoding="utf-8",
+                )
+                runner = FirecrackerSandboxRunner(
+                    SandboxPolicy(
+                        allowed_commands=((sys.executable,),),
+                        resource_policy=SandboxResourcePolicy(
+                            process_limit=8,
+                            cpu_time_limit_ms=1200,
+                            memory_limit_bytes=64 * 1024 * 1024,
+                        ),
+                    ),
+                    runner_command=(sys.executable, str(fake_launcher)),
+                    runtime_version="2026.06-test",
+                )
+                with runner.attempt_workspace() as workspace:
+                    (workspace / "project").mkdir()
+                    result = runner.run_in_workspace(
+                        SandboxCommand(
+                            executable=sys.executable,
+                            args=("-c", "print('guest')"),
+                            working_directory="project",
+                        ),
+                        workspace,
+                    )
+                request_payload = json.loads(request_path.read_text(encoding="utf-8"))
+        finally:
+            os.environ.pop(secret_name, None)
+
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.failure_class, "none")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(payload["hasSecret"])
+        self.assertEqual(payload["argv"][0], sys.executable)
+        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "firecracker")
+        self.assertEqual(result.resource_policy.runtime_name, "firecracker")
+        self.assertEqual(result.resource_policy.runtime_version, "2026.06-test")
+        capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
+        self.assertEqual(capabilities["network"].status, "enforced")
+        self.assertEqual(capabilities["process"].status, "enforced")
+        self.assertEqual(request_payload["runnerKind"], "firecracker")
+        self.assertEqual(request_payload["workingDirectory"], "project")
+        self.assertEqual(request_payload["networkPolicy"], "deny")
+        self.assertEqual(request_payload["resourcePolicy"]["runnerKind"], "firecracker")
+        self.assertEqual(request_payload["resourcePolicy"]["hostPlatform"], result.resource_policy.host_platform)
+
+    def test_firecracker_runner_rejects_invalid_launcher_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_launcher = Path(temp_dir) / "invalid_firecracker_launcher.py"
+            fake_launcher.write_text("print('not json')\n", encoding="utf-8")
+            runner = FirecrackerSandboxRunner(
+                SandboxPolicy(allowed_commands=((sys.executable,),)),
+                runner_command=(sys.executable, str(fake_launcher)),
+            )
+
+            result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('guest')")))
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertEqual(result.denied_reason, "Firecracker runner did not return a valid JSON result.")
+        self.assertIn("not json", result.stdout)
 
 
 if __name__ == "__main__":

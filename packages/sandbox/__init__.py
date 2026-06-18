@@ -1,6 +1,7 @@
 from .runner import (
     DEFAULT_CONTAINER_IMAGE,
     ContainerSandboxRunner,
+    FirecrackerSandboxRunner,
     LocalSandboxRunner,
     PROFILE_ONLY_RUNNERS,
     ProfileOnlySandboxRunner,
@@ -15,6 +16,7 @@ from .runner import (
 __all__ = [
     "DEFAULT_CONTAINER_IMAGE",
     "ContainerSandboxRunner",
+    "FirecrackerSandboxRunner",
     "LocalSandboxRunner",
     "PROFILE_ONLY_RUNNERS",
     "ProfileOnlySandboxRunner",

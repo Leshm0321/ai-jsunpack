@@ -324,6 +324,67 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertIn("audit profile only", build_artifact["resourcePolicy"]["capabilities"][0]["detail"])
         self.assertIn("execution adapter", build_log["stderr"])
 
+    def test_firecracker_runner_config_uses_launcher_adapter(self):
+        fake_launcher = self.root / "fake_firecracker_launcher.py"
+        request_path = self.root / "firecracker-request.json"
+        fake_launcher.write_text(
+            (
+                "import json, pathlib, sys\n"
+                "request = json.loads(sys.stdin.read())\n"
+                f"pathlib.Path({str(request_path)!r}).write_text(json.dumps(request, sort_keys=True), encoding='utf-8')\n"
+                "print(json.dumps({\n"
+                "  'stdout': json.dumps({'command': request['command'], 'runnerKind': request['runnerKind']}),\n"
+                "  'stderr': '',\n"
+                "  'exitCode': 0,\n"
+                "  'timedOut': False,\n"
+                "  'outputTruncated': False,\n"
+                "  'failureClass': 'none'\n"
+                "}))\n"
+            ),
+            encoding="utf-8",
+        )
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={
+                    "buildValidation": {
+                        "sandboxRunner": "firecracker",
+                        "firecrackerRunnerCommand": [sys.executable, str(fake_launcher)],
+                        "sandboxRuntimeVersion": "2026.06-test",
+                    }
+                },
+            )
+        )
+        project_root = self.root / "generated-firecracker"
+        (project_root / "scripts").mkdir(parents=True)
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        (project_root / "scripts" / "build.mjs").write_text("console.log('build')", encoding="utf-8")
+        (project_root / "scripts" / "typecheck.mjs").write_text("console.log('typecheck')", encoding="utf-8")
+
+        result = BuildValidationRunner().run(job_id=job.id, store=self.store, project_path=project_root)
+
+        build_artifact = json.loads(Path(result.build.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        runtime_payload = json.loads(build_log["stdout"])
+        request_payload = json.loads(request_path.read_text(encoding="utf-8"))
+        capabilities = {
+            capability["name"]: capability["status"]
+            for capability in build_artifact["resourcePolicy"]["capabilities"]
+        }
+        self.assertEqual(result.build.review_run.status, "pass")
+        self.assertEqual(result.typecheck.review_run.status, "pass")
+        self.assertEqual(build_artifact["resourcePolicy"]["enforcement"], "runtime_isolated")
+        self.assertEqual(build_artifact["resourcePolicy"]["runnerKind"], "firecracker")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeName"], "firecracker")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeVersion"], "2026.06-test")
+        self.assertEqual(capabilities["network"], "enforced")
+        self.assertEqual(capabilities["process"], "enforced")
+        self.assertEqual(build_artifact["networkPolicy"], "deny")
+        self.assertEqual(runtime_payload["runnerKind"], "firecracker")
+        self.assertEqual(request_payload["resourcePolicy"]["runnerKind"], "firecracker")
+        self.assertEqual(request_payload["workingDirectory"], "project")
+
     def test_failed_attempt_writes_repair_instruction_and_repaired_project_artifact(self):
         project_root = self.root / "generated"
         (project_root / "scripts").mkdir(parents=True)

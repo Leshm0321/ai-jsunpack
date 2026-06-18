@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import math
 import platform
@@ -8,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator, Literal, Mapping, Sequence
 
@@ -27,7 +29,7 @@ SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesyst
 SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 AllowedCommand = str | Sequence[str]
 DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
-PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("gvisor", "firecracker", "remote_browser_runner")
+PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("gvisor", "remote_browser_runner")
 
 
 @dataclass(frozen=True)
@@ -776,6 +778,233 @@ class ContainerSandboxRunner(LocalSandboxRunner):
     def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
         allowed_names = set(self.policy.allowed_environment)
         return {name: value for name, value in command.environment.items() if name in allowed_names}
+
+
+class FirecrackerSandboxRunner(LocalSandboxRunner):
+    """Delegates sandbox commands to a deployment-provided Firecracker launcher."""
+
+    def __init__(
+        self,
+        policy: SandboxPolicy | None = None,
+        *,
+        runner_command: Sequence[str] | None = None,
+        runtime_name: str | None = None,
+        runtime_version: str | None = None,
+    ) -> None:
+        self.runner_command = tuple(runner_command) if runner_command is not None else None
+        profile_policy = policy or SandboxPolicy()
+        resource_policy = sandbox_resource_policy_profile(
+            profile_policy.resource_policy,
+            runner_kind="firecracker",
+            network_policy=profile_policy.network_policy,
+            runtime_name=runtime_name,
+            runtime_version=runtime_version,
+            adapter_available=bool(self.runner_command),
+        )
+        super().__init__(replace(profile_policy, resource_policy=resource_policy))
+
+    def run_in_workspace(
+        self,
+        command: SandboxCommand,
+        workspace: Path,
+        *,
+        started_at: float | None = None,
+    ) -> SandboxResult:
+        started = started_at if started_at is not None else time.perf_counter()
+        denied_reason = self._denied_reason(command, workspace)
+        if denied_reason is not None:
+            return self._denied_result(command, workspace, started, denied_reason)
+        if not self.runner_command:
+            return self._denied_result(
+                command,
+                workspace,
+                started,
+                "Firecracker runner command is not configured; set AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND "
+                "or buildValidation.firecrackerRunnerCommand to use the Firecracker adapter.",
+            )
+
+        working_directory = self._working_directory(command, workspace)
+        working_directory.mkdir(parents=True, exist_ok=True)
+        request = self._launcher_request(
+            command=command,
+            workspace=workspace,
+            working_directory=working_directory,
+        )
+        try:
+            process = subprocess.Popen(
+                list(self.runner_command),
+                cwd=workspace,
+                env=self._environment(command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+        except OSError as error:
+            denied_reason = f"Firecracker runner command could not be started: {error}"
+            return SandboxResult(
+                command=command.argv,
+                stdout="",
+                stderr=denied_reason,
+                exit_code=None,
+                duration_ms=self._duration_ms(started),
+                failure_class="sandbox_denied",
+                timed_out=False,
+                output_truncated=False,
+                working_directory=str(working_directory),
+                network_policy=self.policy.network_policy,
+                resource_policy=self.policy.resource_policy,
+                denied_reason=denied_reason,
+            )
+
+        timed_out = False
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(
+                input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
+                timeout=max(self.policy.timeout_ms, 1) / 1000,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            stdout_bytes, stderr_bytes = process.communicate()
+
+        launcher_stdout, launcher_stderr, launcher_output_truncated = self._decode_limited_output(
+            stdout_bytes,
+            stderr_bytes,
+        )
+        if timed_out:
+            return SandboxResult(
+                command=command.argv,
+                stdout=launcher_stdout,
+                stderr=launcher_stderr,
+                exit_code=process.returncode,
+                duration_ms=self._duration_ms(started),
+                failure_class="timeout",
+                timed_out=True,
+                output_truncated=launcher_output_truncated,
+                working_directory=str(working_directory),
+                network_policy=self.policy.network_policy,
+                resource_policy=self.policy.resource_policy,
+            )
+        response = self._parse_launcher_response(launcher_stdout)
+        if response is None:
+            return SandboxResult(
+                command=command.argv,
+                stdout=launcher_stdout,
+                stderr=launcher_stderr,
+                exit_code=process.returncode,
+                duration_ms=self._duration_ms(started),
+                failure_class="sandbox_denied",
+                timed_out=False,
+                output_truncated=launcher_output_truncated,
+                working_directory=str(working_directory),
+                network_policy=self.policy.network_policy,
+                resource_policy=self.policy.resource_policy,
+                denied_reason="Firecracker runner did not return a valid JSON result.",
+            )
+
+        stdout, stderr, guest_output_truncated = self._decode_limited_output(
+            str(response.get("stdout", "")).encode("utf-8"),
+            str(response.get("stderr", "")).encode("utf-8"),
+        )
+        output_truncated = launcher_output_truncated or bool(response.get("outputTruncated")) or guest_output_truncated
+        exit_code = self._optional_int(response.get("exitCode"))
+        guest_timed_out = bool(response.get("timedOut"))
+        raw_failure_class = response.get("failureClass")
+        failure_class = raw_failure_class if self._is_failure_class(raw_failure_class) else self._failure_class(
+            exit_code=exit_code,
+            timed_out=guest_timed_out,
+            output_truncated=output_truncated,
+            command_failure_class=command.failure_class,
+        )
+        return SandboxResult(
+            command=command.argv,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            duration_ms=self._duration_ms(started),
+            failure_class=failure_class,
+            timed_out=guest_timed_out,
+            output_truncated=output_truncated,
+            working_directory=str(working_directory),
+            network_policy=self.policy.network_policy,
+            resource_policy=self.policy.resource_policy,
+            denied_reason=response.get("deniedReason") if isinstance(response.get("deniedReason"), str) else None,
+        )
+
+    def _launcher_request(
+        self,
+        *,
+        command: SandboxCommand,
+        workspace: Path,
+        working_directory: Path,
+    ) -> dict[str, object]:
+        resolved_workspace = workspace.resolve()
+        resolved_working_directory = working_directory.resolve()
+        relative_workdir = resolved_working_directory.relative_to(resolved_workspace).as_posix()
+        return {
+            "version": 1,
+            "runnerKind": "firecracker",
+            "workspace": str(resolved_workspace),
+            "workingDirectory": "." if relative_workdir == "." else relative_workdir,
+            "command": command.argv,
+            "stdinBase64": base64.b64encode(command.stdin).decode("ascii") if command.stdin is not None else None,
+            "environment": self._guest_environment(command),
+            "timeoutMs": self.policy.timeout_ms,
+            "outputLimitBytes": self.policy.output_limit_bytes,
+            "networkPolicy": self.policy.network_policy,
+            "resourcePolicy": self._camelize_mapping(asdict(self.policy.resource_policy)),
+        }
+
+    def _guest_environment(self, command: SandboxCommand) -> dict[str, str]:
+        allowed_names = set(self.policy.allowed_environment)
+        return {name: value for name, value in command.environment.items() if name in allowed_names}
+
+    def _camelize_mapping(self, value: object) -> object:
+        if isinstance(value, dict):
+            return {self._snake_to_camel(str(key)): self._camelize_mapping(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._camelize_mapping(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._camelize_mapping(item) for item in value]
+        return value
+
+    def _snake_to_camel(self, value: str) -> str:
+        parts = value.split("_")
+        return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+    def _parse_launcher_response(self, stdout: str) -> dict[str, object] | None:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _optional_int(self, value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_failure_class(self, value: object) -> bool:
+        return isinstance(value, str) and value in {
+            "none",
+            "invalid_input",
+            "parse_error",
+            "agent_failed",
+            "dependency_missing",
+            "install_failed",
+            "type_error",
+            "build_error",
+            "runtime_error",
+            "sandbox_denied",
+            "policy_denied",
+            "timeout",
+            "resource_limit",
+            "unknown",
+        }
 
 
 class ProfileOnlySandboxRunner(LocalSandboxRunner):

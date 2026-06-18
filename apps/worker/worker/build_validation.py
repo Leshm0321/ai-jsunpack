@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -27,6 +28,7 @@ from apps.api.app.models import (
 from packages.sandbox import (
     DEFAULT_CONTAINER_IMAGE,
     ContainerSandboxRunner,
+    FirecrackerSandboxRunner,
     LocalSandboxRunner,
     PROFILE_ONLY_RUNNERS,
     ProfileOnlySandboxRunner,
@@ -100,6 +102,7 @@ class BuildValidationConfig:
     sandbox_runner: SandboxRunnerKind = "local"
     container_image: str = DEFAULT_CONTAINER_IMAGE
     container_runtime_command: tuple[str, ...] | None = None
+    firecracker_runner_command: tuple[str, ...] | None = None
     sandbox_runtime_name: str | None = None
     sandbox_runtime_version: str | None = None
 
@@ -183,7 +186,7 @@ class BuildValidationRunner:
 
     def __init__(
         self,
-        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | ProfileOnlySandboxRunner | None = None,
+        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner | None = None,
         build_command: Sequence[str] = DEFAULT_BUILD_COMMAND,
         typecheck_command: Sequence[str] = DEFAULT_TYPECHECK_COMMAND,
     ) -> None:
@@ -843,6 +846,9 @@ class BuildValidationRunner:
             sandbox_runner=sandbox_runner,
             container_image=container_image,
             container_runtime_command=self._container_runtime_command_config(config.get("containerRuntimeCommand")),
+            firecracker_runner_command=self._runner_command_config(
+                config.get("firecrackerRunnerCommand") or os.getenv("AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND")
+            ),
             sandbox_runtime_name=self._optional_string_config(
                 config.get("sandboxRuntimeName") or os.getenv("AI_JSUNPACK_SANDBOX_RUNTIME_NAME")
             ),
@@ -854,13 +860,20 @@ class BuildValidationRunner:
     def _sandbox_runner_for_config(
         self,
         config: BuildValidationConfig,
-    ) -> LocalSandboxRunner | ContainerSandboxRunner | ProfileOnlySandboxRunner:
+    ) -> LocalSandboxRunner | ContainerSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner:
         policy = self._sandbox_policy()
         if config.sandbox_runner == "container":
             return ContainerSandboxRunner(
                 policy,
                 image=config.container_image,
                 runtime_command=config.container_runtime_command,
+            )
+        if config.sandbox_runner == "firecracker":
+            return FirecrackerSandboxRunner(
+                policy,
+                runner_command=config.firecracker_runner_command,
+                runtime_name=config.sandbox_runtime_name,
+                runtime_version=config.sandbox_runtime_version,
             )
         if config.sandbox_runner in PROFILE_ONLY_RUNNERS:
             return ProfileOnlySandboxRunner(
@@ -907,10 +920,18 @@ class BuildValidationRunner:
         return None
 
     def _container_runtime_command_config(self, value: Any) -> tuple[str, ...] | None:
+        return self._runner_command_config(value)
+
+    def _runner_command_config(self, value: Any) -> tuple[str, ...] | None:
         if isinstance(value, list) and all(isinstance(part, str) and part for part in value):
             return tuple(value)
         if isinstance(value, tuple) and all(isinstance(part, str) and part for part in value):
             return tuple(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                return tuple(part for part in shlex.split(value) if part)
+            except ValueError:
+                return None
         return None
 
     def _latest_generated_project(self, *, job_id: str, store) -> ArtifactRecord | None:
