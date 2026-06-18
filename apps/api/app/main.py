@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
+from packages.deployment import DeploymentConfigurationError, validate_current_environment
+
 from .auth import AccessContext, ProjectRole, SERVICE_ROLE_WORKER, require_access
 from .models import (
     ArtifactRecord,
@@ -21,6 +23,11 @@ from .models import (
     ToolCall,
 )
 from .store import store
+
+try:
+    DEPLOYMENT_PROFILE = validate_current_environment("api")
+except DeploymentConfigurationError as error:
+    raise RuntimeError(str(error)) from error
 
 app = FastAPI(title="AI JS Unpack API", version="0.1.0")
 
@@ -46,7 +53,7 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "serviceRole": "api", "deploymentProfile": DEPLOYMENT_PROFILE.status}
 
 
 @app.post("/jobs", response_model=JobSummary)

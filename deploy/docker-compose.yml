@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16-alpine
+    env_file:
+      - ./env/db.env.example
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  artifact-store:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    env_file:
+      - ./env/artifact-store.env.example
+    volumes:
+      - artifact-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  api:
+    image: ai-jsunpack/api:local
+    env_file:
+      - ./env/api.env.example
+    depends_on:
+      - db
+      - artifact-store
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  worker:
+    image: ai-jsunpack/worker:local
+    env_file:
+      - ./env/worker.env.example
+    depends_on:
+      - db
+      - artifact-store
+    profiles:
+      - worker
+
+  browser-runner:
+    image: ai-jsunpack/browser-runner:local
+    env_file:
+      - ./env/browser-runner.env.example
+    depends_on:
+      - artifact-store
+    profiles:
+      - browser-runner
+
+  web:
+    image: ai-jsunpack/web:local
+    env_file:
+      - ./env/web.env.example
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:5173:5173"
+
+volumes:
+  db-data:
+  artifact-data:
