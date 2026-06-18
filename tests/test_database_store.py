@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -148,6 +149,127 @@ class DatabaseStoreTest(unittest.TestCase):
                 store.close()
                 if reopened is not None:
                     reopened.close()
+
+    def test_worker_queue_lease_renewal_and_guarded_status_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                skipped = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                queued = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    queued.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="input.zip",
+                    content=b"source",
+                    content_type="application/zip",
+                    producer="test.database_store",
+                )
+
+                leased = store.lease_next_job(worker_id="worker-a", lease_seconds=60)
+                self.assertIsNotNone(leased)
+                self.assertEqual(leased.id, queued.id)
+                self.assertEqual(leased.status, "leased")
+                self.assertEqual(leased.run_attempt, 1)
+                self.assertEqual(leased.worker_lease.worker_id, "worker-a")
+                self.assertIsNone(store.lease_next_job(worker_id="worker-b", lease_seconds=60))
+                self.assertEqual(store.get_job(skipped.id).status, "queued")
+
+                self.assertIsNone(store.renew_lease(job_id=queued.id, worker_id="worker-b", lease_seconds=60))
+                renewed = store.renew_lease(job_id=queued.id, worker_id="worker-a", lease_seconds=120)
+                self.assertIsNotNone(renewed)
+                self.assertEqual(renewed.worker_lease.worker_id, "worker-a")
+
+                guarded = store.update_status(queued.id, "building", expected_worker_id="worker-b")
+                self.assertEqual(guarded.status, "leased")
+                updated = store.update_status(queued.id, "building", expected_worker_id="worker-a")
+                self.assertEqual(updated.status, "building")
+            finally:
+                store.close()
+
+    def test_worker_queue_requeues_expired_leases_until_attempt_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="input.zip",
+                    content=b"source",
+                    content_type="application/zip",
+                    producer="test.database_store",
+                )
+                now = datetime(2026, 6, 18, 8, 0, tzinfo=timezone.utc)
+
+                first = store.lease_next_job(worker_id="worker-a", lease_seconds=1, max_attempts=2, now=now.isoformat())
+                self.assertIsNotNone(first)
+                requeued = store.requeue_expired_leases(
+                    max_attempts=2,
+                    now=(now + timedelta(seconds=2)).isoformat(),
+                )
+                self.assertEqual([item.status for item in requeued], ["queued"])
+                self.assertIsNone(store.get_job(job.id).worker_lease)
+
+                second = store.lease_next_job(
+                    worker_id="worker-b",
+                    lease_seconds=1,
+                    max_attempts=2,
+                    now=(now + timedelta(seconds=3)).isoformat(),
+                )
+                self.assertIsNotNone(second)
+                self.assertEqual(second.run_attempt, 2)
+                failed = store.requeue_expired_leases(
+                    max_attempts=2,
+                    now=(now + timedelta(seconds=5)).isoformat(),
+                )
+                self.assertEqual([item.status for item in failed], ["failed"])
+                final = store.get_job(job.id)
+                self.assertEqual(final.failure_class, "timeout")
+                self.assertIsNone(final.worker_lease)
+            finally:
+                store.close()
+
+    def test_cancelled_job_releases_lease_and_cannot_be_reopened_by_status_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="input.zip",
+                    content=b"source",
+                    content_type="application/zip",
+                    producer="test.database_store",
+                )
+                leased = store.lease_next_job(worker_id="worker-a")
+                self.assertIsNotNone(leased)
+
+                cancelled = store.request_cancel(job.id, "operator cancelled")
+                self.assertEqual(cancelled.status, "cancelled")
+                self.assertEqual(cancelled.failure_reason, "operator cancelled")
+                self.assertIsNone(cancelled.worker_lease)
+                self.assertIsNone(store.lease_next_job(worker_id="worker-b"))
+
+                guarded = store.update_status(job.id, "building")
+                self.assertEqual(guarded.status, "cancelled")
+            finally:
+                store.close()
 
     def test_register_artifact_path_persists_directory_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:

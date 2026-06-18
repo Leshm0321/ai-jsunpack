@@ -114,6 +114,7 @@ export interface Job {
   config: Record<string, unknown>;
   cloudMode: CloudMode;
   reviewAttempt: number;
+  runAttempt: number;
   workerLease?: {
     workerId: string;
     expiresAt: string;
@@ -963,6 +964,7 @@ export const SHARED_JSON_SCHEMAS = {
       config: { type: "object", additionalProperties: true },
       cloudMode: { type: "string", enum: CLOUD_MODES },
       reviewAttempt: { type: "integer", minimum: 0 },
+      runAttempt: { type: "integer", minimum: 0 },
       workerLease: {
         type: "object",
         properties: {
@@ -985,6 +987,7 @@ export const SHARED_JSON_SCHEMAS = {
       "config",
       "cloudMode",
       "reviewAttempt",
+      "runAttempt",
       "failureClass",
       "createdAt",
       "updatedAt"
@@ -1348,6 +1351,7 @@ export const EXAMPLE_JOB = {
   },
   cloudMode: "local_only",
   reviewAttempt: 0,
+  runAttempt: 0,
   workerLease: {
     workerId: "worker_contract",
     expiresAt: exampleTimestamp

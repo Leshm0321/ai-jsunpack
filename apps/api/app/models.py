@@ -140,6 +140,10 @@ class CreateJobRequest(ContractModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class CancelJobRequest(ContractModel):
+    reason: str = Field(default="user requested cancellation")
+
+
 class WorkerLease(ContractModel):
     worker_id: str
     expires_at: str
@@ -154,6 +158,7 @@ class JobRecord(ContractModel):
     config: dict[str, Any]
     cloud_mode: CloudMode
     review_attempt: int = Field(ge=0)
+    run_attempt: int = Field(ge=0)
     worker_lease: WorkerLease | None = None
     failure_class: FailureClass
     failure_reason: str | None = None

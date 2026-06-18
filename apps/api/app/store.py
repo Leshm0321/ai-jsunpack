@@ -53,6 +53,10 @@ DEFAULT_DATABASE_URL = "postgresql+psycopg://ai_jsunpack:ai_jsunpack@127.0.0.1:5
 CONTRACT_SCHEMA_VERSION = "2026-06-14"
 EPHEMERAL_RETENTION_DAYS = 7
 DEFAULT_PRESIGN_TTL_SECONDS = 3600
+DEFAULT_WORKER_LEASE_SECONDS = 300
+DEFAULT_WORKER_MAX_ATTEMPTS = 3
+QUEUE_ELIGIBLE_STATUSES: tuple[JobStatus, ...] = ("queued", "intake")
+TERMINAL_JOB_STATUSES: set[JobStatus] = {"completed", "completed_best_effort", "failed", "cancelled"}
 
 RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
     "source_input": "source",
@@ -87,6 +91,7 @@ jobs_table = Table(
     Column("config", JSON, nullable=False),
     Column("cloud_mode", String, nullable=False),
     Column("review_attempt", Integer, nullable=False),
+    Column("run_attempt", Integer, nullable=False, default=0),
     Column("worker_lease", JSON, nullable=True),
     Column("failure_class", String, nullable=False),
     Column("failure_reason", String, nullable=True),
@@ -136,6 +141,7 @@ class DatabaseStore:
         if self._schema_ready:
             return
         metadata.create_all(self.engine)
+        self._ensure_jobs_queue_columns()
         self._ensure_artifacts_lifecycle_columns()
         self._schema_ready = True
 
@@ -154,6 +160,7 @@ class DatabaseStore:
             "config": request.config,
             "cloud_mode": request.cloud_mode,
             "review_attempt": 0,
+            "run_attempt": 0,
             "worker_lease": None,
             "failure_class": "none",
             "failure_reason": None,
@@ -176,24 +183,188 @@ class DatabaseStore:
         status: JobStatus,
         failure_reason: str | None = None,
         failure_class: FailureClass | None = None,
+        expected_worker_id: str | None = None,
     ) -> JobRecord:
         self.initialize()
-        values: dict[str, Any] = {
-            "status": status,
-            "updated_at": utc_now(),
-        }
-        if failure_reason:
-            values["failure_reason"] = failure_reason
-        if failure_class:
-            values["failure_class"] = failure_class
         with self.engine.begin() as connection:
+            current_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            if current_row is None:
+                raise KeyError(f"Job not found: {job_id}")
+            current_job = self._job_from_row(current_row)
+            if current_job.status in TERMINAL_JOB_STATUSES and status != current_job.status:
+                return current_job
+            if expected_worker_id is not None and lease_worker_id(current_job.worker_lease) != expected_worker_id:
+                return current_job
+
+            values: dict[str, Any] = {
+                "status": status,
+                "updated_at": utc_now(),
+            }
+            if failure_reason:
+                values["failure_reason"] = failure_reason
+            if failure_class:
+                values["failure_class"] = failure_class
+            if status in TERMINAL_JOB_STATUSES:
+                values["worker_lease"] = None
+
             result = connection.execute(update(jobs_table).where(jobs_table.c.id == job_id).values(**values))
-        if result.rowcount == 0:
+            if result.rowcount == 0:
+                raise KeyError(f"Job not found: {job_id}")
+            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+        if row is None:
             raise KeyError(f"Job not found: {job_id}")
-        updated_job = self.get_job(job_id)
-        if updated_job is None:
+        return self._job_from_row(row)
+
+    def lease_next_job(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int = DEFAULT_WORKER_LEASE_SECONDS,
+        max_attempts: int = DEFAULT_WORKER_MAX_ATTEMPTS,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        self.initialize()
+        lease_seconds = max(1, lease_seconds)
+        max_attempts = max(1, max_attempts)
+        leased_at = parse_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        expires_at = (leased_at + timedelta(seconds=lease_seconds)).isoformat()
+        timestamp = leased_at.isoformat()
+
+        with self.engine.begin() as connection:
+            rows = (
+                connection.execute(
+                    select(jobs_table)
+                    .where(
+                        jobs_table.c.status.in_(QUEUE_ELIGIBLE_STATUSES),
+                        jobs_table.c.input_artifact_id.is_not(None),
+                        jobs_table.c.run_attempt < max_attempts,
+                    )
+                    .order_by(jobs_table.c.created_at, jobs_table.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            for row in rows:
+                run_attempt = int(row["run_attempt"] or 0)
+                result = connection.execute(
+                    update(jobs_table)
+                    .where(
+                        jobs_table.c.id == row["id"],
+                        jobs_table.c.status == row["status"],
+                        jobs_table.c.input_artifact_id.is_not(None),
+                        jobs_table.c.run_attempt < max_attempts,
+                    )
+                    .values(
+                        status="leased",
+                        run_attempt=run_attempt + 1,
+                        worker_lease={"worker_id": worker_id, "expires_at": expires_at},
+                        failure_class="none",
+                        failure_reason=None,
+                        updated_at=timestamp,
+                    )
+                )
+                if result.rowcount == 0:
+                    continue
+                leased_row = connection.execute(select(jobs_table).where(jobs_table.c.id == row["id"])).mappings().first()
+                if leased_row is not None:
+                    return self._job_from_row(leased_row)
+        return None
+
+    def renew_lease(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        lease_seconds: int = DEFAULT_WORKER_LEASE_SECONDS,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        self.initialize()
+        lease_seconds = max(1, lease_seconds)
+        renewed_at = parse_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        expires_at = (renewed_at + timedelta(seconds=lease_seconds)).isoformat()
+        timestamp = renewed_at.isoformat()
+
+        with self.engine.begin() as connection:
+            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            if row is None:
+                raise KeyError(f"Job not found: {job_id}")
+            job = self._job_from_row(row)
+            if job.status in TERMINAL_JOB_STATUSES or lease_worker_id(job.worker_lease) != worker_id:
+                return None
+            connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.id == job_id)
+                .values(worker_lease={"worker_id": worker_id, "expires_at": expires_at}, updated_at=timestamp)
+            )
+            renewed_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+        return self._job_from_row(renewed_row) if renewed_row else None
+
+    def request_cancel(self, job_id: str, reason: str = "cancel requested") -> JobRecord:
+        self.initialize()
+        timestamp = utc_now()
+        with self.engine.begin() as connection:
+            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            if row is None:
+                raise KeyError(f"Job not found: {job_id}")
+            job = self._job_from_row(row)
+            if job.status in TERMINAL_JOB_STATUSES:
+                return job
+            connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.id == job_id)
+                .values(
+                    status="cancelled",
+                    worker_lease=None,
+                    failure_class="none",
+                    failure_reason=normalize_cleanup_reason(reason),
+                    updated_at=timestamp,
+                )
+            )
+            cancelled_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+        if cancelled_row is None:
             raise KeyError(f"Job not found: {job_id}")
-        return updated_job
+        return self._job_from_row(cancelled_row)
+
+    def requeue_expired_leases(
+        self,
+        *,
+        max_attempts: int = DEFAULT_WORKER_MAX_ATTEMPTS,
+        now: str | None = None,
+    ) -> list[JobRecord]:
+        self.initialize()
+        max_attempts = max(1, max_attempts)
+        timestamp = parse_timestamp(now).isoformat() if now is not None else datetime.now(timezone.utc).isoformat()
+        current_time = parse_timestamp(timestamp)
+        updated_jobs: list[JobRecord] = []
+
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(jobs_table).where(jobs_table.c.status == "leased")).mappings().all()
+            for row in rows:
+                job = self._job_from_row(row)
+                expires_at = lease_expires_at(job.worker_lease)
+                if expires_at is None or expires_at > current_time:
+                    continue
+                if job.run_attempt >= max_attempts:
+                    values = {
+                        "status": "failed",
+                        "worker_lease": None,
+                        "failure_class": "timeout",
+                        "failure_reason": f"Worker lease expired after {job.run_attempt} attempt(s).",
+                        "updated_at": timestamp,
+                    }
+                else:
+                    values = {
+                        "status": "queued",
+                        "worker_lease": None,
+                        "failure_class": "none",
+                        "failure_reason": "Previous worker lease expired; job returned to queue.",
+                        "updated_at": timestamp,
+                    }
+                connection.execute(update(jobs_table).where(jobs_table.c.id == job.id).values(**values))
+                updated_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job.id)).mappings().first()
+                if updated_row is not None:
+                    updated_jobs.append(self._job_from_row(updated_row))
+        return updated_jobs
 
     def list_artifacts(
         self,
@@ -493,6 +664,7 @@ class DatabaseStore:
 
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)
+        data.setdefault("run_attempt", 0)
         return JobRecord.model_validate(data)
 
     def _artifact_from_row(self, row: Any) -> ArtifactRecord:
@@ -501,6 +673,12 @@ class DatabaseStore:
         data.setdefault("deleted_at", None)
         data.setdefault("deletion_reason", None)
         return ArtifactRecord.model_validate(data)
+
+    def _ensure_jobs_queue_columns(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("jobs")}
+        with self.engine.begin() as connection:
+            if "run_attempt" not in existing_columns:
+                connection.execute(text("ALTER TABLE jobs ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0"))
 
     def _ensure_artifacts_lifecycle_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("artifacts")}
@@ -557,6 +735,34 @@ def parse_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def lease_worker_id(worker_lease: Any) -> str | None:
+    if worker_lease is None:
+        return None
+    if hasattr(worker_lease, "worker_id"):
+        return getattr(worker_lease, "worker_id")
+    if isinstance(worker_lease, dict):
+        value = worker_lease.get("worker_id", worker_lease.get("workerId"))
+        return str(value) if value is not None else None
+    return None
+
+
+def lease_expires_at(worker_lease: Any) -> datetime | None:
+    if worker_lease is None:
+        return None
+    if hasattr(worker_lease, "expires_at"):
+        value = getattr(worker_lease, "expires_at")
+    elif isinstance(worker_lease, dict):
+        value = worker_lease.get("expires_at", worker_lease.get("expiresAt"))
+    else:
+        value = None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return parse_timestamp(value)
+    except ValueError:
+        return None
 
 
 def normalize_cleanup_reason(reason: str) -> str:

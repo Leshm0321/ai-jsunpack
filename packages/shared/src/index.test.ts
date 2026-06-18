@@ -54,6 +54,7 @@ test("job and artifact schemas expose the expected contract-required fields", ()
     "config",
     "cloudMode",
     "reviewAttempt",
+    "runAttempt",
     "failureClass",
     "createdAt",
     "updatedAt"

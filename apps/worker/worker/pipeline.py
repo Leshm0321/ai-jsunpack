@@ -76,6 +76,10 @@ class PipelineRun:
         self.events.append(PipelineEvent(status=status, message=message))
 
 
+class PipelineCancelled(RuntimeError):
+    pass
+
+
 class WorkerPipeline:
     """Deterministic pipeline shell that later hosts core, Agent, and sandbox calls."""
 
@@ -118,9 +122,11 @@ class WorkerPipeline:
     def _run_core_analysis(self, *, job_id: str, input_path: Path | str, store, run: PipelineRun) -> None:
         run.transition("leased", self._message_for("leased"))
         try:
+            self._raise_if_cancelled(job_id=job_id, store=store)
             store.update_status(job_id, "intake")
             run.transition("intake", "Core input inventory generation started.")
             result = self.core_bridge.analyze_input_package(job_id=job_id, input_path=input_path)
+            self._raise_if_cancelled(job_id=job_id, store=store)
             inventory_artifact = store.write_artifact(
                 job_id,
                 kind="input_inventory",
@@ -143,6 +149,7 @@ class WorkerPipeline:
                 producer="worker.core",
                 parent_artifact_ids=[inventory_artifact.id],
             )
+            self._raise_if_cancelled(job_id=job_id, store=store)
             job = store.get_job(job_id)
             if job is None:
                 raise AgentRuntimeError(f"Job not found during Agent runtime setup: {job_id}")
@@ -159,6 +166,7 @@ class WorkerPipeline:
             agent_result = self.agent_runtime.run(job_id=job_id, store=store, request=agent_request)
             run.transition("agent_planning", "CrewAI planner context and evidence persisted.")
             run.transition("agent_pass", agent_result.message)
+            self._raise_if_cancelled(job_id=job_id, store=store)
 
             evidence_parent_ids = [
                 inventory_artifact.id,
@@ -177,6 +185,7 @@ class WorkerPipeline:
                 parent_artifact_ids=evidence_parent_ids,
             )
             run.transition("reconstructing", reconstruction_result.message)
+            self._raise_if_cancelled(job_id=job_id, store=store)
 
             validation_parent_ids = [*evidence_parent_ids, *reconstruction_result.artifact_ids]
             build_validation_result = self.build_validation_runner.run(
@@ -188,6 +197,7 @@ class WorkerPipeline:
             run.transition("typechecking", build_validation_result.typecheck.message)
             if build_validation_result.repair_artifacts:
                 run.transition("repairing", "Build/typecheck review produced repair evidence for validation retry.")
+            self._raise_if_cancelled(job_id=job_id, store=store)
 
             current_project_artifact = (
                 self._latest_artifact(store=store, job_id=job_id, kind="generated_project")
@@ -204,6 +214,7 @@ class WorkerPipeline:
                     attempt=0,
                 )
                 run.transition("runtime_smoke", runtime_result.message)
+                self._raise_if_cancelled(job_id=job_id, store=store)
                 packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_result.artifact_ids])
                 runtime_compare_result = self.runtime_compare_runner.run_compare(
                     job_id=job_id,
@@ -215,6 +226,7 @@ class WorkerPipeline:
                     attempt=0,
                 )
                 run.transition("runtime_compare", runtime_compare_result.message)
+                self._raise_if_cancelled(job_id=job_id, store=store)
                 packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_result.artifact_ids])
                 runtime_compare_gate_result = self.runtime_compare_review_gate.run(
                     job_id=job_id,
@@ -231,6 +243,7 @@ class WorkerPipeline:
                             "repairing",
                             "Runtime compare review produced repair evidence for follow-up Review/Fix.",
                         )
+                self._raise_if_cancelled(job_id=job_id, store=store)
                 packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_gate_result.artifact_ids])
 
                 if runtime_compare_gate_result.enabled and runtime_compare_gate_result.triggered:
@@ -243,6 +256,7 @@ class WorkerPipeline:
                         attempt=1,
                     )
                     run.transition("repairing", runtime_repair_result.message)
+                    self._raise_if_cancelled(job_id=job_id, store=store)
                     packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_repair_result.artifact_ids])
 
                     if runtime_repair_result.applied_project_artifact is not None:
@@ -256,6 +270,7 @@ class WorkerPipeline:
                                 attempt=1,
                             )
                             run.transition("runtime_smoke", retry_runtime_result.message)
+                            self._raise_if_cancelled(job_id=job_id, store=store)
                             packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_runtime_result.artifact_ids])
                             retry_compare_result = self.runtime_compare_runner.run_compare(
                                 job_id=job_id,
@@ -267,6 +282,7 @@ class WorkerPipeline:
                                 attempt=1,
                             )
                             run.transition("runtime_compare", retry_compare_result.message)
+                            self._raise_if_cancelled(job_id=job_id, store=store)
                             packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_compare_result.artifact_ids])
                             retry_gate_result = self.runtime_compare_review_gate.run(
                                 job_id=job_id,
@@ -283,8 +299,10 @@ class WorkerPipeline:
                                         "repairing",
                                         "Runtime compare repair retry still requires follow-up Review/Fix.",
                                     )
+                            self._raise_if_cancelled(job_id=job_id, store=store)
                             packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_gate_result.artifact_ids])
 
+            self._raise_if_cancelled(job_id=job_id, store=store)
             packaging_result = self.packaging_runner.run(
                 job_id=job_id,
                 store=store,
@@ -298,6 +316,8 @@ class WorkerPipeline:
                 failure_class=packaging_result.failure_class,
             )
             run.transition(packaging_result.final_status, self._message_for(packaging_result.final_status))
+        except PipelineCancelled as error:
+            run.transition("cancelled", str(error))
         except CoreBridgeError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="parse_error")
             run.transition("failed", str(error))
@@ -325,6 +345,11 @@ class WorkerPipeline:
             return config
         runtime_scenario = job_config.get("runtimeScenario")
         return runtime_scenario if isinstance(runtime_scenario, dict) else None
+
+    def _raise_if_cancelled(self, *, job_id: str, store) -> None:
+        job = store.get_job(job_id)
+        if job is not None and job.status == "cancelled":
+            raise PipelineCancelled(job.failure_reason or "Job cancelled.")
 
     def _latest_artifact(self, *, store, job_id: str, kind: str):
         artifacts = store.list_artifacts(job_id, kind=kind)

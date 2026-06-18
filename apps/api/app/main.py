@@ -12,6 +12,7 @@ from packages.deployment import DeploymentConfigurationError, validate_current_e
 from .auth import AccessContext, ProjectRole, SERVICE_ROLE_WORKER, require_access
 from .models import (
     ArtifactRecord,
+    CancelJobRequest,
     CreateJobRequest,
     InferenceRecord,
     JobRecord,
@@ -216,6 +217,21 @@ def rerun_job(
     )
     job = store.update_status(created.id, "intake")
     return JobSummary(job=job, artifacts=store.list_artifacts(created.id))
+
+
+@app.post("/jobs/{job_id}/cancel", response_model=JobSummary)
+def cancel_job(
+    job_id: str,
+    request: CancelJobRequest | None = None,
+    access: AccessContext = Depends(require_access),
+) -> JobSummary:
+    require_job(job_id, access, minimum_role="maintainer")
+    cancel_request = request or CancelJobRequest()
+    try:
+        job = store.request_cancel(job_id, cancel_request.reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
 
 @app.post("/jobs/{job_id}/retention/cleanup", response_model=RetentionCleanupResult)

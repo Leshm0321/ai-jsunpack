@@ -483,6 +483,35 @@ class ApiEndpointTest(unittest.TestCase):
 
         self.assertEqual(downloaded.status_code, 400)
 
+    def test_maintainer_can_cancel_non_terminal_job(self):
+        created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        self.store.write_artifact(
+            job_id,
+            kind="source_input",
+            stage="intake",
+            filename="dist.zip",
+            content=b"zip-bytes",
+            content_type="application/zip",
+            producer="test.api",
+        )
+        leased = self.store.lease_next_job(worker_id="worker-api-test")
+        self.assertIsNotNone(leased)
+
+        cancelled = self.client.post(
+            f"/jobs/{job_id}/cancel",
+            json={"reason": "operator stopped job"},
+            headers=self.access_headers,
+        )
+
+        self.assertEqual(cancelled.status_code, 200)
+        body = cancelled.json()
+        self.assertEqual(body["job"]["status"], "cancelled")
+        self.assertEqual(body["job"]["failureReason"], "operator stopped job")
+        self.assertIsNone(body["job"]["workerLease"])
+        self.assertIsNone(self.store.lease_next_job(worker_id="worker-after-cancel"))
+
     def test_local_vite_origin_is_allowed_for_development(self):
         response = self.client.options(
             "/jobs",
@@ -526,6 +555,7 @@ class ApiEndpointTest(unittest.TestCase):
         )
         audit_download = self.client.get(f"/jobs/{job_id}/reports/audit", headers=self.other_access_headers)
         rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.other_access_headers)
+        cancel = self.client.post(f"/jobs/{job_id}/cancel", headers=self.other_access_headers)
         inferences = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.other_access_headers)
         reviews = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.other_access_headers)
         tools = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.other_access_headers)
@@ -542,6 +572,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(downloaded.status_code, 403)
         self.assertEqual(audit_download.status_code, 403)
         self.assertEqual(rerun.status_code, 403)
+        self.assertEqual(cancel.status_code, 403)
         self.assertEqual(inferences.status_code, 403)
         self.assertEqual(reviews.status_code, 403)
         self.assertEqual(tools.status_code, 403)
@@ -579,6 +610,7 @@ class ApiEndpointTest(unittest.TestCase):
             headers=self.viewer_headers,
         )
         rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.viewer_headers)
+        cancel = self.client.post(f"/jobs/{job_id}/cancel", headers=self.viewer_headers)
         cleanup = self.client.post(
             f"/jobs/{job_id}/retention/cleanup",
             json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
@@ -588,6 +620,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(fetched.status_code, 200)
         self.assertEqual(uploaded.status_code, 403)
         self.assertEqual(rerun.status_code, 403)
+        self.assertEqual(cancel.status_code, 403)
         self.assertEqual(cleanup.status_code, 403)
 
     def test_service_token_requires_service_role_for_project_access(self):
