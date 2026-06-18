@@ -14,11 +14,13 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol
 from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import JSON, Column, Index, Integer, MetaData, String, Table, create_engine, insert, inspect, select, text, update
+from sqlalchemy.engine import Engine
 
 from apps.api.app.auth import AccessContext, SERVICE_ROLE_WORKER, require_access
 from apps.api.app.models import (
@@ -31,6 +33,7 @@ from apps.api.app.models import (
     RunStatus,
 )
 from apps.api.app.models import utc_now
+from apps.api.app.store import DATABASE_URL_ENV, DEFAULT_DATABASE_URL
 from apps.worker.worker.runtime_smoke import (
     BrowserSmokeAdapter,
     BrowserSmokeCapture,
@@ -44,6 +47,7 @@ BROWSER_RUNNER_WORKERS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_WORKERS"
 BROWSER_RUNNER_WORKDIR_ENV = "AI_JSUNPACK_BROWSER_RUNNER_WORKDIR"
 BROWSER_RUNNER_DB_PATH_ENV = "AI_JSUNPACK_BROWSER_RUNNER_DB_PATH"
 BROWSER_RUNNER_QUEUE_BACKEND_ENV = "AI_JSUNPACK_BROWSER_RUNNER_QUEUE_BACKEND"
+BROWSER_RUNNER_QUEUE_DATABASE_URL_ENV = "AI_JSUNPACK_BROWSER_RUNNER_QUEUE_DATABASE_URL"
 BROWSER_RUNNER_MAX_ATTEMPTS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_ATTEMPTS"
 BROWSER_RUNNER_LEASE_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_LEASE_SECONDS"
 BROWSER_RUNNER_RETRY_BACKOFF_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS"
@@ -101,14 +105,550 @@ class BrowserRunRecord:
         )
 
 
+class BrowserRunQueueBackend(Protocol):
+    name: str
+
+    def initialize(self) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+    def insert(self, record: BrowserRunRecord) -> None:
+        ...
+
+    def get(self, run_id: str) -> BrowserRunRecord | None:
+        ...
+
+    def update(self, run_id: str, **changes) -> BrowserRunRecord | None:
+        ...
+
+    def claim(self, run_id: str, *, worker_id: str, lease_seconds: int) -> BrowserRunRecord | None:
+        ...
+
+    def claim_due(self, *, now: str, worker_id: str, lease_seconds: int, excluded_run_ids: set[str]) -> BrowserRunRecord | None:
+        ...
+
+    def recover_expired_leases(
+        self,
+        *,
+        now: str,
+        submitted_run_ids: set[str],
+        execution_boundary,
+    ) -> list[BrowserRunRecord]:
+        ...
+
+
+class SQLiteBrowserRunQueueBackend:
+    name = "sqlite"
+
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS browser_runs (
+                    id TEXT PRIMARY KEY,
+                    request_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    result_json TEXT,
+                    error TEXT,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 1,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    next_run_at TEXT,
+                    worker_id TEXT,
+                    queue_backend TEXT NOT NULL DEFAULT 'sqlite',
+                    lease_recovered INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS browser_runs_due_idx ON browser_runs(status, next_run_at, created_at)")
+            connection.execute("CREATE INDEX IF NOT EXISTS browser_runs_lease_idx ON browser_runs(status, lease_expires_at)")
+
+    def close(self) -> None:
+        return
+
+    def insert(self, record: BrowserRunRecord) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO browser_runs (
+                    id, request_json, status, created_at, updated_at, started_at, finished_at,
+                    result_json, error, attempt, max_attempts, lease_owner, lease_expires_at,
+                    next_run_at, worker_id, queue_backend, lease_recovered
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._row_values(record),
+            )
+
+    def get(self, run_id: str) -> BrowserRunRecord | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM browser_runs WHERE id = ?", (run_id,)).fetchone()
+        return self._record_from_row(row) if row else None
+
+    def update(self, run_id: str, **changes) -> BrowserRunRecord | None:
+        record = self.get(run_id)
+        if record is None:
+            return None
+        updated = replace(record, updated_at=utc_now(), **changes)
+        with self._connect() as connection:
+            self._save(connection, updated)
+        return updated
+
+    def claim(self, run_id: str, *, worker_id: str, lease_seconds: int) -> BrowserRunRecord | None:
+        started_at = utc_now()
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM browser_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None or row["status"] != "queued":
+                connection.execute("ROLLBACK")
+                return None
+            record = self._record_from_row(row)
+            updated = replace(
+                record,
+                status="running",
+                attempt=record.attempt + 1,
+                started_at=record.started_at or started_at,
+                updated_at=started_at,
+                lease_owner=worker_id,
+                lease_expires_at=lease_expires_at,
+                worker_id=worker_id,
+            )
+            self._save(connection, updated)
+            connection.execute("COMMIT")
+            return updated
+
+    def claim_due(self, *, now: str, worker_id: str, lease_seconds: int, excluded_run_ids: set[str]) -> BrowserRunRecord | None:
+        started_at = utc_now()
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM browser_runs
+                WHERE status = 'queued' AND (next_run_at IS NULL OR next_run_at <= ?)
+                ORDER BY next_run_at, created_at, id
+                """,
+                (now,),
+            ).fetchall()
+            for row in rows:
+                record = self._record_from_row(row)
+                if record.id in excluded_run_ids:
+                    continue
+                updated = replace(
+                    record,
+                    status="running",
+                    attempt=record.attempt + 1,
+                    started_at=record.started_at or started_at,
+                    updated_at=started_at,
+                    lease_owner=worker_id,
+                    lease_expires_at=lease_expires_at,
+                    worker_id=worker_id,
+                )
+                self._save(connection, updated)
+                connection.execute("COMMIT")
+                return updated
+            connection.execute("ROLLBACK")
+        return None
+
+    def recover_expired_leases(
+        self,
+        *,
+        now: str,
+        submitted_run_ids: set[str],
+        execution_boundary,
+    ) -> list[BrowserRunRecord]:
+        current_time = parse_timestamp(now)
+        recovered: list[BrowserRunRecord] = []
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM browser_runs WHERE status = 'running'").fetchall()
+            for row in rows:
+                record = self._record_from_row(row)
+                if record.id in submitted_run_ids:
+                    continue
+                expires_at = parse_optional_timestamp(record.lease_expires_at)
+                if expires_at is None or expires_at > current_time:
+                    continue
+                updated = expired_record_update(record, timestamp=now, execution_boundary=execution_boundary)
+                self._save(connection, updated)
+                recovered.append(updated)
+        return recovered
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    def _save(self, connection: sqlite3.Connection, record: BrowserRunRecord) -> None:
+        connection.execute(
+            """
+            UPDATE browser_runs
+            SET request_json = ?, status = ?, created_at = ?, updated_at = ?, started_at = ?,
+                finished_at = ?, result_json = ?, error = ?, attempt = ?, max_attempts = ?,
+                lease_owner = ?, lease_expires_at = ?, next_run_at = ?, worker_id = ?,
+                queue_backend = ?, lease_recovered = ?
+            WHERE id = ?
+            """,
+            (*self._row_values(record)[1:], record.id),
+        )
+
+    def _row_values(self, record: BrowserRunRecord) -> tuple[Any, ...]:
+        return (
+            record.id,
+            record.request.model_dump_json(by_alias=True),
+            record.status,
+            record.created_at,
+            record.updated_at,
+            record.started_at,
+            record.finished_at,
+            record.result.model_dump_json(by_alias=True) if record.result else None,
+            record.error,
+            record.attempt,
+            record.max_attempts,
+            record.lease_owner,
+            record.lease_expires_at,
+            record.next_run_at,
+            record.worker_id,
+            record.queue_backend,
+            1 if record.lease_recovered else 0,
+        )
+
+    def _record_from_row(self, row: sqlite3.Row) -> BrowserRunRecord:
+        return browser_run_record_from_mapping(row, default_queue_backend=self.name)
+
+
+browser_runner_metadata = MetaData()
+browser_runs_table = Table(
+    "browser_runs",
+    browser_runner_metadata,
+    Column("id", String, primary_key=True),
+    Column("request_json", JSON, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("started_at", String, nullable=True),
+    Column("finished_at", String, nullable=True),
+    Column("result_json", JSON, nullable=True),
+    Column("error", String, nullable=True),
+    Column("attempt", Integer, nullable=False, default=0),
+    Column("max_attempts", Integer, nullable=False, default=1),
+    Column("lease_owner", String, nullable=True),
+    Column("lease_expires_at", String, nullable=True),
+    Column("next_run_at", String, nullable=True),
+    Column("worker_id", String, nullable=True),
+    Column("queue_backend", String, nullable=False, default="postgresql"),
+    Column("lease_recovered", Integer, nullable=False, default=0),
+    Index("browser_runs_due_idx", "status", "next_run_at", "created_at"),
+    Index("browser_runs_lease_idx", "status", "lease_expires_at"),
+)
+
+
+class SqlAlchemyBrowserRunQueueBackend:
+    name = "postgresql"
+
+    def __init__(self, database_url: str | None = None, engine: Engine | None = None) -> None:
+        self.database_url = database_url or os.getenv(BROWSER_RUNNER_QUEUE_DATABASE_URL_ENV) or os.getenv(DATABASE_URL_ENV, DEFAULT_DATABASE_URL)
+        self.engine = engine or create_engine(self.database_url, future=True)
+        self._owns_engine = engine is None
+        self._schema_ready = False
+
+    def initialize(self) -> None:
+        if self._schema_ready:
+            return
+        browser_runner_metadata.create_all(self.engine)
+        self._ensure_columns()
+        self._schema_ready = True
+
+    def close(self) -> None:
+        if self._owns_engine:
+            self.engine.dispose()
+
+    def insert(self, record: BrowserRunRecord) -> None:
+        self.initialize()
+        with self.engine.begin() as connection:
+            connection.execute(insert(browser_runs_table).values(**self._row_values(record)))
+
+    def get(self, run_id: str) -> BrowserRunRecord | None:
+        self.initialize()
+        with self.engine.begin() as connection:
+            row = connection.execute(select(browser_runs_table).where(browser_runs_table.c.id == run_id)).mappings().first()
+        return self._record_from_row(row) if row else None
+
+    def update(self, run_id: str, **changes) -> BrowserRunRecord | None:
+        self.initialize()
+        with self.engine.begin() as connection:
+            row = connection.execute(select(browser_runs_table).where(browser_runs_table.c.id == run_id)).mappings().first()
+            if row is None:
+                return None
+            record = self._record_from_row(row)
+            updated = replace(record, updated_at=utc_now(), **changes)
+            connection.execute(update(browser_runs_table).where(browser_runs_table.c.id == run_id).values(**self._row_values(updated)))
+        return updated
+
+    def claim(self, run_id: str, *, worker_id: str, lease_seconds: int) -> BrowserRunRecord | None:
+        self.initialize()
+        started_at = utc_now()
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self.engine.begin() as connection:
+            row = connection.execute(select(browser_runs_table).where(browser_runs_table.c.id == run_id)).mappings().first()
+            if row is None or row["status"] != "queued":
+                return None
+            record = self._record_from_row(row)
+            updated = replace(
+                record,
+                status="running",
+                attempt=record.attempt + 1,
+                started_at=record.started_at or started_at,
+                updated_at=started_at,
+                lease_owner=worker_id,
+                lease_expires_at=lease_expires_at,
+                worker_id=worker_id,
+            )
+            result = connection.execute(
+                update(browser_runs_table)
+                .where(browser_runs_table.c.id == run_id, browser_runs_table.c.status == "queued")
+                .values(**self._row_values(updated))
+            )
+            if result.rowcount == 0:
+                return None
+        return updated
+
+    def claim_due(self, *, now: str, worker_id: str, lease_seconds: int, excluded_run_ids: set[str]) -> BrowserRunRecord | None:
+        self.initialize()
+        started_at = utc_now()
+        lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self.engine.begin() as connection:
+            rows = (
+                connection.execute(
+                    select(browser_runs_table)
+                    .where(
+                        browser_runs_table.c.status == "queued",
+                        (browser_runs_table.c.next_run_at.is_(None)) | (browser_runs_table.c.next_run_at <= now),
+                    )
+                    .order_by(browser_runs_table.c.next_run_at, browser_runs_table.c.created_at, browser_runs_table.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            for row in rows:
+                record = self._record_from_row(row)
+                if record.id in excluded_run_ids:
+                    continue
+                updated = replace(
+                    record,
+                    status="running",
+                    attempt=record.attempt + 1,
+                    started_at=record.started_at or started_at,
+                    updated_at=started_at,
+                    lease_owner=worker_id,
+                    lease_expires_at=lease_expires_at,
+                    worker_id=worker_id,
+                )
+                result = connection.execute(
+                    update(browser_runs_table)
+                    .where(browser_runs_table.c.id == record.id, browser_runs_table.c.status == "queued")
+                    .values(**self._row_values(updated))
+                )
+                if result.rowcount:
+                    return updated
+        return None
+
+    def recover_expired_leases(
+        self,
+        *,
+        now: str,
+        submitted_run_ids: set[str],
+        execution_boundary,
+    ) -> list[BrowserRunRecord]:
+        self.initialize()
+        current_time = parse_timestamp(now)
+        recovered: list[BrowserRunRecord] = []
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(browser_runs_table).where(browser_runs_table.c.status == "running")).mappings().all()
+            for row in rows:
+                record = self._record_from_row(row)
+                if record.id in submitted_run_ids:
+                    continue
+                expires_at = parse_optional_timestamp(record.lease_expires_at)
+                if expires_at is None or expires_at > current_time:
+                    continue
+                updated = expired_record_update(record, timestamp=now, execution_boundary=execution_boundary)
+                result = connection.execute(
+                    update(browser_runs_table)
+                    .where(
+                        browser_runs_table.c.id == record.id,
+                        browser_runs_table.c.status == "running",
+                        browser_runs_table.c.lease_expires_at == record.lease_expires_at,
+                    )
+                    .values(**self._row_values(updated))
+                )
+                if result.rowcount:
+                    recovered.append(updated)
+        return recovered
+
+    def _row_values(self, record: BrowserRunRecord) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "request_json": record.request.model_dump(by_alias=True),
+            "status": record.status,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "started_at": record.started_at,
+            "finished_at": record.finished_at,
+            "result_json": record.result.model_dump(by_alias=True) if record.result else None,
+            "error": record.error,
+            "attempt": record.attempt,
+            "max_attempts": record.max_attempts,
+            "lease_owner": record.lease_owner,
+            "lease_expires_at": record.lease_expires_at,
+            "next_run_at": record.next_run_at,
+            "worker_id": record.worker_id,
+            "queue_backend": record.queue_backend,
+            "lease_recovered": 1 if record.lease_recovered else 0,
+        }
+
+    def _record_from_row(self, row: Any) -> BrowserRunRecord:
+        return browser_run_record_from_mapping(row, default_queue_backend=self.name)
+
+    def _ensure_columns(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("browser_runs")}
+        expected_columns = {
+            "started_at": "VARCHAR",
+            "finished_at": "VARCHAR",
+            "result_json": "JSON",
+            "error": "VARCHAR",
+            "attempt": "INTEGER NOT NULL DEFAULT 0",
+            "max_attempts": "INTEGER NOT NULL DEFAULT 1",
+            "lease_owner": "VARCHAR",
+            "lease_expires_at": "VARCHAR",
+            "next_run_at": "VARCHAR",
+            "worker_id": "VARCHAR",
+            "queue_backend": "VARCHAR NOT NULL DEFAULT 'postgresql'",
+            "lease_recovered": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with self.engine.begin() as connection:
+            for column_name, column_type in expected_columns.items():
+                if column_name not in existing_columns:
+                    connection.execute(text(f"ALTER TABLE browser_runs ADD COLUMN {column_name} {column_type}"))
+
+
+def browser_run_record_from_mapping(row: Any, *, default_queue_backend: str) -> BrowserRunRecord:
+    data = dict(row)
+    request_json = data["request_json"]
+    result_json = data.get("result_json")
+    if isinstance(request_json, str):
+        request_payload = json.loads(request_json)
+    else:
+        request_payload = request_json
+    if isinstance(result_json, str):
+        result_payload = json.loads(result_json) if result_json else None
+    else:
+        result_payload = result_json
+    return BrowserRunRecord(
+        id=data["id"],
+        request=BrowserRunRequest.model_validate(request_payload),
+        status=data["status"],
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        started_at=data.get("started_at"),
+        finished_at=data.get("finished_at"),
+        result=BrowserRunResult.model_validate(result_payload) if result_payload else None,
+        error=data.get("error"),
+        attempt=int(data.get("attempt") or 0),
+        max_attempts=int(data.get("max_attempts") or DEFAULT_BROWSER_RUNNER_MAX_ATTEMPTS),
+        lease_owner=data.get("lease_owner"),
+        lease_expires_at=data.get("lease_expires_at"),
+        next_run_at=data.get("next_run_at"),
+        worker_id=data.get("worker_id"),
+        queue_backend=data.get("queue_backend") or default_queue_backend,
+        lease_recovered=bool(data.get("lease_recovered")),
+    )
+
+
+def expired_record_update(record: BrowserRunRecord, *, timestamp: str, execution_boundary) -> BrowserRunRecord:
+    if record.attempt >= record.max_attempts:
+        result = BrowserRunResult(
+            status="best_effort",
+            failure_class="timeout",
+            page_errors=[f"Browser Runner lease expired after {record.attempt} attempt(s)."],
+            limitations=["Remote Browser Runner run expired before capture evidence could be completed."],
+            execution_boundary=execution_boundary(record, lease_recovered=True),
+        )
+        return replace(
+            record,
+            status="best_effort",
+            result=result,
+            error=result.page_errors[0],
+            updated_at=timestamp,
+            finished_at=timestamp,
+            lease_owner=None,
+            lease_expires_at=None,
+            lease_recovered=True,
+        )
+    return replace(
+        record,
+        status="queued",
+        updated_at=timestamp,
+        lease_owner=None,
+        lease_expires_at=None,
+        next_run_at=timestamp,
+        error="Previous Browser Runner lease expired; run returned to queue.",
+        lease_recovered=True,
+    )
+
+
+def create_queue_backend(
+    *,
+    backend: str | None = None,
+    db_path: Path | str | None = None,
+    workdir: Path | str | None = None,
+    database_url: str | None = None,
+    engine: Engine | None = None,
+) -> BrowserRunQueueBackend:
+    selected = normalize_queue_backend(backend or os.getenv(BROWSER_RUNNER_QUEUE_BACKEND_ENV, "sqlite"))
+    if selected == "postgresql":
+        return SqlAlchemyBrowserRunQueueBackend(database_url=database_url, engine=engine)
+    root = Path(workdir or os.getenv(BROWSER_RUNNER_WORKDIR_ENV, tempfile.gettempdir()))
+    path = Path(db_path or os.getenv(BROWSER_RUNNER_DB_PATH_ENV, root / "browser-runs.sqlite3"))
+    return SQLiteBrowserRunQueueBackend(path)
+
+
+def normalize_queue_backend(value: str | None) -> str:
+    normalized = (value or "sqlite").strip().lower()
+    if normalized in {"postgres", "postgresql", "shared-db", "shared_db", "database"}:
+        return "postgresql"
+    return "sqlite"
+
+
 class BrowserRunnerQueue:
     def __init__(
         self,
         *,
         browser_adapter: BrowserSmokeAdapter | None = None,
+        backend: BrowserRunQueueBackend | None = None,
+        queue_backend: str | None = None,
         max_workers: int | None = None,
         workdir: Path | str | None = None,
         db_path: Path | str | None = None,
+        database_url: str | None = None,
+        engine: Engine | None = None,
         max_attempts: int | None = None,
         lease_seconds: int | None = None,
         retry_backoff_seconds: float | None = None,
@@ -120,11 +660,14 @@ class BrowserRunnerQueue:
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.workdir = Path(workdir or os.getenv(BROWSER_RUNNER_WORKDIR_ENV, tempfile.gettempdir()))
         self.workdir.mkdir(parents=True, exist_ok=True)
-        self.queue_backend = os.getenv(BROWSER_RUNNER_QUEUE_BACKEND_ENV, "sqlite").strip().lower() or "sqlite"
-        if self.queue_backend != "sqlite":
-            self.queue_backend = "sqlite"
-        self.db_path = Path(db_path or os.getenv(BROWSER_RUNNER_DB_PATH_ENV, self.workdir / "browser-runs.sqlite3"))
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.backend = backend or create_queue_backend(
+            backend=queue_backend,
+            db_path=db_path,
+            workdir=self.workdir,
+            database_url=database_url,
+            engine=engine,
+        )
+        self.queue_backend = self.backend.name
         self.max_attempts = max_attempts or parse_int_env(
             BROWSER_RUNNER_MAX_ATTEMPTS_ENV,
             DEFAULT_BROWSER_RUNNER_MAX_ATTEMPTS,
@@ -149,7 +692,7 @@ class BrowserRunnerQueue:
         self._stop = threading.Event()
         self._scheduler = threading.Thread(target=self._scheduler_loop, name="browser-runner-scheduler", daemon=True)
         self._scheduler_started = False
-        self._initialize_storage()
+        self.backend.initialize()
         self.recover_expired_leases(schedule=False)
         if self.auto_start:
             self._scheduler.start()
@@ -170,13 +713,13 @@ class BrowserRunnerQueue:
             worker_id=self.worker_id,
             queue_backend=self.queue_backend,
         )
-        self._insert(record)
+        self.backend.insert(record)
         if self.auto_start:
             self._schedule_due_runs()
         return record.summary()
 
     def get(self, run_id: str) -> BrowserRunSummary | None:
-        record = self._record(run_id)
+        record = self.backend.get(run_id)
         return record.summary() if record else None
 
     def close(self) -> None:
@@ -184,58 +727,21 @@ class BrowserRunnerQueue:
         if self._scheduler_started:
             self._scheduler.join(timeout=max(1.0, self.poll_seconds + 1))
         self.executor.shutdown(wait=True, cancel_futures=False)
+        self.backend.close()
 
     def recover_expired_leases(self, *, now: str | None = None, schedule: bool = True) -> list[BrowserRunSummary]:
         timestamp = now or utc_now()
-        current_time = parse_timestamp(timestamp)
-        recovered: list[BrowserRunSummary] = []
-        with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM browser_runs WHERE status = 'running'").fetchall()
-            for row in rows:
-                record = self._record_from_row(row)
-                if record.id in self._submitted:
-                    continue
-                expires_at = parse_optional_timestamp(record.lease_expires_at)
-                if expires_at is None or expires_at > current_time:
-                    continue
-                if record.attempt >= record.max_attempts:
-                    result = BrowserRunResult(
-                        status="best_effort",
-                        failure_class="timeout",
-                        page_errors=[f"Browser Runner lease expired after {record.attempt} attempt(s)."],
-                        limitations=["Remote Browser Runner run expired before capture evidence could be completed."],
-                        execution_boundary=self._execution_boundary(record, lease_recovered=True),
-                    )
-                    updated = replace(
-                        record,
-                        status="best_effort",
-                        result=result,
-                        error=result.page_errors[0],
-                        updated_at=timestamp,
-                        finished_at=timestamp,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        lease_recovered=True,
-                    )
-                else:
-                    updated = replace(
-                        record,
-                        status="queued",
-                        updated_at=timestamp,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        next_run_at=timestamp,
-                        error="Previous Browser Runner lease expired; run returned to queue.",
-                        lease_recovered=True,
-                    )
-                self._save(connection, updated)
-                recovered.append(updated.summary())
+        recovered = self.backend.recover_expired_leases(
+            now=timestamp,
+            submitted_run_ids=set(self._submitted),
+            execution_boundary=self._execution_boundary,
+        )
         if schedule and self.auto_start:
             self._schedule_due_runs()
-        return recovered
+        return [record.summary() for record in recovered]
 
-    def _execute(self, run_id: str) -> None:
-        record = self._claim(run_id)
+    def _execute(self, run_id: str, record: BrowserRunRecord | None = None) -> None:
+        record = record or self._claim(run_id)
         if record is None:
             self._discard_submitted(run_id)
             return
@@ -250,7 +756,7 @@ class BrowserRunnerQueue:
                 lease_expires_at=None,
             )
         except Exception as error:
-            current = self._record(run_id) or record
+            current = self.backend.get(run_id) or record
             failure_class = classify_browser_runner_error(error)
             retryable = failure_class not in {"invalid_input", "policy_denied", "sandbox_denied"}
             if retryable and current.attempt < current.max_attempts:
@@ -356,151 +862,11 @@ class BrowserRunnerQueue:
             "leaseRecovered": record.lease_recovered if lease_recovered is None else lease_recovered,
         }
 
-    def _initialize_storage(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS browser_runs (
-                    id TEXT PRIMARY KEY,
-                    request_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    result_json TEXT,
-                    error TEXT,
-                    attempt INTEGER NOT NULL DEFAULT 0,
-                    max_attempts INTEGER NOT NULL DEFAULT 1,
-                    lease_owner TEXT,
-                    lease_expires_at TEXT,
-                    next_run_at TEXT,
-                    worker_id TEXT,
-                    queue_backend TEXT NOT NULL DEFAULT 'sqlite',
-                    lease_recovered INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            connection.execute("CREATE INDEX IF NOT EXISTS browser_runs_due_idx ON browser_runs(status, next_run_at, created_at)")
-            connection.execute("CREATE INDEX IF NOT EXISTS browser_runs_lease_idx ON browser_runs(status, lease_expires_at)")
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA busy_timeout=30000")
-        try:
-            yield connection
-        finally:
-            connection.close()
-
-    def _insert(self, record: BrowserRunRecord) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO browser_runs (
-                    id, request_json, status, created_at, updated_at, started_at, finished_at,
-                    result_json, error, attempt, max_attempts, lease_owner, lease_expires_at,
-                    next_run_at, worker_id, queue_backend, lease_recovered
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._row_values(record),
-            )
-
-    def _save(self, connection: sqlite3.Connection, record: BrowserRunRecord) -> None:
-        connection.execute(
-            """
-            UPDATE browser_runs
-            SET request_json = ?, status = ?, created_at = ?, updated_at = ?, started_at = ?,
-                finished_at = ?, result_json = ?, error = ?, attempt = ?, max_attempts = ?,
-                lease_owner = ?, lease_expires_at = ?, next_run_at = ?, worker_id = ?,
-                queue_backend = ?, lease_recovered = ?
-            WHERE id = ?
-            """,
-            (*self._row_values(record)[1:], record.id),
-        )
-
-    def _row_values(self, record: BrowserRunRecord) -> tuple[Any, ...]:
-        return (
-            record.id,
-            record.request.model_dump_json(by_alias=True),
-            record.status,
-            record.created_at,
-            record.updated_at,
-            record.started_at,
-            record.finished_at,
-            record.result.model_dump_json(by_alias=True) if record.result else None,
-            record.error,
-            record.attempt,
-            record.max_attempts,
-            record.lease_owner,
-            record.lease_expires_at,
-            record.next_run_at,
-            record.worker_id,
-            record.queue_backend,
-            1 if record.lease_recovered else 0,
-        )
-
-    def _record(self, run_id: str) -> BrowserRunRecord | None:
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM browser_runs WHERE id = ?", (run_id,)).fetchone()
-        return self._record_from_row(row) if row else None
-
-    def _record_from_row(self, row: sqlite3.Row) -> BrowserRunRecord:
-        result_json = row["result_json"]
-        return BrowserRunRecord(
-            id=row["id"],
-            request=BrowserRunRequest.model_validate(json.loads(row["request_json"])),
-            status=row["status"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            result=BrowserRunResult.model_validate(json.loads(result_json)) if result_json else None,
-            error=row["error"],
-            attempt=int(row["attempt"] or 0),
-            max_attempts=int(row["max_attempts"] or self.max_attempts),
-            lease_owner=row["lease_owner"],
-            lease_expires_at=row["lease_expires_at"],
-            next_run_at=row["next_run_at"],
-            worker_id=row["worker_id"],
-            queue_backend=row["queue_backend"] or self.queue_backend,
-            lease_recovered=bool(row["lease_recovered"]),
-        )
-
     def _update(self, run_id: str, **changes) -> None:
-        record = self._record(run_id)
-        if record is None:
-            return
-        updated = replace(record, updated_at=utc_now(), **changes)
-        with self._connect() as connection:
-            self._save(connection, updated)
+        self.backend.update(run_id, **changes)
 
     def _claim(self, run_id: str) -> BrowserRunRecord | None:
-        started_at = utc_now()
-        lease_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, self.lease_seconds))).isoformat()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM browser_runs WHERE id = ?", (run_id,)).fetchone()
-            if row is None or row["status"] != "queued":
-                connection.execute("ROLLBACK")
-                return None
-            record = self._record_from_row(row)
-            updated = replace(
-                record,
-                status="running",
-                attempt=record.attempt + 1,
-                started_at=record.started_at or started_at,
-                updated_at=started_at,
-                lease_owner=self.worker_id,
-                lease_expires_at=lease_expires_at,
-                worker_id=self.worker_id,
-            )
-            self._save(connection, updated)
-            connection.execute("COMMIT")
-            return updated
+        return self.backend.claim(run_id, worker_id=self.worker_id, lease_seconds=self.lease_seconds)
 
     def _scheduler_loop(self) -> None:
         while not self._stop.wait(max(0.05, self.poll_seconds)):
@@ -510,21 +876,18 @@ class BrowserRunnerQueue:
     def _schedule_due_runs(self) -> None:
         now = utc_now()
         with self._lock:
-            with self._connect() as connection:
-                rows = connection.execute(
-                    """
-                    SELECT id FROM browser_runs
-                    WHERE status = 'queued' AND (next_run_at IS NULL OR next_run_at <= ?)
-                    ORDER BY next_run_at, created_at, id
-                    """,
-                    (now,),
-                ).fetchall()
-            for row in rows:
-                run_id = row["id"]
-                if run_id in self._submitted:
-                    continue
+            while len(self._submitted) < self.max_workers:
+                record = self.backend.claim_due(
+                    now=now,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.lease_seconds,
+                    excluded_run_ids=self._submitted,
+                )
+                if record is None:
+                    break
+                run_id = record.id
                 self._submitted.add(run_id)
-                self.executor.submit(self._execute, run_id)
+                self.executor.submit(self._execute, run_id, record)
 
     def _discard_submitted(self, run_id: str) -> None:
         with self._lock:

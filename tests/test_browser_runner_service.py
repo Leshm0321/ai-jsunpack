@@ -8,10 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from apps.api.app.auth import create_auth_token
 from apps.api.app.models import BrowserRunRequest
-from apps.browser_runner.app.main import BrowserRunnerQueue, create_app
+from apps.browser_runner.app.main import BrowserRunnerQueue, SqlAlchemyBrowserRunQueueBackend, create_app, normalize_queue_backend
 from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest
 
 
@@ -187,6 +188,104 @@ class BrowserRunnerServiceTest(unittest.TestCase):
             self.assertTrue(summary.lease_recovered)
             queue.close()
 
+    def test_sqlalchemy_backend_shares_runs_between_queue_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = create_engine(f"sqlite:///{(root / 'shared-browser-runs.db').as_posix()}", future=True)
+            first_queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                backend=SqlAlchemyBrowserRunQueueBackend(engine=engine),
+                max_workers=1,
+                workdir=root,
+                auto_start=False,
+            )
+            run = first_queue.submit(self._request("job_shared_db"))
+            first_queue.close()
+
+            second_adapter = ServiceFakeBrowserAdapter()
+            second_queue = BrowserRunnerQueue(
+                browser_adapter=second_adapter,
+                backend=SqlAlchemyBrowserRunQueueBackend(engine=engine),
+                max_workers=1,
+                workdir=root,
+            )
+            try:
+                summary = self._wait_for_queue_run(second_queue, run.id)
+                self.assertEqual(summary.status, "pass")
+                self.assertEqual(summary.queue_backend, "postgresql")
+                self.assertEqual(summary.result.execution_boundary["queueBackend"], "postgresql")
+                self.assertEqual(len(second_adapter.requests), 1)
+            finally:
+                second_queue.close()
+                engine.dispose()
+
+    def test_sqlalchemy_backend_claim_due_is_atomic_across_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = create_engine(f"sqlite:///{(root / 'shared-claim.db').as_posix()}", future=True)
+            first_backend = SqlAlchemyBrowserRunQueueBackend(engine=engine)
+            second_backend = SqlAlchemyBrowserRunQueueBackend(engine=engine)
+            queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                backend=first_backend,
+                max_workers=1,
+                workdir=root,
+                auto_start=False,
+            )
+            try:
+                run = queue.submit(self._request("job_claim"))
+                claimed = first_backend.claim_due(
+                    now="2099-01-01T00:00:00+00:00",
+                    worker_id="browser-runner-a",
+                    lease_seconds=60,
+                    excluded_run_ids=set(),
+                )
+                self.assertIsNotNone(claimed)
+                self.assertEqual(claimed.id, run.id)
+                self.assertIsNone(
+                    second_backend.claim_due(
+                        now="2099-01-01T00:00:00+00:00",
+                        worker_id="browser-runner-b",
+                        lease_seconds=60,
+                        excluded_run_ids=set(),
+                    )
+                )
+                persisted = second_backend.get(run.id)
+                self.assertEqual(persisted.status, "running")
+                self.assertEqual(persisted.lease_owner, "browser-runner-a")
+            finally:
+                queue.close()
+                engine.dispose()
+
+    def test_sqlalchemy_backend_recovers_expired_lease_with_audit_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = create_engine(f"sqlite:///{(root / 'shared-recovery.db').as_posix()}", future=True)
+            backend = SqlAlchemyBrowserRunQueueBackend(engine=engine)
+            queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                backend=backend,
+                max_workers=1,
+                workdir=root,
+                lease_seconds=1,
+                auto_start=False,
+            )
+            try:
+                run = queue.submit(self._request("job_shared_recover"))
+                claimed = backend.claim(run.id, worker_id="browser-runner-a", lease_seconds=1)
+                self.assertIsNotNone(claimed)
+                backend.update(run.id, lease_expires_at="2026-01-01T00:00:00+00:00")
+
+                recovered = queue.recover_expired_leases(now="2026-01-01T00:00:02+00:00", schedule=False)
+                self.assertEqual(len(recovered), 1)
+                self.assertEqual(recovered[0].status, "queued")
+                self.assertEqual(recovered[0].queue_backend, "postgresql")
+                self.assertTrue(recovered[0].lease_recovered)
+                self.assertIsNone(recovered[0].lease_owner)
+            finally:
+                queue.close()
+                engine.dispose()
+
     def test_browser_run_retries_transient_capture_failures(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             adapter = ServiceFakeBrowserAdapter(fail_times=1)
@@ -215,6 +314,11 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 self.assertEqual(summary.status, "pass")
             self.assertEqual(adapter.max_active, 1)
             queue.close()
+
+    def test_queue_backend_aliases_normalize_to_supported_backends(self):
+        self.assertEqual(normalize_queue_backend("postgres"), "postgresql")
+        self.assertEqual(normalize_queue_backend("shared-db"), "postgresql")
+        self.assertEqual(normalize_queue_backend("rabbitmq"), "sqlite")
 
     def _wait_for_run(self, client: TestClient, run_id: str, token: str) -> dict:
         for _ in range(50):
