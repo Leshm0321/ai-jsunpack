@@ -287,7 +287,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertIn("--network", runtime_payload["argv"])
         self.assertIn("ai-jsunpack-container-test-image", runtime_payload["argv"])
 
-    def test_gvisor_runner_config_records_profile_and_denies_without_adapter(self):
+    def test_gvisor_runner_config_requires_adapter_without_fallback(self):
         job = self.store.create_job(
             CreateJobRequest(
                 project_id="proj",
@@ -295,6 +295,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
                 config={
                     "buildValidation": {
                         "sandboxRunner": "gvisor",
+                        "gvisorRuntimeCommand": [],
                         "sandboxRuntimeVersion": "2026.06-test",
                     }
                 },
@@ -322,7 +323,57 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(build_artifact["resourcePolicy"]["runtimeVersion"], "2026.06-test")
         self.assertEqual(capabilities["network"], "unsupported")
         self.assertIn("audit profile only", build_artifact["resourcePolicy"]["capabilities"][0]["detail"])
-        self.assertIn("execution adapter", build_log["stderr"])
+        self.assertIn("gVisor container runtime command is not configured", build_log["stderr"])
+
+    def test_gvisor_runner_config_uses_runsc_adapter(self):
+        fake_runtime = self.root / "fake_gvisor_runtime.py"
+        fake_runtime.write_text(
+            (
+                "import json, sys\n"
+                "print(json.dumps({'argv': sys.argv[1:]}))\n"
+            ),
+            encoding="utf-8",
+        )
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={
+                    "buildValidation": {
+                        "sandboxRunner": "gvisor",
+                        "containerImage": "ai-jsunpack-gvisor-test-image",
+                        "gvisorRuntimeCommand": [sys.executable, str(fake_runtime)],
+                        "sandboxRuntimeVersion": "2026.06-test",
+                    }
+                },
+            )
+        )
+        project_root = self.root / "generated-gvisor-adapter"
+        (project_root / "scripts").mkdir(parents=True)
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        (project_root / "scripts" / "build.mjs").write_text("console.log('build')", encoding="utf-8")
+        (project_root / "scripts" / "typecheck.mjs").write_text("console.log('typecheck')", encoding="utf-8")
+
+        result = BuildValidationRunner().run(job_id=job.id, store=self.store, project_path=project_root)
+
+        build_artifact = json.loads(Path(result.build.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        runtime_payload = json.loads(build_log["stdout"])
+        capabilities = {
+            capability["name"]: capability["status"]
+            for capability in build_artifact["resourcePolicy"]["capabilities"]
+        }
+        self.assertEqual(result.build.review_run.status, "pass")
+        self.assertEqual(result.typecheck.review_run.status, "pass")
+        self.assertEqual(build_artifact["resourcePolicy"]["enforcement"], "runtime_isolated")
+        self.assertEqual(build_artifact["resourcePolicy"]["runnerKind"], "gvisor")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeName"], "runsc")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeVersion"], "2026.06-test")
+        self.assertEqual(capabilities["network"], "enforced")
+        self.assertEqual(capabilities["process"], "enforced")
+        self.assertEqual(build_artifact["networkPolicy"], "deny")
+        self.assertEqual(runtime_payload["argv"][runtime_payload["argv"].index("--runtime") + 1], "runsc")
+        self.assertIn("ai-jsunpack-gvisor-test-image", runtime_payload["argv"])
 
     def test_firecracker_runner_config_uses_launcher_adapter(self):
         fake_launcher = self.root / "fake_firecracker_launcher.py"

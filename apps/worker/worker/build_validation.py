@@ -29,6 +29,7 @@ from packages.sandbox import (
     DEFAULT_CONTAINER_IMAGE,
     ContainerSandboxRunner,
     FirecrackerSandboxRunner,
+    GVisorSandboxRunner,
     LocalSandboxRunner,
     PROFILE_ONLY_RUNNERS,
     ProfileOnlySandboxRunner,
@@ -102,6 +103,7 @@ class BuildValidationConfig:
     sandbox_runner: SandboxRunnerKind = "local"
     container_image: str = DEFAULT_CONTAINER_IMAGE
     container_runtime_command: tuple[str, ...] | None = None
+    gvisor_runtime_command: tuple[str, ...] | None = None
     firecracker_runner_command: tuple[str, ...] | None = None
     sandbox_runtime_name: str | None = None
     sandbox_runtime_version: str | None = None
@@ -186,7 +188,12 @@ class BuildValidationRunner:
 
     def __init__(
         self,
-        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner | None = None,
+        sandbox_runner: LocalSandboxRunner
+        | ContainerSandboxRunner
+        | GVisorSandboxRunner
+        | FirecrackerSandboxRunner
+        | ProfileOnlySandboxRunner
+        | None = None,
         build_command: Sequence[str] = DEFAULT_BUILD_COMMAND,
         typecheck_command: Sequence[str] = DEFAULT_TYPECHECK_COMMAND,
     ) -> None:
@@ -840,12 +847,18 @@ class BuildValidationRunner:
             config.get("containerImage") or os.getenv("AI_JSUNPACK_SANDBOX_IMAGE"),
             default=DEFAULT_CONTAINER_IMAGE,
         )
+        gvisor_runtime_command_value = (
+            config.get("gvisorRuntimeCommand")
+            if "gvisorRuntimeCommand" in config
+            else os.getenv("AI_JSUNPACK_SANDBOX_GVISOR_RUNTIME_COMMAND")
+        )
         return BuildValidationConfig(
             max_attempts=max_attempts,
             install_dependencies=bool(config.get("installDependencies", False)),
             sandbox_runner=sandbox_runner,
             container_image=container_image,
             container_runtime_command=self._container_runtime_command_config(config.get("containerRuntimeCommand")),
+            gvisor_runtime_command=self._runner_command_config(gvisor_runtime_command_value),
             firecracker_runner_command=self._runner_command_config(
                 config.get("firecrackerRunnerCommand") or os.getenv("AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND")
             ),
@@ -860,13 +873,25 @@ class BuildValidationRunner:
     def _sandbox_runner_for_config(
         self,
         config: BuildValidationConfig,
-    ) -> LocalSandboxRunner | ContainerSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner:
+    ) -> LocalSandboxRunner | ContainerSandboxRunner | GVisorSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner:
         policy = self._sandbox_policy()
         if config.sandbox_runner == "container":
             return ContainerSandboxRunner(
                 policy,
                 image=config.container_image,
                 runtime_command=config.container_runtime_command,
+            )
+        if config.sandbox_runner == "gvisor":
+            return GVisorSandboxRunner(
+                policy,
+                image=config.container_image,
+                runtime_command=(
+                    config.gvisor_runtime_command
+                    if config.gvisor_runtime_command is not None
+                    else config.container_runtime_command
+                ),
+                gvisor_runtime=config.sandbox_runtime_name,
+                runtime_version=config.sandbox_runtime_version,
             )
         if config.sandbox_runner == "firecracker":
             return FirecrackerSandboxRunner(

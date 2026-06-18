@@ -8,6 +8,7 @@ from pathlib import Path
 from packages.sandbox import (
     ContainerSandboxRunner,
     FirecrackerSandboxRunner,
+    GVisorSandboxRunner,
     LocalSandboxRunner,
     ProfileOnlySandboxRunner,
     SandboxCommand,
@@ -239,6 +240,80 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIn("audit profile only", capabilities["network"].detail)
         self.assertIn("gVisor deployments", policy.limitations[0])
 
+    def test_gvisor_runner_maps_policy_to_runsc_runtime_arguments(self):
+        secret_name = "AI_JSUNPACK_TEST_SECRET"
+        os.environ[secret_name] = "secret"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                fake_runtime = Path(temp_dir) / "fake_container_runtime.py"
+                fake_runtime.write_text(
+                    (
+                        "import json, os, sys\n"
+                        "print(json.dumps({"
+                        "'argv': sys.argv[1:], "
+                        "'hasSecret': 'AI_JSUNPACK_TEST_SECRET' in os.environ"
+                        "}))\n"
+                    ),
+                    encoding="utf-8",
+                )
+                runner = GVisorSandboxRunner(
+                    SandboxPolicy(
+                        allowed_commands=("node",),
+                        resource_policy=SandboxResourcePolicy(
+                            process_limit=8,
+                            cpu_time_limit_ms=1200,
+                            memory_limit_bytes=64 * 1024 * 1024,
+                        ),
+                    ),
+                    image="ai-jsunpack-test-image",
+                    runtime_command=(sys.executable, str(fake_runtime)),
+                    runtime_version="2026.06-test",
+                )
+                with runner.attempt_workspace() as workspace:
+                    (workspace / "project").mkdir()
+                    result = runner.run_in_workspace(
+                        SandboxCommand(
+                            executable="node",
+                            args=("-e", "console.log('ok')"),
+                            working_directory="project",
+                        ),
+                        workspace,
+                    )
+        finally:
+            os.environ.pop(secret_name, None)
+
+        payload = json.loads(result.stdout)
+        argv = payload["argv"]
+        capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
+        self.assertEqual(result.failure_class, "none")
+        self.assertFalse(payload["hasSecret"])
+        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "gvisor")
+        self.assertEqual(result.resource_policy.runtime_name, "runsc")
+        self.assertEqual(result.resource_policy.runtime_version, "2026.06-test")
+        self.assertEqual(capabilities["network"].status, "enforced")
+        self.assertEqual(capabilities["process"].status, "enforced")
+        self.assertEqual(argv[argv.index("--runtime") + 1], "runsc")
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertEqual(argv[argv.index("--pids-limit") + 1], "8")
+        self.assertEqual(argv[argv.index("--memory") + 1], str(64 * 1024 * 1024))
+        self.assertIn("ai-jsunpack-test-image", argv)
+        self.assertNotIn(f"{secret_name}=secret", argv)
+
+    def test_gvisor_runner_requires_configured_container_runtime(self):
+        runner = GVisorSandboxRunner(
+            SandboxPolicy(allowed_commands=((sys.executable,),)),
+            runtime_command=(),
+        )
+
+        result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('no runsc')")))
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertIsNone(result.exit_code)
+        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "gvisor")
+        self.assertIn("gVisor container runtime command is not configured", result.denied_reason or "")
+
     def test_remote_browser_runner_profile_records_remote_isolation_boundary(self):
         policy = sandbox_resource_policy_profile(
             runner_kind="remote_browser_runner",
@@ -257,16 +332,16 @@ class LocalSandboxRunnerTest(unittest.TestCase):
     def test_profile_only_runner_denies_execution_without_fallback(self):
         runner = ProfileOnlySandboxRunner(
             SandboxPolicy(allowed_commands=((sys.executable,),)),
-            runner_kind="gvisor",
+            runner_kind="remote_browser_runner",
         )
 
         result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('no fallback')")))
 
         self.assertEqual(result.failure_class, "sandbox_denied")
         self.assertIsNone(result.exit_code)
-        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
-        self.assertEqual(result.resource_policy.runner_kind, "gvisor")
-        self.assertIn("does not include a gVisor execution adapter", result.denied_reason or "")
+        self.assertEqual(result.resource_policy.enforcement, "remote_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "remote_browser_runner")
+        self.assertIn("does not include a Remote Browser Runner execution adapter", result.denied_reason or "")
 
     def test_firecracker_runner_requires_configured_launcher(self):
         runner = FirecrackerSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),)))

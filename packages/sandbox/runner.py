@@ -29,7 +29,8 @@ SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesyst
 SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 AllowedCommand = str | Sequence[str]
 DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
-PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("gvisor", "remote_browser_runner")
+PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("remote_browser_runner",)
+DEFAULT_GVISOR_RUNTIME_NAME = "runsc"
 
 
 @dataclass(frozen=True)
@@ -778,6 +779,74 @@ class ContainerSandboxRunner(LocalSandboxRunner):
     def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
         allowed_names = set(self.policy.allowed_environment)
         return {name: value for name, value in command.environment.items() if name in allowed_names}
+
+
+class GVisorSandboxRunner(ContainerSandboxRunner):
+    """Runs sandbox commands through Docker/Podman with the gVisor runsc runtime."""
+
+    def __init__(
+        self,
+        policy: SandboxPolicy | None = None,
+        *,
+        image: str = DEFAULT_CONTAINER_IMAGE,
+        runtime_command: Sequence[str] | None = None,
+        gvisor_runtime: str | None = None,
+        runtime_version: str | None = None,
+    ) -> None:
+        self.gvisor_runtime = (gvisor_runtime or DEFAULT_GVISOR_RUNTIME_NAME).strip() or DEFAULT_GVISOR_RUNTIME_NAME
+        self.gvisor_runtime_version = runtime_version
+        super().__init__(policy, image=image, runtime_command=runtime_command)
+
+    def run_in_workspace(
+        self,
+        command: SandboxCommand,
+        workspace: Path,
+        *,
+        started_at: float | None = None,
+    ) -> SandboxResult:
+        started = started_at if started_at is not None else time.perf_counter()
+        denied_reason = self._denied_reason(command, workspace)
+        if denied_reason is not None:
+            return self._denied_result(command, workspace, started, denied_reason)
+        if self._runtime_command() is None:
+            return self._denied_result(
+                command,
+                workspace,
+                started,
+                "gVisor container runtime command is not configured; set "
+                "AI_JSUNPACK_SANDBOX_GVISOR_RUNTIME_COMMAND, buildValidation.gvisorRuntimeCommand, "
+                "or provide Docker/Podman with runsc configured.",
+            )
+        return super().run_in_workspace(command, workspace, started_at=started)
+
+    def _container_policy(self, policy: SandboxPolicy, *, runtime_command: tuple[str, ...] | None) -> SandboxPolicy:
+        resource_policy = sandbox_resource_policy_profile(
+            policy.resource_policy,
+            runner_kind="gvisor",
+            network_policy=policy.network_policy,
+            runtime_name=self.gvisor_runtime,
+            runtime_version=self.gvisor_runtime_version,
+            adapter_available=runtime_command is not None,
+        )
+        return replace(policy, resource_policy=resource_policy)
+
+    def _container_argv(
+        self,
+        *,
+        runtime_command: tuple[str, ...],
+        command: SandboxCommand,
+        workspace: Path,
+        working_directory: Path,
+    ) -> list[str]:
+        argv = super()._container_argv(
+            runtime_command=runtime_command,
+            command=command,
+            workspace=workspace,
+            working_directory=working_directory,
+        )
+        image_index = argv.index(self.image)
+        argv[image_index:image_index] = ["--runtime", self.gvisor_runtime]
+        return argv
 
 
 class FirecrackerSandboxRunner(LocalSandboxRunner):
