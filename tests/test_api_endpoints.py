@@ -235,13 +235,40 @@ class ApiEndpointTest(unittest.TestCase):
         inference_response = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.access_headers)
         review_response = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.access_headers)
         tool_call_response = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.access_headers)
+        audit_records_response = self.client.get(f"/jobs/{job_id}/audit-records", headers=self.access_headers)
+        audit_review_response = self.client.get(f"/jobs/{job_id}/audit-records?category=review", headers=self.access_headers)
+        unsupported_audit_response = self.client.get(
+            f"/jobs/{job_id}/audit-records?category=runtime",
+            headers=self.access_headers,
+        )
 
         self.assertEqual(inference_response.status_code, 200)
         self.assertEqual(review_response.status_code, 200)
         self.assertEqual(tool_call_response.status_code, 200)
+        self.assertEqual(audit_records_response.status_code, 200)
+        self.assertEqual(audit_review_response.status_code, 200)
+        self.assertEqual(unsupported_audit_response.status_code, 400)
         self.assertEqual(inference_response.json(), [inference_payload])
         self.assertEqual(review_response.json(), [review_payload])
         self.assertEqual(tool_call_response.json(), [tool_call_payload])
+        self.assertEqual(
+            audit_records_response.json(),
+            {
+                "jobId": job_id,
+                "inferenceRecords": [inference_payload],
+                "reviewRuns": [review_payload],
+                "toolCalls": [tool_call_payload],
+            },
+        )
+        self.assertEqual(
+            audit_review_response.json(),
+            {
+                "jobId": job_id,
+                "inferenceRecords": [],
+                "reviewRuns": [review_payload],
+                "toolCalls": [],
+            },
+        )
 
     def test_report_package_download_and_rerun_endpoints(self):
         created = self.client.post(
@@ -314,16 +341,50 @@ class ApiEndpointTest(unittest.TestCase):
             f"/jobs/{job_id}/artifacts/{evidence_index_artifact.id}/download",
             headers=self.access_headers,
         )
+        report_list = self.client.get(f"/jobs/{job_id}/reports", headers=self.access_headers)
+        evidence_report_list = self.client.get(
+            f"/jobs/{job_id}/reports?kind=evidence-index",
+            headers=self.access_headers,
+        )
+        generic_audit_download = self.client.get(f"/jobs/{job_id}/reports/audit_report", headers=self.access_headers)
+        generic_html_download = self.client.get(f"/jobs/{job_id}/reports/html", headers=self.access_headers)
+        generic_evidence_index_download = self.client.get(
+            f"/jobs/{job_id}/reports/evidence-index",
+            headers=self.access_headers,
+        )
+        unsupported_report_list = self.client.get(
+            f"/jobs/{job_id}/reports?kind=result_package",
+            headers=self.access_headers,
+        )
+        unsupported_report_download = self.client.get(
+            f"/jobs/{job_id}/reports/result-package",
+            headers=self.access_headers,
+        )
         rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.access_headers)
 
         self.assertEqual(audit_download.status_code, 200)
         self.assertEqual(package_download.status_code, 200)
         self.assertEqual(html_download.status_code, 200)
         self.assertEqual(evidence_index_download.status_code, 200)
+        self.assertEqual(report_list.status_code, 200)
+        self.assertEqual(evidence_report_list.status_code, 200)
+        self.assertEqual(generic_audit_download.status_code, 200)
+        self.assertEqual(generic_html_download.status_code, 200)
+        self.assertEqual(generic_evidence_index_download.status_code, 200)
+        self.assertEqual(unsupported_report_list.status_code, 400)
+        self.assertEqual(unsupported_report_download.status_code, 400)
         self.assertEqual(audit_download.text, "# Audit\n")
+        self.assertEqual(generic_audit_download.text, "# Audit\n")
         self.assertEqual(package_download.content, self.store.read_artifact_record(package_artifact))
         self.assertIn("<!doctype html>", html_download.text)
+        self.assertIn("<!doctype html>", generic_html_download.text)
         self.assertEqual(evidence_index_download.json()["kind"], "evidence_index")
+        self.assertEqual(generic_evidence_index_download.json()["kind"], "evidence_index")
+        self.assertEqual(
+            [artifact["kind"] for artifact in report_list.json()],
+            ["audit_report", "html_report", "evidence_index"],
+        )
+        self.assertEqual([artifact["id"] for artifact in evidence_report_list.json()], [evidence_index_artifact.id])
         self.assertEqual(rerun.status_code, 200)
         rerun_body = rerun.json()
         rerun_job = rerun_body["job"]
@@ -434,7 +495,10 @@ class ApiEndpointTest(unittest.TestCase):
         missing_inferences = self.client.get("/jobs/job_missing/inference-records", headers=self.access_headers)
         missing_reviews = self.client.get("/jobs/job_missing/review-runs", headers=self.access_headers)
         missing_tool_calls = self.client.get("/jobs/job_missing/tool-calls", headers=self.access_headers)
+        missing_audit_records = self.client.get("/jobs/job_missing/audit-records", headers=self.access_headers)
+        missing_reports = self.client.get("/jobs/job_missing/reports", headers=self.access_headers)
         missing_audit = self.client.get("/jobs/job_missing/reports/audit", headers=self.access_headers)
+        missing_evidence_index = self.client.get("/jobs/job_missing/reports/evidence-index", headers=self.access_headers)
         missing_package = self.client.get("/jobs/job_missing/result-package", headers=self.access_headers)
         missing_rerun = self.client.post("/jobs/job_missing/rerun", headers=self.access_headers)
         missing_cleanup = self.client.post(
@@ -448,7 +512,10 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(missing_inferences.status_code, 404)
         self.assertEqual(missing_reviews.status_code, 404)
         self.assertEqual(missing_tool_calls.status_code, 404)
+        self.assertEqual(missing_audit_records.status_code, 404)
+        self.assertEqual(missing_reports.status_code, 404)
         self.assertEqual(missing_audit.status_code, 404)
+        self.assertEqual(missing_evidence_index.status_code, 404)
         self.assertEqual(missing_package.status_code, 404)
         self.assertEqual(missing_rerun.status_code, 404)
         self.assertEqual(missing_cleanup.status_code, 404)
@@ -559,7 +626,10 @@ class ApiEndpointTest(unittest.TestCase):
         inferences = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.other_access_headers)
         reviews = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.other_access_headers)
         tools = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.other_access_headers)
+        audit_records = self.client.get(f"/jobs/{job_id}/audit-records", headers=self.other_access_headers)
         runtime = self.client.get(f"/jobs/{job_id}/runtime-validations", headers=self.other_access_headers)
+        reports = self.client.get(f"/jobs/{job_id}/reports", headers=self.other_access_headers)
+        report = self.client.get(f"/jobs/{job_id}/reports/audit_report", headers=self.other_access_headers)
         cleanup = self.client.post(
             f"/jobs/{job_id}/retention/cleanup",
             json={"dryRun": True, "categories": [], "retentionClasses": [], "deleteExpired": True, "reason": "test"},
@@ -576,7 +646,10 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(inferences.status_code, 403)
         self.assertEqual(reviews.status_code, 403)
         self.assertEqual(tools.status_code, 403)
+        self.assertEqual(audit_records.status_code, 403)
         self.assertEqual(runtime.status_code, 403)
+        self.assertEqual(reports.status_code, 403)
+        self.assertEqual(report.status_code, 403)
         self.assertEqual(cleanup.status_code, 403)
 
     def test_authentication_rejects_missing_bad_and_expired_tokens(self):

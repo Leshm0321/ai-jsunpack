@@ -519,6 +519,13 @@ class RepairInstruction(ContractModel):
     decision: str
 
 
+class AuditRecordCollection(ContractModel):
+    job_id: str
+    inference_records: list[InferenceRecord]
+    review_runs: list[ReviewRun]
+    tool_calls: list[ToolCall]
+
+
 class JobSummary(ContractModel):
     job: JobRecord
     artifacts: list[ArtifactRecord]

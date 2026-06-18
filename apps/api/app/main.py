@@ -12,6 +12,7 @@ from packages.deployment import DeploymentConfigurationError, validate_current_e
 from .auth import AccessContext, ProjectRole, SERVICE_ROLE_WORKER, require_access
 from .models import (
     ArtifactRecord,
+    AuditRecordCollection,
     CancelJobRequest,
     CreateJobRequest,
     InferenceRecord,
@@ -24,6 +25,24 @@ from .models import (
     ToolCall,
 )
 from .store import store
+
+REPORT_ARTIFACT_KINDS = ("audit_report", "html_report", "evidence_index")
+REPORT_KIND_ALIASES = {
+    "audit": "audit_report",
+    "audit-report": "audit_report",
+    "audit_report": "audit_report",
+    "html": "html_report",
+    "html-report": "html_report",
+    "html_report": "html_report",
+    "evidence-index": "evidence_index",
+    "evidence_index": "evidence_index",
+}
+REPORT_DOWNLOAD_FILENAMES = {
+    "audit_report": "audit-report.md",
+    "html_report": "audit-report.html",
+    "evidence_index": "evidence-index.json",
+}
+AUDIT_RECORD_CATEGORIES = ("all", "inference", "review", "tool")
 
 try:
     DEPLOYMENT_PROFILE = validate_current_environment("api")
@@ -114,8 +133,7 @@ def list_inference_records(
     access: AccessContext = Depends(require_access),
 ) -> list[InferenceRecord]:
     require_job(job_id, access)
-    artifacts = store.list_artifacts(job_id, kind="inference_record")
-    return [inference_record_from_artifact(job_id, artifact) for artifact in artifacts]
+    return list_inference_record_payloads(job_id)
 
 
 @app.get("/jobs/{job_id}/review-runs", response_model=list[ReviewRun])
@@ -124,8 +142,7 @@ def list_review_runs(
     access: AccessContext = Depends(require_access),
 ) -> list[ReviewRun]:
     require_job(job_id, access)
-    artifacts = store.list_artifacts(job_id, kind="review_run")
-    return [review_run_from_artifact(job_id, artifact) for artifact in artifacts]
+    return list_review_run_payloads(job_id)
 
 
 @app.get("/jobs/{job_id}/tool-calls", response_model=list[ToolCall])
@@ -134,8 +151,7 @@ def list_tool_calls(
     access: AccessContext = Depends(require_access),
 ) -> list[ToolCall]:
     require_job(job_id, access)
-    artifacts = store.list_artifacts(job_id, kind="tool_call")
-    return [tool_call_from_artifact(job_id, artifact) for artifact in artifacts]
+    return list_tool_call_payloads(job_id)
 
 
 @app.get("/jobs/{job_id}/runtime-validations/latest", response_model=RuntimeValidationRun)
@@ -151,18 +167,60 @@ def get_latest_runtime_validation(
     return validations[-1]
 
 
+@app.get("/jobs/{job_id}/audit-records", response_model=AuditRecordCollection)
+def list_audit_records(
+    job_id: str,
+    category: str = "all",
+    access: AccessContext = Depends(require_access),
+) -> AuditRecordCollection:
+    require_job(job_id, access)
+    normalized_category = normalize_audit_record_category(category)
+    return AuditRecordCollection(
+        job_id=job_id,
+        inference_records=list_inference_record_payloads(job_id) if normalized_category in ("all", "inference") else [],
+        review_runs=list_review_run_payloads(job_id) if normalized_category in ("all", "review") else [],
+        tool_calls=list_tool_call_payloads(job_id) if normalized_category in ("all", "tool") else [],
+    )
+
+
+@app.get("/jobs/{job_id}/reports", response_model=list[ArtifactRecord])
+def list_reports(
+    job_id: str,
+    kind: str | None = None,
+    access: AccessContext = Depends(require_access),
+) -> list[ArtifactRecord]:
+    require_job(job_id, access)
+    if kind is not None:
+        return store.list_artifacts(job_id, kind=normalize_report_kind(kind))
+    artifacts: list[ArtifactRecord] = []
+    for report_kind in REPORT_ARTIFACT_KINDS:
+        artifacts.extend(store.list_artifacts(job_id, kind=report_kind))
+    return sorted(artifacts, key=lambda artifact: (artifact.created_at, artifact.id))
+
+
 @app.get("/jobs/{job_id}/reports/audit")
 def download_latest_audit_report(
     job_id: str,
     access: AccessContext = Depends(require_access),
-) -> FileResponse:
+) -> Response:
+    return download_latest_report(job_id, "audit_report", access)
+
+
+@app.get("/jobs/{job_id}/reports/{report_kind}")
+def download_latest_report(
+    job_id: str,
+    report_kind: str,
+    access: AccessContext = Depends(require_access),
+) -> Response:
+    require_job(job_id, access)
+    normalized_kind = normalize_report_kind(report_kind)
     artifact = latest_artifact_or_404(
         job_id,
-        "audit_report",
-        "Audit report not found",
+        normalized_kind,
+        f"{report_kind} report not found",
         access,
     )
-    return file_response_for_artifact(artifact, filename="audit-report.md")
+    return file_response_for_artifact(artifact, filename=REPORT_DOWNLOAD_FILENAMES[normalized_kind])
 
 
 @app.get("/jobs/{job_id}/result-package")
@@ -295,6 +353,20 @@ def source_filename(source_artifact: ArtifactRecord) -> str:
     return f"rerun-source-input{suffix}" if suffix else "rerun-source-input"
 
 
+def normalize_report_kind(value: str) -> str:
+    normalized = REPORT_KIND_ALIASES.get(value.strip().lower())
+    if normalized is None:
+        raise HTTPException(status_code=400, detail="Unsupported report kind")
+    return normalized
+
+
+def normalize_audit_record_category(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in AUDIT_RECORD_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Unsupported audit record category")
+    return normalized
+
+
 def require_create_access(request: CreateJobRequest, access: AccessContext) -> None:
     require_project_role(access, request.project_id, "maintainer")
     if access.kind == "user" and request.owner_id != access.subject:
@@ -323,6 +395,11 @@ def runtime_validation_from_artifact(job_id: str, artifact: ArtifactRecord) -> R
         raise HTTPException(status_code=500, detail=f"Invalid runtime validation artifact: {artifact.id}") from error
 
 
+def list_inference_record_payloads(job_id: str) -> list[InferenceRecord]:
+    artifacts = store.list_artifacts(job_id, kind="inference_record")
+    return [inference_record_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
 def inference_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> InferenceRecord:
     try:
         return InferenceRecord.model_validate_json(store.read_artifact(job_id, artifact.id))
@@ -330,11 +407,21 @@ def inference_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> Inf
         raise HTTPException(status_code=500, detail=f"Invalid inference record artifact: {artifact.id}") from error
 
 
+def list_review_run_payloads(job_id: str) -> list[ReviewRun]:
+    artifacts = store.list_artifacts(job_id, kind="review_run")
+    return [review_run_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
 def review_run_from_artifact(job_id: str, artifact: ArtifactRecord) -> ReviewRun:
     try:
         return ReviewRun.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Invalid review run artifact: {artifact.id}") from error
+
+
+def list_tool_call_payloads(job_id: str) -> list[ToolCall]:
+    artifacts = store.list_artifacts(job_id, kind="tool_call")
+    return [tool_call_from_artifact(job_id, artifact) for artifact in artifacts]
 
 
 def tool_call_from_artifact(job_id: str, artifact: ArtifactRecord) -> ToolCall:
