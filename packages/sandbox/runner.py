@@ -16,12 +16,18 @@ from apps.api.app.models import FailureClass
 
 
 NetworkPolicy = Literal["deny", "allow"]
-ResourcePolicyEnforcement = Literal["local_best_effort", "container_enforced"]
-SandboxRunnerKind = Literal["local", "container"]
+ResourcePolicyEnforcement = Literal[
+    "local_best_effort",
+    "container_enforced",
+    "runtime_isolated",
+    "remote_isolated",
+]
+SandboxRunnerKind = Literal["local", "container", "gvisor", "firecracker", "remote_browser_runner"]
 SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesystem"]
 SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 AllowedCommand = str | Sequence[str]
 DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
+PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("gvisor", "firecracker", "remote_browser_runner")
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,191 @@ def _local_capabilities() -> tuple[SandboxRuntimeCapability, ...]:
             detail="Local runner executes in a temporary attempt workspace and validates relative working directories.",
         ),
     )
+
+
+def _runner_label(runner_kind: SandboxRunnerKind) -> str:
+    labels = {
+        "local": "Local",
+        "container": "Docker/Podman container",
+        "gvisor": "gVisor",
+        "firecracker": "Firecracker",
+        "remote_browser_runner": "Remote Browser Runner",
+    }
+    return labels[runner_kind]
+
+
+def sandbox_resource_policy_profile(
+    resource_policy: "SandboxResourcePolicy | None" = None,
+    *,
+    runner_kind: SandboxRunnerKind,
+    network_policy: NetworkPolicy = "deny",
+    runtime_name: str | None = None,
+    runtime_version: str | None = None,
+    adapter_available: bool = False,
+) -> "SandboxResourcePolicy":
+    base_policy = resource_policy or SandboxResourcePolicy()
+    if runner_kind == "local":
+        return replace(
+            base_policy,
+            enforcement="local_best_effort",
+            runner_kind="local",
+            runtime_name=runtime_name,
+            runtime_version=runtime_version,
+            host_platform=_host_platform(),
+            capabilities=_local_capabilities(),
+            limitations=SandboxResourcePolicy().limitations,
+        )
+    if runner_kind == "container":
+        return replace(
+            base_policy,
+            enforcement="container_enforced",
+            runner_kind="container",
+            runtime_name=runtime_name,
+            runtime_version=runtime_version,
+            host_platform=_host_platform(),
+        )
+
+    enforcement: ResourcePolicyEnforcement = (
+        "remote_isolated" if runner_kind == "remote_browser_runner" else "runtime_isolated"
+    )
+    label = _runner_label(runner_kind)
+    return replace(
+        base_policy,
+        enforcement=enforcement,
+        runner_kind=runner_kind,
+        runtime_name=runtime_name or _default_runtime_name(runner_kind),
+        runtime_version=runtime_version,
+        host_platform=_host_platform(),
+        capabilities=_profile_capabilities(
+            runner_kind,
+            network_policy=network_policy,
+            adapter_available=adapter_available,
+        ),
+        limitations=_profile_limitations(runner_kind, adapter_available=adapter_available, label=label),
+    )
+
+
+def _default_runtime_name(runner_kind: SandboxRunnerKind) -> str | None:
+    if runner_kind == "gvisor":
+        return "runsc"
+    if runner_kind == "firecracker":
+        return "firecracker"
+    if runner_kind == "remote_browser_runner":
+        return "playwright-remote"
+    return None
+
+
+def _profile_capabilities(
+    runner_kind: SandboxRunnerKind,
+    *,
+    network_policy: NetworkPolicy,
+    adapter_available: bool,
+) -> tuple[SandboxRuntimeCapability, ...]:
+    label = _runner_label(runner_kind)
+    if not adapter_available:
+        return tuple(
+            SandboxRuntimeCapability(
+                name=name,
+                status="unsupported",
+                detail=(
+                    f"{label} is configured as an audit profile only; this process does not have a "
+                    f"{label} execution adapter, so the capability is not applied."
+                ),
+            )
+            for name in ("network", "process", "cpu", "memory", "filesystem")
+        )
+
+    if runner_kind == "remote_browser_runner":
+        network_status: SandboxCapabilityStatus = "enforced" if network_policy == "deny" else "best_effort"
+        return (
+            SandboxRuntimeCapability(
+                name="network",
+                status=network_status,
+                detail="Remote browser service owns browser egress policy and client network exposure rules.",
+            ),
+            SandboxRuntimeCapability(
+                name="process",
+                status="enforced",
+                detail="Browser child processes run outside the Worker process boundary in the Browser Runner service.",
+            ),
+            SandboxRuntimeCapability(
+                name="cpu",
+                status="best_effort",
+                detail="CPU limits are enforced by the remote service or orchestrator, not by the Worker process.",
+            ),
+            SandboxRuntimeCapability(
+                name="memory",
+                status="best_effort",
+                detail="Memory limits are enforced by the remote service or orchestrator, not by the Worker process.",
+            ),
+            SandboxRuntimeCapability(
+                name="filesystem",
+                status="enforced",
+                detail="Browser artifacts cross the service boundary through Artifact Store instead of host shared paths.",
+            ),
+        )
+
+    network_status = "enforced" if network_policy == "deny" else "best_effort"
+    return (
+        SandboxRuntimeCapability(
+            name="network",
+            status=network_status,
+            detail=f"{label} deployment profile requires network policy enforcement outside the Worker process.",
+        ),
+        SandboxRuntimeCapability(
+            name="process",
+            status="enforced",
+            detail=f"{label} isolates workload processes behind a stronger runtime boundary.",
+        ),
+        SandboxRuntimeCapability(
+            name="cpu",
+            status="best_effort",
+            detail=f"{label} CPU limits depend on the host runtime, cgroup, or microVM configuration.",
+        ),
+        SandboxRuntimeCapability(
+            name="memory",
+            status="best_effort",
+            detail=f"{label} memory limits depend on the host runtime, cgroup, or microVM configuration.",
+        ),
+        SandboxRuntimeCapability(
+            name="filesystem",
+            status="enforced",
+            detail=f"{label} deployment profile requires an isolated root filesystem or mediated workspace mount.",
+        ),
+    )
+
+
+def _profile_limitations(
+    runner_kind: SandboxRunnerKind,
+    *,
+    adapter_available: bool,
+    label: str,
+) -> tuple[str, ...]:
+    adapter_note = (
+        f"{label} execution adapter is not wired in this process; command execution is denied instead of falling back "
+        "to a weaker runner."
+        if not adapter_available
+        else f"{label} adapter is selected; verify runtime-specific evidence before treating limits as enforced."
+    )
+    if runner_kind == "gvisor":
+        return (
+            "gVisor deployments must route container execution through runsc via Docker, containerd, Kubernetes, or OCI integration.",
+            "gVisor improves syscall isolation but has Linux syscall, /proc, and /sys compatibility differences that can affect arbitrary generated projects.",
+            adapter_note,
+        )
+    if runner_kind == "firecracker":
+        return (
+            "Firecracker deployments require Linux KVM, a prepared guest kernel/rootfs, jailer setup, and explicit Artifact Store exchange across the VM boundary.",
+            "Firecracker provides a microVM boundary but host CPU, memory, network, storage, and metadata controls must be configured by the deployment layer.",
+            adapter_note,
+        )
+    if runner_kind == "remote_browser_runner":
+        return (
+            "Remote Browser Runner is for browser/runtime validation isolation and does not execute build/typecheck commands in the Worker process.",
+            "Playwright client/server versions, websocket authentication, client network exposure, and Artifact Store exchange must be pinned by deployment configuration.",
+            adapter_note,
+        )
+    return (adapter_note,)
 
 
 @dataclass(frozen=True)
@@ -585,3 +776,47 @@ class ContainerSandboxRunner(LocalSandboxRunner):
     def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
         allowed_names = set(self.policy.allowed_environment)
         return {name: value for name, value in command.environment.items() if name in allowed_names}
+
+
+class ProfileOnlySandboxRunner(LocalSandboxRunner):
+    """Records a stronger sandbox profile and denies execution until an adapter is wired."""
+
+    def __init__(
+        self,
+        policy: SandboxPolicy | None = None,
+        *,
+        runner_kind: SandboxRunnerKind,
+        runtime_name: str | None = None,
+        runtime_version: str | None = None,
+    ) -> None:
+        if runner_kind not in PROFILE_ONLY_RUNNERS:
+            raise ValueError(f"{runner_kind!r} is not a profile-only sandbox runner.")
+        profile_policy = policy or SandboxPolicy()
+        resource_policy = sandbox_resource_policy_profile(
+            profile_policy.resource_policy,
+            runner_kind=runner_kind,
+            network_policy=profile_policy.network_policy,
+            runtime_name=runtime_name,
+            runtime_version=runtime_version,
+            adapter_available=False,
+        )
+        self.runner_kind = runner_kind
+        self.runtime_label = _runner_label(runner_kind)
+        super().__init__(replace(profile_policy, resource_policy=resource_policy))
+
+    def run_in_workspace(
+        self,
+        command: SandboxCommand,
+        workspace: Path,
+        *,
+        started_at: float | None = None,
+    ) -> SandboxResult:
+        started = started_at if started_at is not None else time.perf_counter()
+        denied_reason = (
+            f"{self.runtime_label} sandbox runner is configured as an audit profile, but this Worker does not "
+            f"include a {self.runtime_label} execution adapter. Configure a supported adapter or use the container runner."
+        )
+        command_denied_reason = self._denied_reason(command, workspace)
+        if command_denied_reason is not None:
+            denied_reason = f"{command_denied_reason}; {denied_reason}"
+        return self._denied_result(command, workspace, started, denied_reason)

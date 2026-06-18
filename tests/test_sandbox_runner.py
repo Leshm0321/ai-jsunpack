@@ -8,9 +8,11 @@ from pathlib import Path
 from packages.sandbox import (
     ContainerSandboxRunner,
     LocalSandboxRunner,
+    ProfileOnlySandboxRunner,
     SandboxCommand,
     SandboxPolicy,
     SandboxResourcePolicy,
+    sandbox_resource_policy_profile,
 )
 
 
@@ -220,6 +222,50 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("-w") + 1], "/workspace/project")
         self.assertIn("ai-jsunpack-test-image", argv)
         self.assertNotIn(f"{secret_name}=secret", argv)
+
+    def test_gvisor_profile_records_unsupported_capabilities_without_adapter(self):
+        policy = sandbox_resource_policy_profile(
+            SandboxResourcePolicy(process_limit=8),
+            runner_kind="gvisor",
+            network_policy="deny",
+        )
+
+        self.assertEqual(policy.enforcement, "runtime_isolated")
+        self.assertEqual(policy.runner_kind, "gvisor")
+        self.assertEqual(policy.runtime_name, "runsc")
+        capabilities = {capability.name: capability for capability in policy.capabilities}
+        self.assertEqual(capabilities["network"].status, "unsupported")
+        self.assertIn("audit profile only", capabilities["network"].detail)
+        self.assertIn("gVisor deployments", policy.limitations[0])
+
+    def test_remote_browser_runner_profile_records_remote_isolation_boundary(self):
+        policy = sandbox_resource_policy_profile(
+            runner_kind="remote_browser_runner",
+            network_policy="deny",
+            adapter_available=True,
+        )
+
+        self.assertEqual(policy.enforcement, "remote_isolated")
+        self.assertEqual(policy.runner_kind, "remote_browser_runner")
+        self.assertEqual(policy.runtime_name, "playwright-remote")
+        capabilities = {capability.name: capability for capability in policy.capabilities}
+        self.assertEqual(capabilities["process"].status, "enforced")
+        self.assertIn("Browser Runner service", capabilities["process"].detail)
+        self.assertIn("browser/runtime validation", policy.limitations[0])
+
+    def test_profile_only_runner_denies_execution_without_fallback(self):
+        runner = ProfileOnlySandboxRunner(
+            SandboxPolicy(allowed_commands=((sys.executable,),)),
+            runner_kind="firecracker",
+        )
+
+        result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('no fallback')")))
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertIsNone(result.exit_code)
+        self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
+        self.assertEqual(result.resource_policy.runner_kind, "firecracker")
+        self.assertIn("does not include a Firecracker execution adapter", result.denied_reason or "")
 
 
 if __name__ == "__main__":

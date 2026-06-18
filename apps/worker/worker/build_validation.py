@@ -28,6 +28,8 @@ from packages.sandbox import (
     DEFAULT_CONTAINER_IMAGE,
     ContainerSandboxRunner,
     LocalSandboxRunner,
+    PROFILE_ONLY_RUNNERS,
+    ProfileOnlySandboxRunner,
     SandboxCommand,
     SandboxPolicy,
     SandboxResult,
@@ -84,7 +86,7 @@ MAX_DIAGNOSTIC_CONTEXT_LINES = 30
 BuildStage = Literal["building", "typechecking"]
 BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
-SandboxRunnerKind = Literal["local", "container"]
+SandboxRunnerKind = Literal["local", "container", "gvisor", "firecracker", "remote_browser_runner"]
 
 
 class BuildValidationError(RuntimeError):
@@ -98,6 +100,8 @@ class BuildValidationConfig:
     sandbox_runner: SandboxRunnerKind = "local"
     container_image: str = DEFAULT_CONTAINER_IMAGE
     container_runtime_command: tuple[str, ...] | None = None
+    sandbox_runtime_name: str | None = None
+    sandbox_runtime_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -179,7 +183,7 @@ class BuildValidationRunner:
 
     def __init__(
         self,
-        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | None = None,
+        sandbox_runner: LocalSandboxRunner | ContainerSandboxRunner | ProfileOnlySandboxRunner | None = None,
         build_command: Sequence[str] = DEFAULT_BUILD_COMMAND,
         typecheck_command: Sequence[str] = DEFAULT_TYPECHECK_COMMAND,
     ) -> None:
@@ -839,15 +843,31 @@ class BuildValidationRunner:
             sandbox_runner=sandbox_runner,
             container_image=container_image,
             container_runtime_command=self._container_runtime_command_config(config.get("containerRuntimeCommand")),
+            sandbox_runtime_name=self._optional_string_config(
+                config.get("sandboxRuntimeName") or os.getenv("AI_JSUNPACK_SANDBOX_RUNTIME_NAME")
+            ),
+            sandbox_runtime_version=self._optional_string_config(
+                config.get("sandboxRuntimeVersion") or os.getenv("AI_JSUNPACK_SANDBOX_RUNTIME_VERSION")
+            ),
         )
 
-    def _sandbox_runner_for_config(self, config: BuildValidationConfig) -> LocalSandboxRunner | ContainerSandboxRunner:
+    def _sandbox_runner_for_config(
+        self,
+        config: BuildValidationConfig,
+    ) -> LocalSandboxRunner | ContainerSandboxRunner | ProfileOnlySandboxRunner:
         policy = self._sandbox_policy()
         if config.sandbox_runner == "container":
             return ContainerSandboxRunner(
                 policy,
                 image=config.container_image,
                 runtime_command=config.container_runtime_command,
+            )
+        if config.sandbox_runner in PROFILE_ONLY_RUNNERS:
+            return ProfileOnlySandboxRunner(
+                policy,
+                runner_kind=config.sandbox_runner,
+                runtime_name=config.sandbox_runtime_name,
+                runtime_version=config.sandbox_runtime_version,
             )
         return LocalSandboxRunner(policy)
 
@@ -866,14 +886,25 @@ class BuildValidationRunner:
         )
 
     def _sandbox_runner_name(self, value: Any) -> SandboxRunnerKind:
-        if isinstance(value, str) and value.strip().lower() == "container":
-            return "container"
+        normalized = self._normalized_runner_name(value)
+        if normalized in {"container", "gvisor", "firecracker", "remote_browser_runner"}:
+            return normalized
         return "local"
+
+    def _normalized_runner_name(self, value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value.strip().lower().replace("-", "_")
 
     def _string_config(self, value: Any, *, default: str) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
         return default
+
+    def _optional_string_config(self, value: Any) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
 
     def _container_runtime_command_config(self, value: Any) -> tuple[str, ...] | None:
         if isinstance(value, list) and all(isinstance(part, str) and part for part in value):

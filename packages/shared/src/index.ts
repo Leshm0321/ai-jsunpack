@@ -84,6 +84,23 @@ export type RetentionClass = (typeof RETENTION_CLASSES)[number];
 export const RETENTION_CATEGORIES = ["source", "derived", "package", "logs", "screenshots", "memory"] as const;
 export type RetentionCategory = (typeof RETENTION_CATEGORIES)[number];
 
+export const SANDBOX_RESOURCE_ENFORCEMENTS = [
+  "local_best_effort",
+  "container_enforced",
+  "runtime_isolated",
+  "remote_isolated"
+] as const;
+export type SandboxResourceEnforcement = (typeof SANDBOX_RESOURCE_ENFORCEMENTS)[number];
+
+export const SANDBOX_RUNNER_KINDS = [
+  "local",
+  "container",
+  "gvisor",
+  "firecracker",
+  "remote_browser_runner"
+] as const;
+export type SandboxRunnerKind = (typeof SANDBOX_RUNNER_KINDS)[number];
+
 export interface Artifact {
   id: string;
   jobId: string;
@@ -194,8 +211,8 @@ export interface SandboxResourcePolicy {
   processLimit?: number | null;
   cpuTimeLimitMs?: number | null;
   memoryLimitBytes?: number | null;
-  enforcement: "local_best_effort" | "container_enforced";
-  runnerKind: "local" | "container";
+  enforcement: SandboxResourceEnforcement;
+  runnerKind: SandboxRunnerKind;
   runtimeName?: string | null;
   runtimeVersion?: string | null;
   hostPlatform: string;
@@ -575,8 +592,8 @@ const sandboxResourcePolicySchema = {
     processLimit: { type: "integer", minimum: 1 },
     cpuTimeLimitMs: { type: "integer", minimum: 1 },
     memoryLimitBytes: { type: "integer", minimum: 1 },
-    enforcement: { type: "string", enum: ["local_best_effort", "container_enforced"] },
-    runnerKind: { type: "string", enum: ["local", "container"] },
+    enforcement: { type: "string", enum: SANDBOX_RESOURCE_ENFORCEMENTS },
+    runnerKind: { type: "string", enum: SANDBOX_RUNNER_KINDS },
     runtimeName: stringSchema,
     runtimeVersion: stringSchema,
     hostPlatform: stringSchema,
@@ -826,7 +843,9 @@ export const SHARED_CONTRACT_ENUMS = {
   failureClass: FAILURE_CLASSES,
   sensitivityClass: SENSITIVITY_CLASSES,
   retentionClass: RETENTION_CLASSES,
-  retentionCategory: RETENTION_CATEGORIES
+  retentionCategory: RETENTION_CATEGORIES,
+  sandboxResourceEnforcement: SANDBOX_RESOURCE_ENFORCEMENTS,
+  sandboxRunnerKind: SANDBOX_RUNNER_KINDS
 } as const;
 
 export const SHARED_JSON_SCHEMAS = {

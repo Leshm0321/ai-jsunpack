@@ -287,6 +287,43 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertIn("--network", runtime_payload["argv"])
         self.assertIn("ai-jsunpack-container-test-image", runtime_payload["argv"])
 
+    def test_gvisor_runner_config_records_profile_and_denies_without_adapter(self):
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={
+                    "buildValidation": {
+                        "sandboxRunner": "gvisor",
+                        "sandboxRuntimeVersion": "2026.06-test",
+                    }
+                },
+            )
+        )
+        project_root = self.root / "generated-gvisor"
+        (project_root / "scripts").mkdir(parents=True)
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        (project_root / "scripts" / "build.mjs").write_text("console.log('build')", encoding="utf-8")
+        (project_root / "scripts" / "typecheck.mjs").write_text("console.log('typecheck')", encoding="utf-8")
+
+        result = BuildValidationRunner().run(job_id=job.id, store=self.store, project_path=project_root)
+
+        build_artifact = json.loads(Path(result.build.build_artifact.storage_uri).read_text(encoding="utf-8"))
+        build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        capabilities = {
+            capability["name"]: capability["status"]
+            for capability in build_artifact["resourcePolicy"]["capabilities"]
+        }
+        self.assertEqual(result.build.review_run.status, "fail")
+        self.assertEqual(build_artifact["failureClass"], "sandbox_denied")
+        self.assertEqual(build_artifact["resourcePolicy"]["enforcement"], "runtime_isolated")
+        self.assertEqual(build_artifact["resourcePolicy"]["runnerKind"], "gvisor")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeName"], "runsc")
+        self.assertEqual(build_artifact["resourcePolicy"]["runtimeVersion"], "2026.06-test")
+        self.assertEqual(capabilities["network"], "unsupported")
+        self.assertIn("audit profile only", build_artifact["resourcePolicy"]["capabilities"][0]["detail"])
+        self.assertIn("execution adapter", build_log["stderr"])
+
     def test_failed_attempt_writes_repair_instruction_and_repaired_project_artifact(self):
         project_root = self.root / "generated"
         (project_root / "scripts").mkdir(parents=True)

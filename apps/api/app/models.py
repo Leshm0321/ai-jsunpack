@@ -93,8 +93,13 @@ BuildValidationStage = Literal["building", "typechecking"]
 BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
 NetworkPolicy = Literal["deny", "allow"]
-SandboxResourceEnforcement = Literal["local_best_effort", "container_enforced"]
-SandboxRunnerKind = Literal["local", "container"]
+SandboxResourceEnforcement = Literal[
+    "local_best_effort",
+    "container_enforced",
+    "runtime_isolated",
+    "remote_isolated",
+]
+SandboxRunnerKind = Literal["local", "container", "gvisor", "firecracker", "remote_browser_runner"]
 SandboxCapabilityName = Literal["network", "process", "cpu", "memory", "filesystem"]
 SandboxCapabilityStatus = Literal["enforced", "best_effort", "unsupported", "unknown"]
 DiagnosticCategory = Literal["error", "warning", "message", "suggestion", "unknown"]
