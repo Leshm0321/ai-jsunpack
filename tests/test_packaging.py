@@ -170,6 +170,51 @@ class PackagingRunnerTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_packaging_reports_remote_browser_runner_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="runtime_smoke",
+                    filename="runtime-trace.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_trace",
+                            "jobId": job.id,
+                            "target": "reconstructed",
+                            "status": "pass",
+                            "executionBoundary": {
+                                "runnerKind": "remote_browser_runner",
+                                "enforcement": "remote_isolated",
+                                "remoteRunId": "browser_run_test",
+                                "auth": "bearer_hmac",
+                                "artifactExchange": "worker_request_archive_and_worker_registered_runtime_artifacts",
+                            },
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test.packaging",
+                )
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
+                audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
+                runtime_traces = self._read_zip_json(result.result_package_artifact.storage_uri, "runtime-traces.json")
+
+                self.assertIn("Browser Runner Boundary", report)
+                self.assertIn("browser_run_test", report)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["runnerKind"], "remote_browser_runner")
+                self.assertEqual(runtime_traces[0]["executionBoundary"]["remoteRunId"], "browser_run_test")
+            finally:
+                store.close()
+
     def test_evidence_attachment_policy_records_sensitivity_retention_and_size_omissions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

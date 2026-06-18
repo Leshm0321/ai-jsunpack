@@ -162,6 +162,7 @@ class PackagingRunner:
             "policySummary": self._policy_summary(job=job, artifacts=artifacts),
             "artifactManifest": [artifact.model_dump(by_alias=True) for artifact in artifacts],
             "runtimeReports": self._load_json_artifacts(job.id, artifacts, store, "runtime_validation"),
+            "runtimeTraces": self._load_json_artifacts(job.id, artifacts, store, "runtime_trace"),
             "runtimeComparisons": self._load_json_artifacts(job.id, artifacts, store, "runtime_comparison"),
             "reviewRuns": self._load_json_artifacts(job.id, artifacts, store, "review_run"),
             "inferenceRecords": self._load_json_artifacts(job.id, artifacts, store, "inference_record"),
@@ -278,6 +279,7 @@ class PackagingRunner:
         policy_summary = audit_payload["policySummary"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
+        runtime_boundaries = self._runtime_execution_boundaries(audit_payload["runtimeTraces"])
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         inference_records = audit_payload["inferenceRecords"]
@@ -320,6 +322,10 @@ class PackagingRunner:
             "## Runtime Evidence",
             "",
             self._status_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
+            "",
+            "## Browser Runner Boundary",
+            "",
+            self._status_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
             "",
             "## Runtime Compare",
             "",
@@ -377,6 +383,7 @@ class PackagingRunner:
         policy_summary = audit_payload["policySummary"]
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
+        runtime_boundaries = self._runtime_execution_boundaries(audit_payload["runtimeTraces"])
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         build_artifacts = audit_payload["buildArtifacts"]
@@ -438,6 +445,8 @@ class PackagingRunner:
                 self._html_table(build_artifacts, ("reviewType", "status", "failureClass", "decision")),
                 "<h2>Runtime Evidence</h2>",
                 self._html_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
+                "<h2>Browser Runner Boundary</h2>",
+                self._html_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
                 "<h2>Runtime Compare</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
                 "<h2>Runtime Compare Difference Summary</h2>",
@@ -549,6 +558,31 @@ class PackagingRunner:
             ]
             rows.append("<tr>" + "".join(f"<td>{self._html_cell(value)}</td>" for value in cells) + "</tr>")
         return f"<table>{''.join(rows)}</table>"
+
+    def _runtime_execution_boundaries(self, traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for trace in traces:
+            boundary = trace.get("executionBoundary")
+            if not isinstance(boundary, dict):
+                continue
+            if any(key in boundary for key in ("runnerKind", "remoteRunId")):
+                rows.append(self._runtime_boundary_row(trace, boundary, stage=str(trace.get("target") or "runtime")))
+                continue
+            for stage, nested in boundary.items():
+                if isinstance(nested, dict) and any(key in nested for key in ("runnerKind", "remoteRunId")):
+                    rows.append(self._runtime_boundary_row(trace, nested, stage=str(stage)))
+        return rows
+
+    def _runtime_boundary_row(self, trace: dict[str, Any], boundary: dict[str, Any], *, stage: str) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "runnerKind": boundary.get("runnerKind") or "",
+            "enforcement": boundary.get("enforcement") or "",
+            "remoteRunId": boundary.get("remoteRunId") or "",
+            "auth": boundary.get("auth") or "",
+            "artifactExchange": boundary.get("artifactExchange") or "",
+            "traceArtifactId": trace.get("artifactId") or "",
+        }
 
     def _runtime_compare_scope_label(self, differences: dict[str, Any]) -> str:
         scope = differences.get("comparisonScope") or {}
@@ -742,6 +776,12 @@ class PackagingRunner:
                 content_type="application/json",
                 source="runtime_validation",
                 description="Browser runtime validation records.",
+            ),
+            self._package_content(
+                path="runtime-traces.json",
+                content_type="application/json",
+                source="runtime_trace",
+                description="Browser runtime trace records, including remote Browser Runner execution boundaries.",
             ),
             self._package_content(
                 path="runtime-comparisons.json",
@@ -1081,6 +1121,7 @@ class PackagingRunner:
             archive.writestr("build-artifacts.json", self._json_text(audit_payload["buildArtifacts"]))
             archive.writestr("inference-records.json", self._json_text(audit_payload["inferenceRecords"]))
             archive.writestr("runtime-report.json", self._json_text(audit_payload["runtimeReports"]))
+            archive.writestr("runtime-traces.json", self._json_text(audit_payload["runtimeTraces"]))
             archive.writestr("runtime-comparisons.json", self._json_text(audit_payload["runtimeComparisons"]))
             archive.writestr("review-runs.json", self._json_text(audit_payload["reviewRuns"]))
             archive.writestr("tool-calls.json", self._json_text(audit_payload["toolCalls"]))

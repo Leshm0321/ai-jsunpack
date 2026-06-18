@@ -26,13 +26,14 @@ Supported runner profiles:
 | `container` | `container_enforced` | Executes through Docker or Podman when available. | Records Docker/Podman network, process, memory, CPU, filesystem capability differences. |
 | `gvisor` | `runtime_isolated` | Audit-only profile in this Worker; command execution is denied until a runsc adapter is wired. | Use when deployment routes container execution through gVisor/runsc and wants that boundary reflected in evidence. |
 | `firecracker` | `runtime_isolated` | Audit-only profile in this Worker; command execution is denied until a microVM adapter is wired. | Use when deployment owns Firecracker/KVM/jailer/rootfs setup and Artifact Store exchange across the VM boundary. |
-| `remote_browser_runner` | `remote_isolated` | Audit profile for browser/runtime validation isolation, not Worker build/typecheck command execution. | Use when Playwright/browser work is delegated to a separate Browser Runner service with its own auth, egress, and artifact exchange controls. |
+| `remote_browser_runner` | `remote_isolated` | Executes runtime smoke/compare through the separate Browser Runner service when `AI_JSUNPACK_BROWSER_RUNNER_URL` is configured; it does not execute Worker build/typecheck commands. | Use when Playwright/browser work is delegated to a separate Browser Runner service with its own auth, egress, and artifact exchange controls. |
 
-The high-isolation profiles intentionally do not fall back to a weaker runner. If `AI_JSUNPACK_SANDBOX_RUNNER=gvisor`, `firecracker`, or `remote_browser_runner` is set before a real adapter exists, validation emits `sandbox_denied` evidence with the selected profile and adapter limitation. This keeps audit output honest.
+The high-isolation build profiles intentionally do not fall back to a weaker runner. If `AI_JSUNPACK_SANDBOX_RUNNER=gvisor` or `firecracker` is set before a real adapter exists, validation emits `sandbox_denied` evidence with the selected profile and adapter limitation. `remote_browser_runner` is executable for browser validation only; build/typecheck still require `local` or `container`.
 
 Production guidance:
 
 - Use `container` for the current executable deployment path.
 - Use `gvisor` only when Docker/containerd/Kubernetes is configured to use runsc and the Worker adapter can prove it in evidence.
 - Use `firecracker` only on Linux hosts with KVM, jailer/rootfs provisioning, explicit resource limits, and Artifact Store transfer across the microVM boundary.
-- Use the `browser-runner` service boundary for Playwright/browser execution isolation; pin Playwright client/server versions and protect websocket/API credentials.
+- Use the `browser-runner` service boundary for Playwright/browser execution isolation. Worker submits asynchronous `/browser-runs` requests with a signed worker service Bearer token, polls completion, and records `executionBoundary` plus runtime trace/screenshot evidence in the result package.
+- The browser-runner ASGI app is `apps.browser_runner.app.main:app`; deploy it with the same `AI_JSUNPACK_AUTH_SECRET` as Worker and install Playwright browsers in that image.

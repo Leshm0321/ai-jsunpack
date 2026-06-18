@@ -109,6 +109,7 @@ RuntimeWaitForKind = Literal["load_state", "selector", "timeout"]
 RuntimeLoadState = Literal["load", "domcontentloaded", "networkidle"]
 RuntimeInteractionAction = Literal["click", "fill", "press", "wait"]
 RuntimeAssertionKind = Literal["selector_visible", "text_contains", "url_contains"]
+BrowserRunStatus = Literal["queued", "running", "pass", "fail", "best_effort"]
 
 
 def to_camel(value: str) -> str:
@@ -444,6 +445,50 @@ class RuntimeValidationRun(ContractModel):
     screenshot_artifact_ids: list[str]
     trace_artifact_id: str | None = None
     comparison_artifact_id: str | None = None
+
+
+class BrowserRunSourceArchive(ContractModel):
+    content_base64: str
+    entry_path: str
+
+
+class BrowserRunRequest(ContractModel):
+    job_id: str
+    target: RuntimeTarget
+    attempt: int = Field(ge=0)
+    entry_url: str
+    timeout_ms: int = Field(ge=1)
+    wait_for_selector: str | None = None
+    scenario: RuntimeScenario | None = None
+    network_policy: NetworkPolicy = "deny"
+    viewport: RuntimeViewport | None = None
+    source_archive: BrowserRunSourceArchive | None = None
+
+
+class BrowserRunResult(ContractModel):
+    status: RunStatus
+    failure_class: FailureClass
+    console_messages: list[str] = Field(default_factory=list)
+    console_errors: list[str] = Field(default_factory=list)
+    page_errors: list[str] = Field(default_factory=list)
+    failed_requests: list[str] = Field(default_factory=list)
+    responses: list[str] = Field(default_factory=list)
+    assertion_failures: list[str] = Field(default_factory=list)
+    dom_summary: dict[str, Any] = Field(default_factory=dict)
+    screenshot_base64: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    execution_boundary: dict[str, Any] = Field(default_factory=dict)
+
+
+class BrowserRunSummary(ContractModel):
+    id: str
+    status: BrowserRunStatus
+    result: BrowserRunResult | None = None
+    error: str | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class ToolCall(ContractModel):

@@ -1,6 +1,9 @@
+import base64
 import json
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from apps.api.app.models import CreateJobRequest
@@ -8,6 +11,7 @@ from apps.api.app.store import create_store
 from apps.worker.worker.runtime_smoke import (
     BrowserSmokeCapture,
     BrowserSmokeRequest,
+    RemoteBrowserRunnerAdapter,
     RuntimeCompareRepairRunner,
     RuntimeCompareReviewGate,
     RuntimeCompareRunner,
@@ -83,7 +87,123 @@ class NonPngBrowserAdapter:
         )
 
 
+class RemoteRunnerHandler(BaseHTTPRequestHandler):
+    requests: list[dict] = []
+    screenshot = b"\x89PNG\r\n\x1a\nremote"
+
+    def do_POST(self):
+        if self.path != "/browser-runs":
+            self.send_error(404)
+            return
+        content_length = int(self.headers.get("content-length", "0"))
+        payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        self.__class__.requests.append(payload)
+        self._json_response(
+            {
+                "id": "browser_run_test",
+                "status": "queued",
+                "result": None,
+                "error": None,
+                "createdAt": "2026-06-18T00:00:00+00:00",
+                "updatedAt": "2026-06-18T00:00:00+00:00",
+                "startedAt": None,
+                "finishedAt": None,
+            }
+        )
+
+    def do_GET(self):
+        if self.path != "/browser-runs/browser_run_test":
+            self.send_error(404)
+            return
+        self._json_response(
+            {
+                "id": "browser_run_test",
+                "status": "pass",
+                "result": {
+                    "status": "pass",
+                    "failureClass": "none",
+                    "consoleMessages": ["log: remote"],
+                    "consoleErrors": [],
+                    "pageErrors": [],
+                    "failedRequests": [],
+                    "responses": ["200 http://remote/index.html"],
+                    "assertionFailures": [],
+                    "domSummary": {"title": "remote", "nodeCount": 1},
+                    "screenshotBase64": base64.b64encode(self.__class__.screenshot).decode("ascii"),
+                    "limitations": ["remote boundary"],
+                    "executionBoundary": {
+                        "runnerKind": "remote_browser_runner",
+                        "enforcement": "remote_isolated",
+                        "remoteRunId": "browser_run_test",
+                        "auth": "bearer_hmac",
+                        "artifactExchange": "worker_request_archive_and_worker_registered_runtime_artifacts",
+                    },
+                },
+                "error": None,
+                "createdAt": "2026-06-18T00:00:00+00:00",
+                "updatedAt": "2026-06-18T00:00:01+00:00",
+                "startedAt": "2026-06-18T00:00:00+00:00",
+                "finishedAt": "2026-06-18T00:00:01+00:00",
+            }
+        )
+
+    def log_message(self, format, *args):
+        return
+
+    def _json_response(self, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class RuntimeSmokeRunnerTest(unittest.TestCase):
+    def test_remote_browser_runner_adapter_posts_archive_and_persists_boundary_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            input_root.mkdir()
+            (input_root / "index.html").write_text("<h1>Remote fixture</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteRunnerHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            RemoteRunnerHandler.requests = []
+            thread.start()
+            try:
+                host, port = server.server_address
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = RemoteBrowserRunnerAdapter(
+                    base_url=f"http://{host}:{port}",
+                    token="test-token",
+                    poll_seconds=0.01,
+                    timeout_ms=2000,
+                )
+
+                result = RuntimeSmokeRunner(browser_adapter=adapter).run(
+                    job_id=job.id,
+                    store=store,
+                    input_path=input_root,
+                )
+
+                self.assertEqual(result.validation.status, "pass")
+                self.assertEqual(Path(result.screenshot_artifact.storage_uri).read_bytes(), RemoteRunnerHandler.screenshot)
+                self.assertEqual(len(RemoteRunnerHandler.requests), 1)
+                self.assertIn("sourceArchive", RemoteRunnerHandler.requests[0])
+                trace = json.loads(store.read_artifact(job.id, result.trace_artifact.id))
+                self.assertEqual(trace["executionBoundary"]["runnerKind"], "remote_browser_runner")
+                self.assertEqual(trace["executionBoundary"]["remoteRunId"], "browser_run_test")
+                self.assertIn("remote boundary", trace["limitations"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.close()
+
     def test_runtime_smoke_persists_report_trace_and_screenshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

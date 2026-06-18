@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import binascii
+import base64
+import io
 import json
 import hashlib
+import os
 import shutil
 import struct
 import time
 import tempfile
+import zipfile
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -15,11 +19,16 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any, Iterator, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from apps.api.app.models import (
     ArtifactRecord,
+    BrowserRunRequest,
+    BrowserRunSourceArchive,
+    BrowserRunSummary,
     EvidenceRef,
     FailureClass,
     NetworkPolicy,
@@ -43,6 +52,10 @@ from apps.api.app.models import (
 from packages.sandbox import LocalSandboxRunner
 
 DEFAULT_VIEWPORT = {"name": "desktop", "width": 1365, "height": 768}
+REMOTE_BROWSER_RUNNER_URL_ENV = "AI_JSUNPACK_BROWSER_RUNNER_URL"
+REMOTE_BROWSER_RUNNER_TOKEN_ENV = "AI_JSUNPACK_BROWSER_RUNNER_TOKEN"
+REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS"
+REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_TIMEOUT_MS"
 
 
 @dataclass(frozen=True)
@@ -219,6 +232,17 @@ def _encode_png_rgba(width: int, height: int, rgba: bytes) -> bytes:
     )
 
 
+def _zip_directory_bytes(root: Path) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
+            if file_path.is_symlink():
+                continue
+            relative = file_path.relative_to(root).as_posix()
+            archive.write(file_path, relative)
+    return buffer.getvalue()
+
+
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     checksum = binascii.crc32(chunk_type + data) & 0xFFFFFFFF
     return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", checksum)
@@ -229,10 +253,15 @@ class BrowserSmokeRequest:
     entry_url: str
     screenshot_path: Path
     timeout_ms: int
+    job_id: str = "runtime_smoke"
+    target: RuntimeTarget = "reconstructed"
+    attempt: int = 0
     wait_for_selector: str | None = None
     scenario: RuntimeScenario | None = None
     network_policy: NetworkPolicy = "deny"
     viewport: RuntimeViewport | None = None
+    source_root: Path | None = None
+    source_entry_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +273,8 @@ class BrowserSmokeCapture:
     responses: list[str] = field(default_factory=list)
     assertion_failures: list[str] = field(default_factory=list)
     dom_summary: dict[str, Any] = field(default_factory=dict)
+    limitations: list[str] = field(default_factory=list)
+    execution_boundary: dict[str, Any] = field(default_factory=dict)
 
 
 class BrowserSmokeAdapter(Protocol):
@@ -426,6 +457,143 @@ class PlaywrightBrowserAdapter:
         )
 
 
+class RemoteBrowserRunnerAdapter:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+        poll_seconds: float | None = None,
+        timeout_ms: int | None = None,
+    ) -> None:
+        self.base_url = (base_url or os.getenv(REMOTE_BROWSER_RUNNER_URL_ENV) or "").rstrip("/")
+        self.token = token if token is not None else os.getenv(REMOTE_BROWSER_RUNNER_TOKEN_ENV)
+        self.poll_seconds = poll_seconds if poll_seconds is not None else self._float_env(REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV, 0.25)
+        self.timeout_ms = timeout_ms if timeout_ms is not None else self._int_env(REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV, 60_000)
+        if not self.base_url:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} is not configured.", "policy_denied")
+        if not self.token:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} is not configured.", "policy_denied")
+
+    @classmethod
+    def from_environment(cls) -> "RemoteBrowserRunnerAdapter | None":
+        if not os.getenv(REMOTE_BROWSER_RUNNER_URL_ENV):
+            return None
+        return cls()
+
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        payload = BrowserRunRequest(
+            job_id=request.job_id,
+            target=request.target,
+            attempt=request.attempt,
+            entry_url=request.entry_url,
+            timeout_ms=request.timeout_ms,
+            wait_for_selector=request.wait_for_selector,
+            scenario=request.scenario,
+            network_policy=request.network_policy,
+            viewport=request.viewport,
+            source_archive=self._source_archive(request),
+        ).model_dump(by_alias=True)
+        summary = self._post("/browser-runs", payload)
+        run_id = str(summary.get("id") or "")
+        if not run_id:
+            raise RuntimeSmokeError("Browser Runner did not return a run id.", "runtime_error")
+        deadline = time.monotonic() + (self.timeout_ms / 1000)
+        while True:
+            current = BrowserRunSummary.model_validate(self._get(f"/browser-runs/{quote(run_id)}"))
+            if current.status in {"pass", "fail", "best_effort"}:
+                if current.result is None:
+                    raise RuntimeSmokeError("Browser Runner completed without a result payload.", "runtime_error")
+                return self._capture_from_result(request, current)
+            if time.monotonic() >= deadline:
+                raise RuntimeSmokeError(f"Browser Runner run timed out while waiting for {run_id}.", "timeout")
+            time.sleep(max(0.05, self.poll_seconds))
+
+    def _capture_from_result(self, request: BrowserSmokeRequest, summary: BrowserRunSummary) -> BrowserSmokeCapture:
+        result = summary.result
+        if result is None:
+            raise RuntimeSmokeError("Browser Runner result is unavailable.", "runtime_error")
+        if result.screenshot_base64:
+            request.screenshot_path.write_bytes(base64.b64decode(result.screenshot_base64.encode("ascii")))
+        boundary = dict(result.execution_boundary)
+        boundary.setdefault("remoteRunId", summary.id)
+        boundary.setdefault("serviceUrl", self.base_url)
+        boundary.setdefault("auth", "bearer_hmac")
+        return BrowserSmokeCapture(
+            console_messages=result.console_messages,
+            console_errors=result.console_errors,
+            page_errors=result.page_errors,
+            failed_requests=result.failed_requests,
+            responses=result.responses,
+            assertion_failures=result.assertion_failures,
+            dom_summary=result.dom_summary,
+            limitations=result.limitations,
+            execution_boundary=boundary,
+        )
+
+    def _source_archive(self, request: BrowserSmokeRequest) -> BrowserRunSourceArchive | None:
+        if request.source_root is None or request.source_entry_path is None:
+            return None
+        content = _zip_directory_bytes(request.source_root)
+        return BrowserRunSourceArchive(
+            content_base64=base64.b64encode(content).decode("ascii"),
+            entry_path=request.source_entry_path,
+        )
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            f"{self.base_url}{path}",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        return self._json_request(request)
+
+    def _get(self, path: str) -> dict[str, Any]:
+        request = Request(
+            f"{self.base_url}{path}",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        return self._json_request(request)
+
+    def _json_request(self, request: Request) -> dict[str, Any]:
+        try:
+            with urlopen(request, timeout=max(1, self.timeout_ms / 1000)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            failure_class: FailureClass = "policy_denied" if error.code in {401, 403} else "runtime_error"
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeSmokeError(f"Browser Runner request failed with HTTP {error.code}: {detail}", failure_class) from error
+        except URLError as error:
+            raise RuntimeSmokeError(f"Browser Runner is unreachable: {error.reason}", "runtime_error") from error
+        except TimeoutError as error:
+            raise RuntimeSmokeError("Browser Runner request timed out.", "timeout") from error
+        if not isinstance(payload, dict):
+            raise RuntimeSmokeError("Browser Runner returned a non-object JSON payload.", "runtime_error")
+        return payload
+
+    def _int_env(self, name: str, default: int) -> int:
+        try:
+            return max(1, int(os.getenv(name, str(default))))
+        except ValueError:
+            return default
+
+    def _float_env(self, name: str, default: float) -> float:
+        try:
+            return max(0.05, float(os.getenv(name, str(default))))
+        except ValueError:
+            return default
+
+
 @dataclass(frozen=True)
 class RuntimeSmokeResult:
     validation: RuntimeValidationRun
@@ -458,7 +626,7 @@ class RuntimeSmokeRunner:
         timeout_ms: int = 10_000,
         sandbox_runner: LocalSandboxRunner | None = None,
     ) -> None:
-        self.browser_adapter = browser_adapter or PlaywrightBrowserAdapter()
+        self.browser_adapter = browser_adapter or RemoteBrowserRunnerAdapter.from_environment() or PlaywrightBrowserAdapter()
         self.timeout_ms = timeout_ms
         self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
 
@@ -500,6 +668,7 @@ class RuntimeSmokeRunner:
                     failure_class="invalid_input",
                     scenario=scenario,
                     network_policy=network_policy,
+                    execution_boundary={},
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
@@ -516,14 +685,19 @@ class RuntimeSmokeRunner:
                             entry_url=resolved_url,
                             screenshot_path=screenshot_path,
                             timeout_ms=self.timeout_ms,
+                            job_id=job_id,
+                            target=target,
+                            attempt=attempt,
                             wait_for_selector=wait_for_selector,
                             scenario=scenario,
                             network_policy=network_policy,
+                            source_root=entry.serve_root,
+                            source_entry_path=entry.relative_entry,
                         )
                     )
                 status = self._status_for_capture(capture)
                 screenshot_bytes = screenshot_path.read_bytes() if screenshot_path.exists() else None
-                limitations = list(entry.limitations)
+                limitations = [*entry.limitations, *capture.limitations]
                 if screenshot_bytes is None:
                     limitations.append("Playwright completed without producing a screenshot.")
                 return self._persist_result(
@@ -544,6 +718,7 @@ class RuntimeSmokeRunner:
                     failure_class="none" if status == "pass" else "runtime_error",
                     scenario=scenario,
                     network_policy=network_policy,
+                    execution_boundary=capture.execution_boundary,
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
@@ -568,6 +743,7 @@ class RuntimeSmokeRunner:
                     failure_class=error.failure_class,
                     scenario=scenario,
                     network_policy=network_policy,
+                    execution_boundary={},
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
@@ -652,6 +828,7 @@ class RuntimeSmokeRunner:
         failure_class: FailureClass,
         scenario: RuntimeScenario | None,
         network_policy: NetworkPolicy,
+        execution_boundary: dict[str, Any],
         parent_artifact_ids: list[str],
         attempt: int,
         duration_ms: int,
@@ -689,6 +866,7 @@ class RuntimeSmokeRunner:
             "assertionFailures": assertion_failures,
             "domSummary": dom_summary,
             "limitations": limitations,
+            "executionBoundary": execution_boundary,
         }
         trace_artifact = store.write_artifact(
             job_id,
@@ -1453,6 +1631,10 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             },
             "original": original["summary"].model_dump(by_alias=True),
             "reconstructed": reconstructed["summary"].model_dump(by_alias=True),
+            "executionBoundary": {
+                "original": original["execution_boundary"],
+                "reconstructed": reconstructed["execution_boundary"],
+            },
         }
         trace_artifact = store.write_artifact(
             job_id,
@@ -1827,14 +2009,20 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                             entry_url=resolved_url,
                             screenshot_path=screenshot_path,
                             timeout_ms=scenario.timeout_ms,
+                            job_id=job_id,
+                            target=target,
+                            attempt=attempt,
                             scenario=scenario,
                             network_policy=scenario.network_policy,
                             viewport=scenario.viewport,
+                            source_root=entry.serve_root,
+                            source_entry_path=entry.relative_entry,
                         )
                     )
                 status = self._status_for_capture(capture)
                 failure_class = "none" if status == "pass" else "runtime_error"
                 screenshot_bytes = screenshot_path.read_bytes() if screenshot_path.exists() else None
+                limitations.extend(capture.limitations)
                 if screenshot_bytes is None:
                     limitations.append("Playwright completed without producing a comparison screenshot.")
             except RuntimeSmokeError as error:
@@ -1883,6 +2071,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             "screenshot_hash": screenshot_hash,
             "screenshot_size": screenshot_size,
             "screenshot_bytes": screenshot_bytes,
+            "execution_boundary": capture.execution_boundary,
         }
 
     def _resolve_scenario_entry(self, *, input_path: Path | str | None, scenario: RuntimeScenario) -> RuntimeEntry:

@@ -396,6 +396,50 @@ export interface RuntimeValidationRun {
   comparisonArtifactId?: string;
 }
 
+export interface BrowserRunSourceArchive {
+  contentBase64: string;
+  entryPath: string;
+}
+
+export interface BrowserRunRequest {
+  jobId: string;
+  target: "original" | "reconstructed";
+  attempt: number;
+  entryUrl: string;
+  timeoutMs: number;
+  waitForSelector?: string | null;
+  scenario?: RuntimeScenario | null;
+  networkPolicy: "deny" | "allow";
+  viewport?: RuntimeViewport | null;
+  sourceArchive?: BrowserRunSourceArchive | null;
+}
+
+export interface BrowserRunResult {
+  status: "pass" | "retry" | "best_effort" | "fail";
+  failureClass: FailureClass;
+  consoleMessages: string[];
+  consoleErrors: string[];
+  pageErrors: string[];
+  failedRequests: string[];
+  responses: string[];
+  assertionFailures: string[];
+  domSummary: Record<string, unknown>;
+  screenshotBase64?: string | null;
+  limitations: string[];
+  executionBoundary: Record<string, unknown>;
+}
+
+export interface BrowserRunSummary {
+  id: string;
+  status: "queued" | "running" | "pass" | "fail" | "best_effort";
+  result?: BrowserRunResult | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+}
+
 export interface ToolCall {
   id: string;
   jobId: string;
@@ -727,6 +771,46 @@ const runtimeCaptureSummarySchema = {
     "domSummary",
     "durationMs",
     "limitations"
+  ],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const browserRunSourceArchiveSchema = {
+  type: "object",
+  properties: {
+    contentBase64: stringSchema,
+    entryPath: stringSchema
+  },
+  required: ["contentBase64", "entryPath"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const browserRunResultSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+    failureClass: { type: "string", enum: FAILURE_CLASSES },
+    consoleMessages: stringArraySchema,
+    consoleErrors: stringArraySchema,
+    pageErrors: stringArraySchema,
+    failedRequests: stringArraySchema,
+    responses: stringArraySchema,
+    assertionFailures: stringArraySchema,
+    domSummary: runtimeDomSummarySchema,
+    screenshotBase64: stringSchema,
+    limitations: stringArraySchema,
+    executionBoundary: { type: "object", additionalProperties: true }
+  },
+  required: [
+    "status",
+    "failureClass",
+    "consoleMessages",
+    "consoleErrors",
+    "pageErrors",
+    "failedRequests",
+    "responses",
+    "assertionFailures",
+    "domSummary",
+    "limitations",
+    "executionBoundary"
   ],
   additionalProperties: false
 } as const satisfies JsonSchema;
@@ -1235,6 +1319,44 @@ export const SHARED_JSON_SCHEMAS = {
     ],
     additionalProperties: false
   },
+  browserRunRequest: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/browser-run-request.json",
+    title: "BrowserRunRequest",
+    type: "object",
+    properties: {
+      jobId: stringSchema,
+      target: { type: "string", enum: ["original", "reconstructed"] },
+      attempt: { type: "integer", minimum: 0 },
+      entryUrl: stringSchema,
+      timeoutMs: { type: "integer", minimum: 1 },
+      waitForSelector: stringSchema,
+      scenario: { type: "object", additionalProperties: true },
+      networkPolicy: { type: "string", enum: ["deny", "allow"] },
+      viewport: runtimeViewportSchema,
+      sourceArchive: browserRunSourceArchiveSchema
+    },
+    required: ["jobId", "target", "attempt", "entryUrl", "timeoutMs", "networkPolicy"],
+    additionalProperties: false
+  },
+  browserRunSummary: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/browser-run-summary.json",
+    title: "BrowserRunSummary",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      status: { type: "string", enum: ["queued", "running", "pass", "fail", "best_effort"] },
+      result: browserRunResultSchema,
+      error: stringSchema,
+      createdAt: { type: "string", format: "date-time" },
+      updatedAt: { type: "string", format: "date-time" },
+      startedAt: { type: "string", format: "date-time" },
+      finishedAt: { type: "string", format: "date-time" }
+    },
+    required: ["id", "status", "createdAt", "updatedAt"],
+    additionalProperties: false
+  },
   toolCall: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://ai-jsunpack.local/schemas/tool-call.json",
@@ -1669,6 +1791,59 @@ export const EXAMPLE_RUNTIME_VALIDATION_RUN = {
   comparisonArtifactId: "artifact_comparison_example"
 } as const satisfies RuntimeValidationRun;
 
+export const EXAMPLE_BROWSER_RUN_REQUEST = {
+  jobId: EXAMPLE_JOB.id,
+  target: "reconstructed",
+  attempt: 0,
+  entryUrl: "http://127.0.0.1:5173/",
+  timeoutMs: 10000,
+  waitForSelector: null,
+  scenario: EXAMPLE_RUNTIME_SCENARIO,
+  networkPolicy: "deny",
+  viewport: {
+    name: "desktop",
+    width: 1365,
+    height: 768
+  },
+  sourceArchive: {
+    contentBase64: "UEsDBAoAAAAAA",
+    entryPath: "index.html"
+  }
+} as const satisfies BrowserRunRequest;
+
+export const EXAMPLE_BROWSER_RUN_SUMMARY = {
+  id: "browser_run_contract_example",
+  status: "pass",
+  result: {
+    status: "pass",
+    failureClass: "none",
+    consoleMessages: [],
+    consoleErrors: [],
+    pageErrors: [],
+    failedRequests: [],
+    responses: ["200 http://127.0.0.1:5173/"],
+    assertionFailures: [],
+    domSummary: {
+      title: "Reconstructed",
+      nodeCount: 4
+    },
+    screenshotBase64: "iVBORw0KGgo=",
+    limitations: ["Browser execution ran in the remote browser-runner service boundary."],
+    executionBoundary: {
+      runnerKind: "remote_browser_runner",
+      enforcement: "remote_isolated",
+      remoteRunId: "browser_run_contract_example",
+      auth: "bearer_hmac",
+      artifactExchange: "worker_request_archive_and_worker_registered_runtime_artifacts"
+    }
+  },
+  error: null,
+  createdAt: exampleTimestamp,
+  updatedAt: exampleTimestamp,
+  startedAt: exampleTimestamp,
+  finishedAt: exampleTimestamp
+} as const satisfies BrowserRunSummary;
+
 export const EXAMPLE_TOOL_CALL = {
   id: "tool_call_contract_example",
   jobId: EXAMPLE_JOB.id,
@@ -1757,6 +1932,8 @@ export const SHARED_CONTRACT_EXAMPLES = {
   runtimeScenario: EXAMPLE_RUNTIME_SCENARIO,
   runtimeComparisonReport: EXAMPLE_RUNTIME_COMPARISON_REPORT,
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
+  browserRunRequest: EXAMPLE_BROWSER_RUN_REQUEST,
+  browserRunSummary: EXAMPLE_BROWSER_RUN_SUMMARY,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,
   retentionCleanupRequest: EXAMPLE_RETENTION_CLEANUP_REQUEST,

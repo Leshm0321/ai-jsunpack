@@ -72,6 +72,8 @@ class SharedContractAlignmentTest(unittest.TestCase):
             "runtimeScenario": models.RuntimeScenario,
             "runtimeComparisonReport": models.RuntimeComparisonReport,
             "runtimeValidationRun": models.RuntimeValidationRun,
+            "browserRunRequest": models.BrowserRunRequest,
+            "browserRunSummary": models.BrowserRunSummary,
             "toolCall": models.ToolCall,
             "memoryRecord": models.MemoryRecord,
             "retentionCleanupRequest": models.RetentionCleanupRequest,
