@@ -448,6 +448,46 @@ export interface BrowserRunSummary {
   leaseRecovered?: boolean;
 }
 
+export interface BrowserRunnerQueueMetrics {
+  checkedAt: string;
+  queueBackend: string;
+  backendStatus: "ok" | "degraded";
+  backendError?: string | null;
+  queuedCount: number;
+  runningCount: number;
+  terminalCount: number;
+  totalCount: number;
+  oldestQueuedAgeMs?: number | null;
+  claimLatencyMs?: number | null;
+  averageRunDurationMs?: number | null;
+  retryRate: number;
+  leaseRecoveryCount: number;
+  expiredRunningCount: number;
+}
+
+export interface BrowserRunnerQueueAlert {
+  code: string;
+  severity: "warning" | "critical";
+  message: string;
+  field: string;
+  value?: unknown;
+  threshold?: unknown;
+}
+
+export interface BrowserRunnerQueueHealth {
+  status: "ok" | "degraded";
+  serviceRole: string;
+  deploymentProfile?: string | null;
+  workerId: string;
+  maxWorkers: number;
+  maxAttempts: number;
+  leaseSeconds: number;
+  retryBackoffSeconds: number;
+  pollSeconds: number;
+  metrics: BrowserRunnerQueueMetrics;
+  alerts: BrowserRunnerQueueAlert[];
+}
+
 export interface ToolCall {
   id: string;
   jobId: string;
@@ -820,6 +860,51 @@ const browserRunResultSchema = {
     "limitations",
     "executionBoundary"
   ],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const browserRunnerQueueMetricsSchema = {
+  type: "object",
+  properties: {
+    checkedAt: { type: "string", format: "date-time" },
+    queueBackend: stringSchema,
+    backendStatus: { type: "string", enum: ["ok", "degraded"] },
+    backendError: stringSchema,
+    queuedCount: { type: "integer", minimum: 0 },
+    runningCount: { type: "integer", minimum: 0 },
+    terminalCount: { type: "integer", minimum: 0 },
+    totalCount: { type: "integer", minimum: 0 },
+    oldestQueuedAgeMs: { type: "integer", minimum: 0 },
+    claimLatencyMs: { type: "integer", minimum: 0 },
+    averageRunDurationMs: { type: "integer", minimum: 0 },
+    retryRate: { type: "number", minimum: 0 },
+    leaseRecoveryCount: { type: "integer", minimum: 0 },
+    expiredRunningCount: { type: "integer", minimum: 0 }
+  },
+  required: [
+    "checkedAt",
+    "queueBackend",
+    "backendStatus",
+    "queuedCount",
+    "runningCount",
+    "terminalCount",
+    "totalCount",
+    "retryRate",
+    "leaseRecoveryCount",
+    "expiredRunningCount"
+  ],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const browserRunnerQueueAlertSchema = {
+  type: "object",
+  properties: {
+    code: stringSchema,
+    severity: { type: "string", enum: ["warning", "critical"] },
+    message: stringSchema,
+    field: stringSchema,
+    value: {},
+    threshold: {}
+  },
+  required: ["code", "severity", "message", "field"],
   additionalProperties: false
 } as const satisfies JsonSchema;
 const runtimeScreenshotDiffSchema = {
@@ -1373,6 +1458,47 @@ export const SHARED_JSON_SCHEMAS = {
     required: ["id", "status", "createdAt", "updatedAt"],
     additionalProperties: false
   },
+  browserRunnerQueueMetrics: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/browser-runner-queue-metrics.json",
+    title: "BrowserRunnerQueueMetrics",
+    ...browserRunnerQueueMetricsSchema
+  },
+  browserRunnerQueueHealth: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/browser-runner-queue-health.json",
+    title: "BrowserRunnerQueueHealth",
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["ok", "degraded"] },
+      serviceRole: stringSchema,
+      deploymentProfile: stringSchema,
+      workerId: stringSchema,
+      maxWorkers: { type: "integer", minimum: 1 },
+      maxAttempts: { type: "integer", minimum: 1 },
+      leaseSeconds: { type: "integer", minimum: 1 },
+      retryBackoffSeconds: { type: "number", minimum: 0 },
+      pollSeconds: { type: "number", minimum: 0 },
+      metrics: browserRunnerQueueMetricsSchema,
+      alerts: {
+        type: "array",
+        items: browserRunnerQueueAlertSchema
+      }
+    },
+    required: [
+      "status",
+      "serviceRole",
+      "workerId",
+      "maxWorkers",
+      "maxAttempts",
+      "leaseSeconds",
+      "retryBackoffSeconds",
+      "pollSeconds",
+      "metrics",
+      "alerts"
+    ],
+    additionalProperties: false
+  },
   toolCall: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://ai-jsunpack.local/schemas/tool-call.json",
@@ -1857,7 +1983,20 @@ export const EXAMPLE_BROWSER_RUN_SUMMARY = {
       maxAttempts: 3,
       leaseSeconds: 120,
       retryBackoffSeconds: 1,
-      leaseRecovered: false
+      leaseRecovered: false,
+      queueLength: 0,
+      runningCount: 1,
+      terminalCount: 4,
+      totalCount: 5,
+      oldestQueuedAgeMs: null,
+      claimLatencyMs: null,
+      averageRunDurationMs: 250,
+      retryRate: 0,
+      leaseRecoveryCount: 0,
+      expiredRunningCount: 0,
+      backendHealthStatus: "ok",
+      backendError: null,
+      alerts: []
     }
   },
   error: null,
@@ -1874,6 +2013,46 @@ export const EXAMPLE_BROWSER_RUN_SUMMARY = {
   queueBackend: "sqlite",
   leaseRecovered: false
 } as const satisfies BrowserRunSummary;
+
+export const EXAMPLE_BROWSER_RUNNER_QUEUE_METRICS = {
+  checkedAt: exampleTimestamp,
+  queueBackend: "postgresql",
+  backendStatus: "ok",
+  backendError: null,
+  queuedCount: 2,
+  runningCount: 1,
+  terminalCount: 4,
+  totalCount: 7,
+  oldestQueuedAgeMs: 1500,
+  claimLatencyMs: 1200,
+  averageRunDurationMs: 3400,
+  retryRate: 0.25,
+  leaseRecoveryCount: 1,
+  expiredRunningCount: 0
+} as const satisfies BrowserRunnerQueueMetrics;
+
+export const EXAMPLE_BROWSER_RUNNER_QUEUE_HEALTH = {
+  status: "degraded",
+  serviceRole: "browser-runner",
+  deploymentProfile: "ok",
+  workerId: "browser-runner-contract",
+  maxWorkers: 2,
+  maxAttempts: 3,
+  leaseSeconds: 120,
+  retryBackoffSeconds: 1,
+  pollSeconds: 0.25,
+  metrics: EXAMPLE_BROWSER_RUNNER_QUEUE_METRICS,
+  alerts: [
+    {
+      code: "queue_backlog",
+      severity: "warning",
+      message: "Browser Runner queued run count exceeds local worker concurrency.",
+      field: "queuedCount",
+      value: 2,
+      threshold: 1
+    }
+  ]
+} as const satisfies BrowserRunnerQueueHealth;
 
 export const EXAMPLE_TOOL_CALL = {
   id: "tool_call_contract_example",
@@ -1965,6 +2144,8 @@ export const SHARED_CONTRACT_EXAMPLES = {
   runtimeValidationRun: EXAMPLE_RUNTIME_VALIDATION_RUN,
   browserRunRequest: EXAMPLE_BROWSER_RUN_REQUEST,
   browserRunSummary: EXAMPLE_BROWSER_RUN_SUMMARY,
+  browserRunnerQueueMetrics: EXAMPLE_BROWSER_RUNNER_QUEUE_METRICS,
+  browserRunnerQueueHealth: EXAMPLE_BROWSER_RUNNER_QUEUE_HEALTH,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,
   retentionCleanupRequest: EXAMPLE_RETENTION_CLEANUP_REQUEST,

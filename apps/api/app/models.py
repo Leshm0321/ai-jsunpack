@@ -110,6 +110,8 @@ RuntimeLoadState = Literal["load", "domcontentloaded", "networkidle"]
 RuntimeInteractionAction = Literal["click", "fill", "press", "wait"]
 RuntimeAssertionKind = Literal["selector_visible", "text_contains", "url_contains"]
 BrowserRunStatus = Literal["queued", "running", "pass", "fail", "best_effort"]
+BrowserRunnerHealthStatus = Literal["ok", "degraded"]
+BrowserRunnerAlertSeverity = Literal["warning", "critical"]
 
 
 def to_camel(value: str) -> str:
@@ -497,6 +499,46 @@ class BrowserRunSummary(ContractModel):
     worker_id: str | None = None
     queue_backend: str | None = None
     lease_recovered: bool = False
+
+
+class BrowserRunnerQueueMetrics(ContractModel):
+    checked_at: str
+    queue_backend: str
+    backend_status: BrowserRunnerHealthStatus
+    backend_error: str | None = None
+    queued_count: int = Field(ge=0)
+    running_count: int = Field(ge=0)
+    terminal_count: int = Field(ge=0)
+    total_count: int = Field(ge=0)
+    oldest_queued_age_ms: int | None = Field(default=None, ge=0)
+    claim_latency_ms: int | None = Field(default=None, ge=0)
+    average_run_duration_ms: int | None = Field(default=None, ge=0)
+    retry_rate: float = Field(ge=0)
+    lease_recovery_count: int = Field(ge=0)
+    expired_running_count: int = Field(ge=0)
+
+
+class BrowserRunnerQueueAlert(ContractModel):
+    code: str
+    severity: BrowserRunnerAlertSeverity
+    message: str
+    field: str
+    value: Any = None
+    threshold: Any = None
+
+
+class BrowserRunnerQueueHealth(ContractModel):
+    status: BrowserRunnerHealthStatus
+    service_role: str = "browser-runner"
+    deployment_profile: str | None = None
+    worker_id: str
+    max_workers: int = Field(ge=1)
+    max_attempts: int = Field(ge=1)
+    lease_seconds: int = Field(ge=1)
+    retry_backoff_seconds: float = Field(ge=0)
+    poll_seconds: float = Field(ge=0)
+    metrics: BrowserRunnerQueueMetrics
+    alerts: list[BrowserRunnerQueueAlert]
 
 
 class ToolCall(ContractModel):

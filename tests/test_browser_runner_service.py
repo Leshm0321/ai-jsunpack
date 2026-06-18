@@ -99,7 +99,79 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 self.assertEqual(summary["queueBackend"], "sqlite")
                 self.assertEqual(summary["result"]["executionBoundary"]["queueBackend"], "sqlite")
                 self.assertEqual(summary["result"]["executionBoundary"]["runAttempt"], 1)
+                self.assertEqual(summary["result"]["executionBoundary"]["backendHealthStatus"], "ok")
+                self.assertIn("queueLength", summary["result"]["executionBoundary"])
             queue.close()
+
+    def test_browser_runner_metrics_endpoint_requires_worker_token_and_reports_queue_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = ServiceFakeBrowserAdapter()
+            queue = BrowserRunnerQueue(
+                browser_adapter=adapter,
+                max_workers=1,
+                workdir=Path(temp_dir),
+                auto_start=False,
+            )
+            app = create_app(queue=queue)
+            token = create_auth_token(
+                subject="worker-service",
+                kind="service",
+                service_roles=["worker"],
+                projects={"proj": "maintainer"},
+                secret="test-secret",
+                expires_at=4102444800,
+            )
+            first = queue.submit(self._request("job_metrics_a"))
+            second = queue.submit(self._request("job_metrics_b"))
+            claimed = queue._claim(first.id)
+            self.assertIsNotNone(claimed)
+            queue._update(
+                second.id,
+                created_at="2026-01-01T00:00:00+00:00",
+                next_run_at="2026-01-01T00:00:00+00:00",
+            )
+
+            try:
+                with patch.dict(os.environ, {"AI_JSUNPACK_AUTH_SECRET": "test-secret"}):
+                    client = TestClient(app)
+                    denied = client.get("/browser-runs/metrics")
+                    self.assertEqual(denied.status_code, 401)
+
+                    response = client.get(
+                        "/browser-runs/metrics",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    metrics = response.json()
+                    self.assertEqual(metrics["queueBackend"], "sqlite")
+                    self.assertEqual(metrics["queuedCount"], 1)
+                    self.assertEqual(metrics["runningCount"], 1)
+                    self.assertEqual(metrics["totalCount"], 2)
+                    self.assertIsNotNone(metrics["claimLatencyMs"])
+            finally:
+                queue.close()
+
+    def test_browser_runner_health_reports_degraded_alerts_for_expired_leases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                max_workers=1,
+                workdir=Path(temp_dir),
+                lease_seconds=1,
+                auto_start=False,
+            )
+            run = queue.submit(self._request("job_health"))
+            claimed = queue._claim(run.id)
+            self.assertIsNotNone(claimed)
+            queue._update(run.id, lease_expires_at="2026-01-01T00:00:00+00:00")
+
+            try:
+                health = queue.health()
+                self.assertEqual(health.status, "degraded")
+                self.assertEqual(health.metrics.expired_running_count, 1)
+                self.assertIn("expired_running_leases", {alert.code for alert in health.alerts})
+            finally:
+                queue.close()
 
     def test_browser_run_rejects_unsafe_source_archive_paths_before_capture(self):
         unsafe_archives = [
@@ -215,6 +287,10 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 self.assertEqual(summary.queue_backend, "postgresql")
                 self.assertEqual(summary.result.execution_boundary["queueBackend"], "postgresql")
                 self.assertEqual(len(second_adapter.requests), 1)
+                metrics = second_queue.metrics()
+                self.assertEqual(metrics.queue_backend, "postgresql")
+                self.assertEqual(metrics.terminal_count, 1)
+                self.assertEqual(metrics.total_count, 1)
             finally:
                 second_queue.close()
                 engine.dispose()

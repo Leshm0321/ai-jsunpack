@@ -280,6 +280,7 @@ class PackagingRunner:
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
         runtime_boundaries = self._runtime_execution_boundaries(audit_payload["runtimeTraces"])
+        runtime_operations = self._browser_runner_operations(runtime_boundaries)
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         inference_records = audit_payload["inferenceRecords"]
@@ -326,6 +327,29 @@ class PackagingRunner:
             "## Browser Runner Boundary",
             "",
             self._status_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
+            "",
+            "## Browser Runner Operations",
+            "",
+            self._status_table(
+                runtime_operations,
+                (
+                    "stage",
+                    "remoteRunId",
+                    "queueBackend",
+                    "queueLength",
+                    "runningCount",
+                    "terminalCount",
+                    "totalCount",
+                    "oldestQueuedAgeMs",
+                    "claimLatencyMs",
+                    "averageRunDurationMs",
+                    "retryRate",
+                    "leaseRecoveryCount",
+                    "expiredRunningCount",
+                    "backendHealthStatus",
+                    "alerts",
+                ),
+            ),
             "",
             "## Runtime Compare",
             "",
@@ -384,6 +408,7 @@ class PackagingRunner:
         artifact_manifest = audit_payload["artifactManifest"]
         runtime_reports = audit_payload["runtimeReports"]
         runtime_boundaries = self._runtime_execution_boundaries(audit_payload["runtimeTraces"])
+        runtime_operations = self._browser_runner_operations(runtime_boundaries)
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
         build_artifacts = audit_payload["buildArtifacts"]
@@ -447,6 +472,27 @@ class PackagingRunner:
                 self._html_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
                 "<h2>Browser Runner Boundary</h2>",
                 self._html_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
+                "<h2>Browser Runner Operations</h2>",
+                self._html_table(
+                    runtime_operations,
+                    (
+                        "stage",
+                        "remoteRunId",
+                        "queueBackend",
+                        "queueLength",
+                        "runningCount",
+                        "terminalCount",
+                        "totalCount",
+                        "oldestQueuedAgeMs",
+                        "claimLatencyMs",
+                        "averageRunDurationMs",
+                        "retryRate",
+                        "leaseRecoveryCount",
+                        "expiredRunningCount",
+                        "backendHealthStatus",
+                        "alerts",
+                    ),
+                ),
                 "<h2>Runtime Compare</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
                 "<h2>Runtime Compare Difference Summary</h2>",
@@ -581,8 +627,67 @@ class PackagingRunner:
             "remoteRunId": boundary.get("remoteRunId") or "",
             "auth": boundary.get("auth") or "",
             "artifactExchange": boundary.get("artifactExchange") or "",
+            "queueBackend": boundary.get("queueBackend") or "",
+            "queueLength": boundary.get("queueLength"),
+            "runningCount": boundary.get("runningCount"),
+            "terminalCount": boundary.get("terminalCount"),
+            "totalCount": boundary.get("totalCount"),
+            "oldestQueuedAgeMs": boundary.get("oldestQueuedAgeMs"),
+            "claimLatencyMs": boundary.get("claimLatencyMs"),
+            "averageRunDurationMs": boundary.get("averageRunDurationMs"),
+            "retryRate": boundary.get("retryRate"),
+            "leaseRecoveryCount": boundary.get("leaseRecoveryCount"),
+            "expiredRunningCount": boundary.get("expiredRunningCount"),
+            "backendHealthStatus": boundary.get("backendHealthStatus") or "",
+            "alerts": self._browser_runner_alert_label(boundary.get("alerts")),
             "traceArtifactId": trace.get("artifactId") or "",
         }
+
+    def _browser_runner_operations(self, boundary_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in boundary_rows
+            if row.get("runnerKind") == "remote_browser_runner"
+            and any(
+                row.get(field) not in (None, "")
+                for field in (
+                    "queueBackend",
+                    "queueLength",
+                    "runningCount",
+                    "claimLatencyMs",
+                    "oldestQueuedAgeMs",
+                    "terminalCount",
+                    "totalCount",
+                    "averageRunDurationMs",
+                    "retryRate",
+                    "leaseRecoveryCount",
+                    "expiredRunningCount",
+                    "backendHealthStatus",
+                    "alerts",
+                )
+            )
+        ]
+
+    def _browser_runner_alert_label(self, alerts: Any) -> str:
+        if not isinstance(alerts, list) or not alerts:
+            return "none"
+        labels: list[str] = []
+        for alert in alerts[:4]:
+            if isinstance(alert, dict):
+                labels.append(
+                    ":".join(
+                        str(part)
+                        for part in (
+                            alert.get("severity") or "warning",
+                            alert.get("code") or "unknown",
+                            alert.get("field") or "field",
+                        )
+                    )
+                )
+        remaining = len(alerts) - len(labels)
+        if remaining > 0:
+            labels.append(f"+{remaining} more")
+        return ", ".join(labels) if labels else "none"
 
     def _runtime_compare_scope_label(self, differences: dict[str, Any]) -> str:
         scope = differences.get("comparisonScope") or {}
@@ -912,6 +1017,13 @@ class PackagingRunner:
                 anchor="runtime-compare-difference-summary",
                 summary="Scenario and viewport comparison differences with evidence deep links.",
                 artifact_kinds=("runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Browser Runner Operations",
+                anchor="browser-runner-operations",
+                summary="Remote Browser Runner queue length, latency, retry, lease recovery, backend health, and alert evidence.",
+                artifact_kinds=("runtime_trace",),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(

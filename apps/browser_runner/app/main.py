@@ -24,6 +24,9 @@ from sqlalchemy.engine import Engine
 
 from apps.api.app.auth import AccessContext, SERVICE_ROLE_WORKER, require_access
 from apps.api.app.models import (
+    BrowserRunnerQueueAlert,
+    BrowserRunnerQueueHealth,
+    BrowserRunnerQueueMetrics,
     BrowserRunRequest,
     BrowserRunResult,
     BrowserRunSourceArchive,
@@ -52,11 +55,20 @@ BROWSER_RUNNER_MAX_ATTEMPTS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_ATTEMPTS"
 BROWSER_RUNNER_LEASE_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_LEASE_SECONDS"
 BROWSER_RUNNER_RETRY_BACKOFF_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS"
 BROWSER_RUNNER_POLL_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS"
+BROWSER_RUNNER_MAX_QUEUE_AGE_MS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_QUEUE_AGE_MS"
+BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS"
+BROWSER_RUNNER_MAX_EXPIRED_RUNNING_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_EXPIRED_RUNNING"
+BROWSER_RUNNER_MAX_RETRY_RATE_ENV = "AI_JSUNPACK_BROWSER_RUNNER_MAX_RETRY_RATE"
 DEFAULT_BROWSER_RUNNER_WORKERS = 2
 DEFAULT_BROWSER_RUNNER_MAX_ATTEMPTS = 3
 DEFAULT_BROWSER_RUNNER_LEASE_SECONDS = 120
 DEFAULT_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_BROWSER_RUNNER_POLL_SECONDS = 0.25
+DEFAULT_BROWSER_RUNNER_MAX_QUEUE_AGE_MS = 60_000
+DEFAULT_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS = 60_000
+DEFAULT_BROWSER_RUNNER_MAX_EXPIRED_RUNNING = 0
+DEFAULT_BROWSER_RUNNER_MAX_RETRY_RATE = 0.25
+TERMINAL_BROWSER_RUN_STATUSES = {"pass", "fail", "best_effort"}
 
 try:
     DEPLOYMENT_PROFILE = validate_current_environment("browser-runner")
@@ -136,6 +148,9 @@ class BrowserRunQueueBackend(Protocol):
         submitted_run_ids: set[str],
         execution_boundary,
     ) -> list[BrowserRunRecord]:
+        ...
+
+    def stats(self, *, now: str) -> BrowserRunnerQueueMetrics:
         ...
 
 
@@ -284,6 +299,12 @@ class SQLiteBrowserRunQueueBackend:
                 self._save(connection, updated)
                 recovered.append(updated)
         return recovered
+
+    def stats(self, *, now: str) -> BrowserRunnerQueueMetrics:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM browser_runs").fetchall()
+        records = [self._record_from_row(row) for row in rows]
+        return browser_runner_queue_metrics(records, now=now, queue_backend=self.name)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -503,6 +524,13 @@ class SqlAlchemyBrowserRunQueueBackend:
                     recovered.append(updated)
         return recovered
 
+    def stats(self, *, now: str) -> BrowserRunnerQueueMetrics:
+        self.initialize()
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(browser_runs_table)).mappings().all()
+        records = [self._record_from_row(row) for row in rows]
+        return browser_runner_queue_metrics(records, now=now, queue_backend=self.name)
+
     def _row_values(self, record: BrowserRunRecord) -> dict[str, Any]:
         return {
             "id": record.id,
@@ -580,6 +608,79 @@ def browser_run_record_from_mapping(row: Any, *, default_queue_backend: str) -> 
         queue_backend=data.get("queue_backend") or default_queue_backend,
         lease_recovered=bool(data.get("lease_recovered")),
     )
+
+
+def browser_runner_queue_metrics(
+    records: list[BrowserRunRecord],
+    *,
+    now: str,
+    queue_backend: str,
+) -> BrowserRunnerQueueMetrics:
+    current_time = parse_timestamp(now)
+    queued = [record for record in records if record.status == "queued"]
+    running = [record for record in records if record.status == "running"]
+    terminal = [record for record in records if record.status in TERMINAL_BROWSER_RUN_STATUSES]
+    completed_with_duration = [
+        duration
+        for duration in (record_duration_ms(record) for record in terminal)
+        if duration is not None
+    ]
+    retry_candidates = [record for record in records if record.attempt > 0]
+    retry_count = sum(1 for record in retry_candidates if record.attempt > 1)
+    expired_running = [
+        record
+        for record in running
+        if (expires_at := parse_optional_timestamp(record.lease_expires_at)) is not None and expires_at <= current_time
+    ]
+    oldest_queued_age_ms = max(
+        (
+            max(0, duration_between_ms(parse_timestamp(record.created_at), current_time))
+            for record in queued
+        ),
+        default=None,
+    )
+    claim_latency_ms = max(
+        (
+            max(0, duration_between_ms(parse_timestamp(record.next_run_at or record.created_at), current_time))
+            for record in queued
+        ),
+        default=None,
+    )
+    average_run_duration_ms = (
+        int(sum(completed_with_duration) / len(completed_with_duration))
+        if completed_with_duration
+        else None
+    )
+    retry_rate = retry_count / len(retry_candidates) if retry_candidates else 0.0
+    return BrowserRunnerQueueMetrics(
+        checked_at=now,
+        queue_backend=queue_backend,
+        backend_status="ok",
+        queued_count=len(queued),
+        running_count=len(running),
+        terminal_count=len(terminal),
+        total_count=len(records),
+        oldest_queued_age_ms=oldest_queued_age_ms,
+        claim_latency_ms=claim_latency_ms,
+        average_run_duration_ms=average_run_duration_ms,
+        retry_rate=retry_rate,
+        lease_recovery_count=sum(1 for record in records if record.lease_recovered),
+        expired_running_count=len(expired_running),
+    )
+
+
+def record_duration_ms(record: BrowserRunRecord) -> int | None:
+    if record.started_at is None or record.finished_at is None:
+        return None
+    start = parse_optional_timestamp(record.started_at)
+    finish = parse_optional_timestamp(record.finished_at)
+    if start is None or finish is None:
+        return None
+    return max(0, duration_between_ms(start, finish))
+
+
+def duration_between_ms(start: datetime, finish: datetime) -> int:
+    return int((finish - start).total_seconds() * 1000)
 
 
 def expired_record_update(record: BrowserRunRecord, *, timestamp: str, execution_boundary) -> BrowserRunRecord:
@@ -685,6 +786,22 @@ class BrowserRunnerQueue:
             BROWSER_RUNNER_POLL_SECONDS_ENV,
             DEFAULT_BROWSER_RUNNER_POLL_SECONDS,
         )
+        self.max_queue_age_ms = parse_non_negative_int_env(
+            BROWSER_RUNNER_MAX_QUEUE_AGE_MS_ENV,
+            DEFAULT_BROWSER_RUNNER_MAX_QUEUE_AGE_MS,
+        )
+        self.max_claim_latency_ms = parse_non_negative_int_env(
+            BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS_ENV,
+            DEFAULT_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS,
+        )
+        self.max_expired_running = parse_non_negative_int_env(
+            BROWSER_RUNNER_MAX_EXPIRED_RUNNING_ENV,
+            DEFAULT_BROWSER_RUNNER_MAX_EXPIRED_RUNNING,
+        )
+        self.max_retry_rate = parse_float_env(
+            BROWSER_RUNNER_MAX_RETRY_RATE_ENV,
+            DEFAULT_BROWSER_RUNNER_MAX_RETRY_RATE,
+        )
         self.worker_id = f"browser-runner-{os.getpid()}-{uuid4().hex[:8]}"
         self.auto_start = auto_start
         self._lock = threading.Lock()
@@ -721,6 +838,26 @@ class BrowserRunnerQueue:
     def get(self, run_id: str) -> BrowserRunSummary | None:
         record = self.backend.get(run_id)
         return record.summary() if record else None
+
+    def metrics(self) -> BrowserRunnerQueueMetrics:
+        return self._metrics_snapshot()
+
+    def health(self) -> BrowserRunnerQueueHealth:
+        metrics = self._metrics_snapshot()
+        alerts = self._alerts(metrics)
+        status = "degraded" if metrics.backend_status == "degraded" or alerts else "ok"
+        return BrowserRunnerQueueHealth(
+            status=status,
+            deployment_profile=DEPLOYMENT_PROFILE.status,
+            worker_id=self.worker_id,
+            max_workers=self.max_workers,
+            max_attempts=self.max_attempts,
+            lease_seconds=self.lease_seconds,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+            poll_seconds=self.poll_seconds,
+            metrics=metrics,
+            alerts=alerts,
+        )
 
     def close(self) -> None:
         self._stop.set()
@@ -846,6 +983,8 @@ class BrowserRunnerQueue:
         )
 
     def _execution_boundary(self, record: BrowserRunRecord, *, lease_recovered: bool | None = None) -> dict[str, Any]:
+        metrics = self._metrics_snapshot()
+        alerts = self._alerts(metrics)
         return {
             "runnerKind": "remote_browser_runner",
             "enforcement": "remote_isolated",
@@ -860,7 +999,112 @@ class BrowserRunnerQueue:
             "leaseSeconds": self.lease_seconds,
             "retryBackoffSeconds": self.retry_backoff_seconds,
             "leaseRecovered": record.lease_recovered if lease_recovered is None else lease_recovered,
+            "queueLength": metrics.queued_count,
+            "runningCount": metrics.running_count,
+            "terminalCount": metrics.terminal_count,
+            "totalCount": metrics.total_count,
+            "oldestQueuedAgeMs": metrics.oldest_queued_age_ms,
+            "claimLatencyMs": metrics.claim_latency_ms,
+            "averageRunDurationMs": metrics.average_run_duration_ms,
+            "retryRate": metrics.retry_rate,
+            "leaseRecoveryCount": metrics.lease_recovery_count,
+            "expiredRunningCount": metrics.expired_running_count,
+            "backendHealthStatus": metrics.backend_status,
+            "backendError": metrics.backend_error,
+            "alerts": [alert.model_dump(by_alias=True) for alert in alerts],
         }
+
+    def _metrics_snapshot(self) -> BrowserRunnerQueueMetrics:
+        now = utc_now()
+        try:
+            return self.backend.stats(now=now)
+        except Exception as error:
+            return BrowserRunnerQueueMetrics(
+                checked_at=now,
+                queue_backend=self.queue_backend,
+                backend_status="degraded",
+                backend_error=str(error),
+                queued_count=0,
+                running_count=0,
+                terminal_count=0,
+                total_count=0,
+                oldest_queued_age_ms=None,
+                claim_latency_ms=None,
+                average_run_duration_ms=None,
+                retry_rate=0.0,
+                lease_recovery_count=0,
+                expired_running_count=0,
+            )
+
+    def _alerts(self, metrics: BrowserRunnerQueueMetrics) -> list[BrowserRunnerQueueAlert]:
+        alerts: list[BrowserRunnerQueueAlert] = []
+        if metrics.backend_status != "ok":
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="backend_unhealthy",
+                    severity="critical",
+                    message="Browser Runner queue backend health check failed.",
+                    field="backendStatus",
+                    value=metrics.backend_status,
+                    threshold="ok",
+                )
+            )
+        if metrics.queued_count > self.max_workers and (metrics.claim_latency_ms or 0) > 0:
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="queue_backlog",
+                    severity="warning",
+                    message="Browser Runner queued run count exceeds local worker concurrency.",
+                    field="queuedCount",
+                    value=metrics.queued_count,
+                    threshold=self.max_workers,
+                )
+            )
+        if metrics.oldest_queued_age_ms is not None and metrics.oldest_queued_age_ms > self.max_queue_age_ms:
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="queue_age_high",
+                    severity="warning",
+                    message="Oldest queued Browser Runner request exceeds the configured age threshold.",
+                    field="oldestQueuedAgeMs",
+                    value=metrics.oldest_queued_age_ms,
+                    threshold=self.max_queue_age_ms,
+                )
+            )
+        if metrics.claim_latency_ms is not None and metrics.claim_latency_ms > self.max_claim_latency_ms:
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="claim_latency_high",
+                    severity="warning",
+                    message="Browser Runner queue claim latency exceeds the configured threshold.",
+                    field="claimLatencyMs",
+                    value=metrics.claim_latency_ms,
+                    threshold=self.max_claim_latency_ms,
+                )
+            )
+        if metrics.expired_running_count > self.max_expired_running:
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="expired_running_leases",
+                    severity="critical",
+                    message="Browser Runner has running requests with expired leases.",
+                    field="expiredRunningCount",
+                    value=metrics.expired_running_count,
+                    threshold=self.max_expired_running,
+                )
+            )
+        if metrics.retry_rate > self.max_retry_rate:
+            alerts.append(
+                BrowserRunnerQueueAlert(
+                    code="retry_rate_high",
+                    severity="warning",
+                    message="Browser Runner retry rate exceeds the configured threshold.",
+                    field="retryRate",
+                    value=metrics.retry_rate,
+                    threshold=self.max_retry_rate,
+                )
+            )
+        return alerts
 
     def _update(self, run_id: str, **changes) -> None:
         self.backend.update(run_id, **changes)
@@ -898,13 +1142,9 @@ def create_app(*, queue: BrowserRunnerQueue | None = None, adapter: BrowserSmoke
     app = FastAPI(title="AI JS Unpack Browser Runner", version="0.1.0")
     app.state.browser_runner_queue = queue or BrowserRunnerQueue(browser_adapter=adapter)
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {
-            "status": "ok",
-            "serviceRole": "browser-runner",
-            "deploymentProfile": DEPLOYMENT_PROFILE.status,
-        }
+    @app.get("/health", response_model=BrowserRunnerQueueHealth)
+    def health() -> BrowserRunnerQueueHealth:
+        return app.state.browser_runner_queue.health()
 
     @app.post("/browser-runs", response_model=BrowserRunSummary)
     def create_browser_run(
@@ -913,6 +1153,13 @@ def create_app(*, queue: BrowserRunnerQueue | None = None, adapter: BrowserSmoke
     ) -> BrowserRunSummary:
         require_worker_service(access)
         return app.state.browser_runner_queue.submit(request)
+
+    @app.get("/browser-runs/metrics", response_model=BrowserRunnerQueueMetrics)
+    def browser_run_metrics(
+        access: AccessContext = Depends(require_access),
+    ) -> BrowserRunnerQueueMetrics:
+        require_worker_service(access)
+        return app.state.browser_runner_queue.metrics()
 
     @app.get("/browser-runs/{run_id}", response_model=BrowserRunSummary)
     def get_browser_run(
@@ -1029,6 +1276,17 @@ def parse_int_env(name: str, default: int) -> int:
     except ValueError:
         return default
     return max(1, parsed)
+
+
+def parse_non_negative_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return max(0, parsed)
 
 
 def parse_float_env(name: str, default: float) -> float:

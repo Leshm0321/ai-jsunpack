@@ -196,6 +196,28 @@ class PackagingRunnerTest(unittest.TestCase):
                                 "remoteRunId": "browser_run_test",
                                 "auth": "bearer_hmac",
                                 "artifactExchange": "worker_request_archive_and_worker_registered_runtime_artifacts",
+                                "queueBackend": "postgresql",
+                                "queueLength": 3,
+                                "runningCount": 2,
+                                "terminalCount": 8,
+                                "totalCount": 13,
+                                "oldestQueuedAgeMs": 5400,
+                                "claimLatencyMs": 1200,
+                                "averageRunDurationMs": 4500,
+                                "retryRate": 0.25,
+                                "leaseRecoveryCount": 1,
+                                "expiredRunningCount": 1,
+                                "backendHealthStatus": "ok",
+                                "alerts": [
+                                    {
+                                        "code": "queue_backlog",
+                                        "severity": "warning",
+                                        "message": "Browser Runner queued run count exceeds local worker concurrency.",
+                                        "field": "queuedCount",
+                                        "value": 3,
+                                        "threshold": 2,
+                                    }
+                                ],
                             },
                         }
                     ).encode("utf-8"),
@@ -207,11 +229,28 @@ class PackagingRunnerTest(unittest.TestCase):
                 report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
                 audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
                 runtime_traces = self._read_zip_json(result.result_package_artifact.storage_uri, "runtime-traces.json")
+                evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
 
                 self.assertIn("Browser Runner Boundary", report)
+                self.assertIn("Browser Runner Operations", report)
                 self.assertIn("browser_run_test", report)
+                self.assertIn("postgresql", report)
+                self.assertIn("runningCount", report)
+                self.assertIn("terminalCount", report)
+                self.assertIn("totalCount", report)
+                self.assertIn("oldestQueuedAgeMs", report)
+                self.assertIn("expiredRunningCount", report)
+                self.assertIn("queue_backlog", report)
                 self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["runnerKind"], "remote_browser_runner")
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["queueLength"], 3)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["runningCount"], 2)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["terminalCount"], 8)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["totalCount"], 13)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["oldestQueuedAgeMs"], 5400)
+                self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["expiredRunningCount"], 1)
                 self.assertEqual(runtime_traces[0]["executionBoundary"]["remoteRunId"], "browser_run_test")
+                self.assertIn("browser-runner-operations", report_sections)
             finally:
                 store.close()
 
