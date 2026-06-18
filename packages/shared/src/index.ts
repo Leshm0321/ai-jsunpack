@@ -438,6 +438,14 @@ export interface BrowserRunSummary {
   updatedAt: string;
   startedAt?: string | null;
   finishedAt?: string | null;
+  attempt?: number;
+  maxAttempts?: number;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
+  nextRunAt?: string | null;
+  workerId?: string | null;
+  queueBackend?: string | null;
+  leaseRecovered?: boolean;
 }
 
 export interface ToolCall {
@@ -1352,7 +1360,15 @@ export const SHARED_JSON_SCHEMAS = {
       createdAt: { type: "string", format: "date-time" },
       updatedAt: { type: "string", format: "date-time" },
       startedAt: { type: "string", format: "date-time" },
-      finishedAt: { type: "string", format: "date-time" }
+      finishedAt: { type: "string", format: "date-time" },
+      attempt: { type: "integer", minimum: 0 },
+      maxAttempts: { type: "integer", minimum: 1 },
+      leaseOwner: stringSchema,
+      leaseExpiresAt: { type: "string", format: "date-time" },
+      nextRunAt: { type: "string", format: "date-time" },
+      workerId: stringSchema,
+      queueBackend: stringSchema,
+      leaseRecovered: booleanSchema
     },
     required: ["id", "status", "createdAt", "updatedAt"],
     additionalProperties: false
@@ -1834,14 +1850,29 @@ export const EXAMPLE_BROWSER_RUN_SUMMARY = {
       enforcement: "remote_isolated",
       remoteRunId: "browser_run_contract_example",
       auth: "bearer_hmac",
-      artifactExchange: "worker_request_archive_and_worker_registered_runtime_artifacts"
+      artifactExchange: "worker_request_archive_and_worker_registered_runtime_artifacts",
+      queueBackend: "sqlite",
+      maxWorkers: 2,
+      runAttempt: 1,
+      maxAttempts: 3,
+      leaseSeconds: 120,
+      retryBackoffSeconds: 1,
+      leaseRecovered: false
     }
   },
   error: null,
   createdAt: exampleTimestamp,
   updatedAt: exampleTimestamp,
   startedAt: exampleTimestamp,
-  finishedAt: exampleTimestamp
+  finishedAt: exampleTimestamp,
+  attempt: 1,
+  maxAttempts: 3,
+  leaseOwner: null,
+  leaseExpiresAt: null,
+  nextRunAt: exampleTimestamp,
+  workerId: "browser-runner-contract",
+  queueBackend: "sqlite",
+  leaseRecovered: false
 } as const satisfies BrowserRunSummary;
 
 export const EXAMPLE_TOOL_CALL = {

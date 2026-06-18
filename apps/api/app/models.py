@@ -489,6 +489,14 @@ class BrowserRunSummary(ContractModel):
     updated_at: str
     started_at: str | None = None
     finished_at: str | None = None
+    attempt: int = Field(default=0, ge=0)
+    max_attempts: int = Field(default=1, ge=1)
+    lease_owner: str | None = None
+    lease_expires_at: str | None = None
+    next_run_at: str | None = None
+    worker_id: str | None = None
+    queue_backend: str | None = None
+    lease_recovered: bool = False
 
 
 class ToolCall(ContractModel):

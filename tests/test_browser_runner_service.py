@@ -1,6 +1,7 @@
 import base64
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -15,17 +16,34 @@ from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRe
 
 
 class ServiceFakeBrowserAdapter:
-    def __init__(self) -> None:
+    def __init__(self, *, delay_seconds: float = 0.0, fail_times: int = 0) -> None:
         self.requests: list[BrowserSmokeRequest] = []
+        self.delay_seconds = delay_seconds
+        self.fail_times = fail_times
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
 
     def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
-        self.requests.append(request)
-        request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nservice")
-        return BrowserSmokeCapture(
-            console_messages=["log: service"],
-            responses=[f"200 {request.entry_url}"],
-            dom_summary={"title": "service", "nodeCount": 1},
-        )
+        with self._lock:
+            self.requests.append(request)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            request_index = len(self.requests)
+        try:
+            if self.delay_seconds:
+                time.sleep(self.delay_seconds)
+            if request_index <= self.fail_times:
+                raise RuntimeError(f"planned failure {request_index}")
+            request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nservice")
+            return BrowserSmokeCapture(
+                console_messages=["log: service"],
+                responses=[f"200 {request.entry_url}"],
+                dom_summary={"title": "service", "nodeCount": 1},
+            )
+        finally:
+            with self._lock:
+                self.active -= 1
 
 
 class BrowserRunnerServiceTest(unittest.TestCase):
@@ -75,6 +93,12 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 )
                 self.assertEqual(len(adapter.requests), 1)
                 self.assertTrue(adapter.requests[0].entry_url.startswith("http://127.0.0.1:"))
+                self.assertEqual(summary["attempt"], 1)
+                self.assertEqual(summary["maxAttempts"], 3)
+                self.assertEqual(summary["queueBackend"], "sqlite")
+                self.assertEqual(summary["result"]["executionBoundary"]["queueBackend"], "sqlite")
+                self.assertEqual(summary["result"]["executionBoundary"]["runAttempt"], 1)
+            queue.close()
 
     def test_browser_run_rejects_unsafe_source_archive_paths_before_capture(self):
         unsafe_archives = [
@@ -105,6 +129,92 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                     self.assertIsNotNone(summary.result)
                     self.assertEqual(adapter.requests, [])
                     self.assertIn("Unsafe source archive member path", summary.result.page_errors[0])
+                    self.assertEqual(summary.attempt, 1)
+                    queue.close()
+
+    def test_browser_run_survives_queue_reconstruction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "browser-runs.sqlite3"
+            first_queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                max_workers=1,
+                workdir=Path(temp_dir),
+                db_path=db_path,
+                auto_start=False,
+            )
+            run = first_queue.submit(self._request("job_persist"))
+            first_queue.close()
+
+            second_adapter = ServiceFakeBrowserAdapter()
+            second_queue = BrowserRunnerQueue(
+                browser_adapter=second_adapter,
+                max_workers=1,
+                workdir=Path(temp_dir),
+                db_path=db_path,
+            )
+            summary = self._wait_for_queue_run(second_queue, run.id)
+            self.assertEqual(summary.status, "pass")
+            self.assertEqual(summary.attempt, 1)
+            self.assertEqual(len(second_adapter.requests), 1)
+            second_queue.close()
+
+    def test_expired_running_lease_is_recovered_and_retried(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "browser-runs.sqlite3"
+            queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                max_workers=1,
+                workdir=Path(temp_dir),
+                db_path=db_path,
+                lease_seconds=1,
+                auto_start=False,
+            )
+            run = queue.submit(self._request("job_recover"))
+            claimed = queue._claim(run.id)
+            self.assertIsNotNone(claimed)
+            expired = "2026-01-01T00:00:00+00:00"
+            queue._update(run.id, lease_expires_at=expired)
+            recovered = queue.recover_expired_leases(now="2026-01-01T00:00:02+00:00", schedule=False)
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0].status, "queued")
+            self.assertTrue(recovered[0].lease_recovered)
+            queue._discard_submitted(run.id)
+            queue._execute(run.id)
+            summary = queue.get(run.id)
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.status, "pass")
+            self.assertEqual(summary.attempt, 2)
+            self.assertTrue(summary.lease_recovered)
+            queue.close()
+
+    def test_browser_run_retries_transient_capture_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = ServiceFakeBrowserAdapter(fail_times=1)
+            queue = BrowserRunnerQueue(
+                browser_adapter=adapter,
+                max_workers=1,
+                workdir=Path(temp_dir),
+                max_attempts=2,
+                retry_backoff_seconds=0,
+            )
+            run = queue.submit(self._request("job_retry"))
+            summary = self._wait_for_queue_run(queue, run.id)
+            self.assertEqual(summary.status, "pass")
+            self.assertEqual(summary.attempt, 2)
+            self.assertEqual(len(adapter.requests), 2)
+            self.assertEqual(summary.result.execution_boundary["maxAttempts"], 2)
+            queue.close()
+
+    def test_browser_runner_respects_configured_worker_concurrency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = ServiceFakeBrowserAdapter(delay_seconds=0.05)
+            queue = BrowserRunnerQueue(browser_adapter=adapter, max_workers=1, workdir=Path(temp_dir))
+            runs = [queue.submit(self._request(f"job_concurrency_{index}")) for index in range(3)]
+            for run in runs:
+                summary = self._wait_for_queue_run(queue, run.id)
+                self.assertEqual(summary.status, "pass")
+            self.assertEqual(adapter.max_active, 1)
+            queue.close()
 
     def _wait_for_run(self, client: TestClient, run_id: str, token: str) -> dict:
         for _ in range(50):
@@ -118,6 +228,17 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 return payload
             time.sleep(0.02)
         self.fail("Browser run did not complete")
+
+    def _request(self, job_id: str) -> BrowserRunRequest:
+        return BrowserRunRequest(
+            job_id=job_id,
+            target="reconstructed",
+            attempt=0,
+            entry_url="about:blank",
+            timeout_ms=1000,
+            network_policy="deny",
+            source_archive=self._source_archive(),
+        )
 
     def _wait_for_queue_run(self, queue: BrowserRunnerQueue, run_id: str):
         for _ in range(50):
