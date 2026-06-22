@@ -488,6 +488,67 @@ export interface BrowserRunnerQueueHealth {
   alerts: BrowserRunnerQueueAlert[];
 }
 
+export interface OpsAlert {
+  code: string;
+  severity: "warning" | "critical";
+  message: string;
+  field: string;
+  value?: unknown;
+  threshold?: unknown;
+  serviceRole?: string | null;
+  instanceId?: string | null;
+  checkedAt?: string | null;
+}
+
+export interface OpsHeartbeatRequest {
+  serviceRole: string;
+  instanceId: string;
+  status: "ok" | "degraded";
+  ttlSeconds: number;
+  metrics: Record<string, unknown>;
+  alerts: OpsAlert[];
+  metadata: Record<string, unknown>;
+  checkedAt?: string | null;
+}
+
+export interface OpsHeartbeatRecord {
+  serviceRole: string;
+  instanceId: string;
+  status: "ok" | "degraded";
+  checkedAt: string;
+  expiresAt: string;
+  metrics: Record<string, unknown>;
+  alerts: OpsAlert[];
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OpsMetricsSnapshot {
+  checkedAt: string;
+  serviceRole: string;
+  deploymentProfile?: string | null;
+  jobStatusCounts: Record<string, number>;
+  activeHeartbeatCount: number;
+  staleHeartbeatCount: number;
+  serviceHeartbeatCounts: Record<string, number>;
+  metrics: Record<string, unknown>;
+  alerts: OpsAlert[];
+}
+
+export interface OpsAlertDelivery {
+  status: "not_configured" | "delivered" | "failed";
+  attempted: boolean;
+  webhookUrlConfigured: boolean;
+  error?: string | null;
+}
+
+export interface OpsAlertResponse {
+  checkedAt: string;
+  alerts: OpsAlert[];
+  delivery: OpsAlertDelivery;
+}
+
 export interface ToolCall {
   id: string;
   jobId: string;
@@ -905,6 +966,44 @@ const browserRunnerQueueAlertSchema = {
     threshold: {}
   },
   required: ["code", "severity", "message", "field"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const opsAlertSchema = {
+  type: "object",
+  properties: {
+    code: stringSchema,
+    severity: { type: "string", enum: ["warning", "critical"] },
+    message: stringSchema,
+    field: stringSchema,
+    value: {},
+    threshold: {},
+    serviceRole: stringSchema,
+    instanceId: stringSchema,
+    checkedAt: stringSchema
+  },
+  required: ["code", "severity", "message", "field"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const opsMetricsMapSchema = {
+  type: "object",
+  additionalProperties: true
+} as const satisfies JsonSchema;
+const opsIntegerMapSchema = {
+  type: "object",
+  additionalProperties: {
+    type: "integer",
+    minimum: 0
+  }
+} as const satisfies JsonSchema;
+const opsAlertDeliverySchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["not_configured", "delivered", "failed"] },
+    attempted: booleanSchema,
+    webhookUrlConfigured: booleanSchema,
+    error: stringSchema
+  },
+  required: ["status", "attempted", "webhookUrlConfigured"],
   additionalProperties: false
 } as const satisfies JsonSchema;
 const runtimeScreenshotDiffSchema = {
@@ -1499,6 +1598,118 @@ export const SHARED_JSON_SCHEMAS = {
     ],
     additionalProperties: false
   },
+  opsAlert: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-alert.json",
+    title: "OpsAlert",
+    type: "object",
+    properties: {
+      code: stringSchema,
+      severity: { type: "string", enum: ["warning", "critical"] },
+      message: stringSchema,
+      field: stringSchema,
+      value: {},
+      threshold: {},
+      serviceRole: stringSchema,
+      instanceId: stringSchema,
+      checkedAt: stringSchema
+    },
+    required: ["code", "severity", "message", "field"],
+    additionalProperties: false
+  },
+  opsHeartbeatRequest: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-heartbeat-request.json",
+    title: "OpsHeartbeatRequest",
+    type: "object",
+    properties: {
+      serviceRole: stringSchema,
+      instanceId: stringSchema,
+      status: { type: "string", enum: ["ok", "degraded"] },
+      ttlSeconds: { type: "integer", minimum: 1 },
+      metrics: opsMetricsMapSchema,
+      alerts: { type: "array", items: opsAlertSchema },
+      metadata: opsMetricsMapSchema,
+      checkedAt: stringSchema
+    },
+    required: ["serviceRole", "instanceId", "status", "ttlSeconds", "metrics", "alerts", "metadata"],
+    additionalProperties: false
+  },
+  opsHeartbeatRecord: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-heartbeat-record.json",
+    title: "OpsHeartbeatRecord",
+    type: "object",
+    properties: {
+      serviceRole: stringSchema,
+      instanceId: stringSchema,
+      status: { type: "string", enum: ["ok", "degraded"] },
+      checkedAt: stringSchema,
+      expiresAt: stringSchema,
+      metrics: opsMetricsMapSchema,
+      alerts: { type: "array", items: opsAlertSchema },
+      metadata: opsMetricsMapSchema,
+      createdAt: stringSchema,
+      updatedAt: stringSchema
+    },
+    required: ["serviceRole", "instanceId", "status", "checkedAt", "expiresAt", "metrics", "alerts", "metadata", "createdAt", "updatedAt"],
+    additionalProperties: false
+  },
+  opsMetricsSnapshot: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-metrics-snapshot.json",
+    title: "OpsMetricsSnapshot",
+    type: "object",
+    properties: {
+      checkedAt: stringSchema,
+      serviceRole: stringSchema,
+      deploymentProfile: stringSchema,
+      jobStatusCounts: opsIntegerMapSchema,
+      activeHeartbeatCount: { type: "integer", minimum: 0 },
+      staleHeartbeatCount: { type: "integer", minimum: 0 },
+      serviceHeartbeatCounts: opsIntegerMapSchema,
+      metrics: opsMetricsMapSchema,
+      alerts: { type: "array", items: opsAlertSchema }
+    },
+    required: [
+      "checkedAt",
+      "serviceRole",
+      "jobStatusCounts",
+      "activeHeartbeatCount",
+      "staleHeartbeatCount",
+      "serviceHeartbeatCounts",
+      "metrics",
+      "alerts"
+    ],
+    additionalProperties: false
+  },
+  opsAlertDelivery: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-alert-delivery.json",
+    title: "OpsAlertDelivery",
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["not_configured", "delivered", "failed"] },
+      attempted: booleanSchema,
+      webhookUrlConfigured: booleanSchema,
+      error: stringSchema
+    },
+    required: ["status", "attempted", "webhookUrlConfigured"],
+    additionalProperties: false
+  },
+  opsAlertResponse: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-alert-response.json",
+    title: "OpsAlertResponse",
+    type: "object",
+    properties: {
+      checkedAt: stringSchema,
+      alerts: { type: "array", items: opsAlertSchema },
+      delivery: opsAlertDeliverySchema
+    },
+    required: ["checkedAt", "alerts", "delivery"],
+    additionalProperties: false
+  },
   toolCall: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://ai-jsunpack.local/schemas/tool-call.json",
@@ -2054,6 +2265,81 @@ export const EXAMPLE_BROWSER_RUNNER_QUEUE_HEALTH = {
   ]
 } as const satisfies BrowserRunnerQueueHealth;
 
+export const EXAMPLE_OPS_ALERT = {
+  code: "worker_heartbeat_stale",
+  severity: "critical",
+  message: "Worker heartbeat is stale or expired.",
+  field: "expiresAt",
+  value: exampleTimestamp,
+  threshold: "now",
+  serviceRole: "worker",
+  instanceId: "worker-contract",
+  checkedAt: exampleTimestamp
+} as const satisfies OpsAlert;
+
+export const EXAMPLE_OPS_HEARTBEAT_REQUEST = {
+  serviceRole: "worker",
+  instanceId: "worker-contract",
+  status: "ok",
+  ttlSeconds: 90,
+  metrics: {
+    pollSeconds: 5,
+    maxAttempts: 3
+  },
+  alerts: [],
+  metadata: {
+    deploymentProfile: "ok"
+  },
+  checkedAt: exampleTimestamp
+} as const satisfies OpsHeartbeatRequest;
+
+export const EXAMPLE_OPS_HEARTBEAT_RECORD = {
+  serviceRole: "worker",
+  instanceId: "worker-contract",
+  status: "ok",
+  checkedAt: exampleTimestamp,
+  expiresAt: "2026-06-14T00:01:30.000Z",
+  metrics: EXAMPLE_OPS_HEARTBEAT_REQUEST.metrics,
+  alerts: [],
+  metadata: EXAMPLE_OPS_HEARTBEAT_REQUEST.metadata,
+  createdAt: exampleTimestamp,
+  updatedAt: exampleTimestamp
+} as const satisfies OpsHeartbeatRecord;
+
+export const EXAMPLE_OPS_METRICS_SNAPSHOT = {
+  checkedAt: exampleTimestamp,
+  serviceRole: "api",
+  deploymentProfile: "ok",
+  jobStatusCounts: {
+    queued: 1,
+    leased: 1,
+    completed: 2
+  },
+  activeHeartbeatCount: 1,
+  staleHeartbeatCount: 1,
+  serviceHeartbeatCounts: {
+    worker: 1,
+    "browser-runner": 1
+  },
+  metrics: {
+    contractSchemaVersion: CONTRACT_SCHEMA_VERSION
+  },
+  alerts: [EXAMPLE_OPS_ALERT]
+} as const satisfies OpsMetricsSnapshot;
+
+export const EXAMPLE_OPS_ALERT_DELIVERY = {
+  status: "not_configured",
+  attempted: false,
+  webhookUrlConfigured: false,
+  error: null
+} as const satisfies OpsAlertDelivery;
+
+export const EXAMPLE_OPS_ALERT_RESPONSE = {
+  checkedAt: exampleTimestamp,
+  alerts: [EXAMPLE_OPS_ALERT],
+  delivery: EXAMPLE_OPS_ALERT_DELIVERY
+} as const satisfies OpsAlertResponse;
+
 export const EXAMPLE_TOOL_CALL = {
   id: "tool_call_contract_example",
   jobId: EXAMPLE_JOB.id,
@@ -2146,6 +2432,12 @@ export const SHARED_CONTRACT_EXAMPLES = {
   browserRunSummary: EXAMPLE_BROWSER_RUN_SUMMARY,
   browserRunnerQueueMetrics: EXAMPLE_BROWSER_RUNNER_QUEUE_METRICS,
   browserRunnerQueueHealth: EXAMPLE_BROWSER_RUNNER_QUEUE_HEALTH,
+  opsAlert: EXAMPLE_OPS_ALERT,
+  opsHeartbeatRequest: EXAMPLE_OPS_HEARTBEAT_REQUEST,
+  opsHeartbeatRecord: EXAMPLE_OPS_HEARTBEAT_RECORD,
+  opsMetricsSnapshot: EXAMPLE_OPS_METRICS_SNAPSHOT,
+  opsAlertDelivery: EXAMPLE_OPS_ALERT_DELIVERY,
+  opsAlertResponse: EXAMPLE_OPS_ALERT_RESPONSE,
   toolCall: EXAMPLE_TOOL_CALL,
   memoryRecord: EXAMPLE_MEMORY_RECORD,
   retentionCleanupRequest: EXAMPLE_RETENTION_CLEANUP_REQUEST,

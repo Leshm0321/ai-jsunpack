@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import os
+from datetime import datetime, timezone
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +19,12 @@ from .models import (
     AuditRecordCollection,
     CancelJobRequest,
     CreateJobRequest,
+    OpsAlert,
+    OpsAlertDelivery,
+    OpsAlertResponse,
+    OpsHeartbeatRecord,
+    OpsHeartbeatRequest,
+    OpsMetricsSnapshot,
     InferenceRecord,
     JobRecord,
     JobSummary,
@@ -43,6 +53,10 @@ REPORT_DOWNLOAD_FILENAMES = {
     "evidence_index": "evidence-index.json",
 }
 AUDIT_RECORD_CATEGORIES = ("all", "inference", "review", "tool")
+OPS_WEBHOOK_URL_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_URL"
+OPS_WEBHOOK_TIMEOUT_SECONDS_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS"
+OPS_HEARTBEAT_TTL_SECONDS_ENV = "AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS"
+OPS_INSTANCE_ID_ENV = "AI_JSUNPACK_INSTANCE_ID"
 
 try:
     DEPLOYMENT_PROFILE = validate_current_environment("api")
@@ -74,6 +88,42 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "serviceRole": "api", "deploymentProfile": DEPLOYMENT_PROFILE.status}
+
+
+@app.post("/ops/heartbeats", response_model=OpsHeartbeatRecord)
+def record_ops_heartbeat(
+    request: OpsHeartbeatRequest,
+    access: AccessContext = Depends(require_access),
+) -> OpsHeartbeatRecord:
+    require_ops_service(access)
+    heartbeat = store.record_ops_heartbeat(request)
+    return heartbeat
+
+
+@app.get("/ops/heartbeats", response_model=list[OpsHeartbeatRecord])
+def list_ops_heartbeats(
+    service_role: str | None = None,
+    active_only: bool = False,
+    access: AccessContext = Depends(require_access),
+) -> list[OpsHeartbeatRecord]:
+    require_ops_read_access(access)
+    refresh_api_heartbeat()
+    return store.list_ops_heartbeats(service_role=service_role, include_stale=not active_only)
+
+
+@app.get("/ops/metrics", response_model=OpsMetricsSnapshot)
+def ops_metrics(access: AccessContext = Depends(require_access)) -> OpsMetricsSnapshot:
+    require_ops_read_access(access)
+    return build_ops_metrics_snapshot()
+
+
+@app.get("/ops/alerts", response_model=OpsAlertResponse)
+def ops_alerts(access: AccessContext = Depends(require_access)) -> OpsAlertResponse:
+    require_ops_read_access(access)
+    snapshot = build_ops_metrics_snapshot()
+    alerts = snapshot.alerts
+    delivery = deliver_ops_alerts(snapshot.checked_at, alerts, snapshot.metrics)
+    return OpsAlertResponse(checked_at=snapshot.checked_at, alerts=alerts, delivery=delivery)
 
 
 @app.post("/jobs", response_model=JobSummary)
@@ -386,6 +436,201 @@ def require_project_role(access: AccessContext, project_id: str, minimum_role: P
         raise HTTPException(status_code=403, detail="Service credential is not allowed to access this API")
     if not access.has_project_role(project_id, minimum_role):
         raise HTTPException(status_code=403, detail="Caller is not allowed to access this project")
+
+
+def require_ops_service(access: AccessContext) -> None:
+    if access.kind != "service" or not access.has_service_role(SERVICE_ROLE_WORKER):
+        raise HTTPException(status_code=403, detail="Ops heartbeat ingestion requires a worker service credential")
+
+
+def require_ops_read_access(access: AccessContext) -> None:
+    if access.kind == "service" and access.has_service_role(SERVICE_ROLE_WORKER):
+        return
+    if access.kind == "user" and any(role in {"maintainer", "owner"} for role in access.projects.values()):
+        return
+    raise HTTPException(status_code=403, detail="Caller is not allowed to access ops telemetry")
+
+
+def refresh_api_heartbeat() -> OpsHeartbeatRecord:
+    checked_at = utc_now()
+    profile = DEPLOYMENT_PROFILE.status
+    metrics = {
+        "deploymentProfile": profile,
+        "jobStatusCounts": store.job_status_counts(),
+        "corsOrigins": configured_cors_origins(),
+    }
+    alerts: list[OpsAlert] = []
+    if profile != "ok":
+        alerts.append(
+            OpsAlert(
+                code="deployment_profile_warning",
+                severity="warning",
+                message="API deployment profile is not fully ok.",
+                field="deploymentProfile",
+                value=profile,
+                threshold="ok",
+                service_role="api",
+                instance_id=api_instance_id(),
+                checked_at=checked_at,
+            )
+        )
+    request = OpsHeartbeatRequest(
+        service_role="api",
+        instance_id=api_instance_id(),
+        status="ok" if profile == "ok" else "degraded",
+        ttl_seconds=parse_ops_heartbeat_ttl_seconds(),
+        checked_at=checked_at,
+        metrics=metrics,
+        alerts=alerts,
+        metadata={
+            "deploymentProfile": profile,
+            "corsOrigins": configured_cors_origins(),
+        },
+    )
+    return store.record_ops_heartbeat(request)
+
+
+def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
+    api_heartbeat = refresh_api_heartbeat()
+    checked_at = api_heartbeat.checked_at
+    current_time = parse_timestamp(checked_at)
+    heartbeats = store.list_ops_heartbeats(include_stale=True, now=checked_at)
+    active_heartbeats = [heartbeat for heartbeat in heartbeats if parse_timestamp(heartbeat.expires_at) > current_time]
+    stale_heartbeats = [heartbeat for heartbeat in heartbeats if parse_timestamp(heartbeat.expires_at) <= current_time]
+    service_heartbeat_counts: dict[str, int] = {}
+    alerts: list[OpsAlert] = []
+    for heartbeat in heartbeats:
+        service_heartbeat_counts[heartbeat.service_role] = service_heartbeat_counts.get(heartbeat.service_role, 0) + 1
+        alerts.extend(heartbeat.alerts)
+        if heartbeat.status != "ok":
+            alerts.append(
+                OpsAlert(
+                    code=f"{heartbeat.service_role}_heartbeat_degraded",
+                    severity="warning",
+                    message=f"{heartbeat.service_role} heartbeat status is {heartbeat.status}.",
+                    field="status",
+                    value=heartbeat.status,
+                    threshold="ok",
+                    service_role=heartbeat.service_role,
+                    instance_id=heartbeat.instance_id,
+                    checked_at=heartbeat.checked_at,
+                )
+            )
+        if parse_timestamp(heartbeat.expires_at) <= current_time:
+            alerts.append(
+                OpsAlert(
+                    code="heartbeat_expired",
+                    severity="critical",
+                    message=f"{heartbeat.service_role} heartbeat is stale or expired.",
+                    field="expiresAt",
+                    value=heartbeat.expires_at,
+                    threshold=checked_at,
+                    service_role=heartbeat.service_role,
+                    instance_id=heartbeat.instance_id,
+                    checked_at=heartbeat.checked_at,
+                )
+            )
+    metrics = {
+        "api": api_heartbeat.metrics,
+        "jobStatusCounts": store.job_status_counts(),
+        "totalHeartbeatCount": len(heartbeats),
+        "activeHeartbeatCount": len(active_heartbeats),
+        "staleHeartbeatCount": len(stale_heartbeats),
+        "serviceHeartbeatCounts": service_heartbeat_counts,
+        "deploymentProfile": DEPLOYMENT_PROFILE.status,
+    }
+    return OpsMetricsSnapshot(
+        checked_at=checked_at,
+        service_role="api",
+        deployment_profile=DEPLOYMENT_PROFILE.status,
+        job_status_counts=store.job_status_counts(),
+        active_heartbeat_count=len(active_heartbeats),
+        stale_heartbeat_count=len(stale_heartbeats),
+        service_heartbeat_counts=service_heartbeat_counts,
+        metrics=metrics,
+        alerts=alerts,
+    )
+
+
+def deliver_ops_alerts(checked_at: str, alerts: list[OpsAlert], metrics: dict[str, object]) -> OpsAlertDelivery:
+    webhook_url = os.getenv(OPS_WEBHOOK_URL_ENV, "").strip()
+    if not webhook_url:
+        return OpsAlertDelivery(
+            status="not_configured",
+            attempted=False,
+            webhook_url_configured=False,
+            error=None,
+        )
+    payload = {
+        "checkedAt": checked_at,
+        "alerts": [alert.model_dump(by_alias=True) for alert in alerts],
+        "metrics": metrics,
+    }
+    timeout_seconds = parse_float_env(OPS_WEBHOOK_TIMEOUT_SECONDS_ENV, 2.0)
+    request = Request(
+        webhook_url,
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            response.read()
+    except (URLError, TimeoutError, ValueError) as error:
+        return OpsAlertDelivery(
+            status="failed",
+            attempted=True,
+            webhook_url_configured=True,
+            error=str(error),
+        )
+    return OpsAlertDelivery(
+        status="delivered",
+        attempted=True,
+        webhook_url_configured=True,
+        error=None,
+    )
+
+
+def api_instance_id() -> str:
+    return os.getenv(OPS_INSTANCE_ID_ENV) or f"api-{os.getpid()}"
+
+
+def parse_ops_heartbeat_ttl_seconds() -> int:
+    return parse_int_env(OPS_HEARTBEAT_TTL_SECONDS_ENV, 90)
+
+
+def parse_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return max(1, parsed)
+
+
+def parse_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        return default
+    return max(0.1, parsed)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_timestamp(value: str) -> datetime:
+    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def runtime_validation_from_artifact(job_id: str, artifact: ArtifactRecord) -> RuntimeValidationRun:

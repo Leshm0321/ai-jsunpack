@@ -70,6 +70,12 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 self.assertEqual(persisted.status, "completed")
                 self.assertEqual(persisted.run_attempt, 1)
                 self.assertIsNone(persisted.worker_lease)
+                heartbeats = store.list_ops_heartbeats(service_role="worker")
+                self.assertEqual(len(heartbeats), 1)
+                self.assertEqual(heartbeats[0].instance_id, "queue-worker")
+                self.assertEqual(heartbeats[0].status, "ok")
+                self.assertEqual(heartbeats[0].metrics["jobId"], queued.id)
+                self.assertEqual(heartbeats[0].metrics["phase"], "completed")
             finally:
                 store.close()
 
@@ -107,6 +113,11 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 self.assertEqual(persisted.status, "failed")
                 self.assertEqual(persisted.failure_class, "invalid_input")
                 self.assertIsNone(persisted.worker_lease)
+                heartbeats = store.list_ops_heartbeats(service_role="worker")
+                self.assertEqual(len(heartbeats), 1)
+                self.assertEqual(heartbeats[0].status, "degraded")
+                self.assertEqual(heartbeats[0].metrics["phase"], "failed")
+                self.assertEqual(heartbeats[0].alerts[0].code, "worker_pipeline_failed")
             finally:
                 store.close()
 
@@ -144,6 +155,11 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 self.assertEqual(persisted.status, "cancelled")
                 self.assertEqual(persisted.failure_reason, "cancelled during pipeline")
                 self.assertIsNone(persisted.worker_lease)
+                heartbeats = store.list_ops_heartbeats(service_role="worker")
+                self.assertEqual(len(heartbeats), 1)
+                self.assertEqual(heartbeats[0].status, "degraded")
+                self.assertEqual(heartbeats[0].metrics["phase"], "completed")
+                self.assertEqual(heartbeats[0].metrics["jobStatus"], "cancelled")
             finally:
                 store.close()
 

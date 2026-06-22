@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 
 from apps.api.app.auth import create_auth_token
 from apps.api.app.models import BrowserRunRequest
+from apps.api.app.store import create_store
 from apps.browser_runner.app.main import BrowserRunnerQueue, SqlAlchemyBrowserRunQueueBackend, create_app, normalize_queue_backend
 from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest
 
@@ -172,6 +173,31 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                 self.assertIn("expired_running_leases", {alert.code for alert in health.alerts})
             finally:
                 queue.close()
+
+    def test_browser_runner_records_ops_heartbeat_in_shared_metadata_db(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = create_engine(f"sqlite:///{(root / 'shared-browser-runs.db').as_posix()}", future=True)
+            queue = BrowserRunnerQueue(
+                browser_adapter=ServiceFakeBrowserAdapter(),
+                backend=SqlAlchemyBrowserRunQueueBackend(engine=engine),
+                max_workers=1,
+                workdir=root,
+                auto_start=False,
+            )
+            ops_store = create_store(engine=engine, artifact_root=root / "artifacts")
+            try:
+                health = queue.health()
+                heartbeats = ops_store.list_ops_heartbeats(service_role="browser-runner")
+                self.assertEqual(health.status, "ok")
+                self.assertEqual(len(heartbeats), 1)
+                self.assertEqual(heartbeats[0].instance_id, queue.worker_id)
+                self.assertEqual(heartbeats[0].status, "ok")
+                self.assertEqual(heartbeats[0].metrics["queueBackend"], "postgresql")
+                self.assertEqual(heartbeats[0].metadata["workerId"], queue.worker_id)
+            finally:
+                queue.close()
+                engine.dispose()
 
     def test_browser_run_rejects_unsafe_source_archive_paths_before_capture(self):
         unsafe_archives = [

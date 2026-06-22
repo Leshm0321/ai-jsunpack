@@ -12,7 +12,7 @@ from apps.api.app.artifact_store import (
     S3CompatibleArtifactStore,
     artifact_lifecycle_rules,
 )
-from apps.api.app.models import CreateJobRequest, RetentionCleanupRequest
+from apps.api.app.models import CreateJobRequest, OpsAlert, OpsHeartbeatRequest, RetentionCleanupRequest
 from apps.api.app.store import create_artifact_store, create_store
 
 
@@ -236,6 +236,66 @@ class DatabaseStoreTest(unittest.TestCase):
                 final = store.get_job(job.id)
                 self.assertEqual(final.failure_class, "timeout")
                 self.assertIsNone(final.worker_lease)
+            finally:
+                store.close()
+
+    def test_ops_heartbeats_persist_and_filter_active_records(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                checked_at = datetime(2026, 6, 22, 8, 0, tzinfo=timezone.utc)
+                active = store.record_ops_heartbeat(
+                    OpsHeartbeatRequest(
+                        service_role="worker",
+                        instance_id="worker-a",
+                        status="ok",
+                        ttl_seconds=30,
+                        checked_at=checked_at.isoformat(),
+                        metrics={"phase": "idle", "jobCount": 1},
+                        alerts=[
+                            OpsAlert(
+                                code="worker_overloaded",
+                                severity="warning",
+                                message="Worker is approaching capacity.",
+                                field="jobCount",
+                                value=1,
+                                threshold=0,
+                            )
+                        ],
+                        metadata={"role": "worker"},
+                    )
+                )
+                stale = store.record_ops_heartbeat(
+                    OpsHeartbeatRequest(
+                        service_role="browser-runner",
+                        instance_id="runner-a",
+                        status="degraded",
+                        ttl_seconds=1,
+                        checked_at=checked_at.isoformat(),
+                        metrics={"queueBackend": "sqlite"},
+                        alerts=[],
+                        metadata={"role": "browser-runner"},
+                    )
+                )
+
+                self.assertEqual(active.service_role, "worker")
+                self.assertEqual(active.alerts[0].code, "worker_overloaded")
+                self.assertEqual(stale.status, "degraded")
+
+                all_heartbeats = store.list_ops_heartbeats()
+                active_only = store.list_ops_heartbeats(
+                    include_stale=False,
+                    now=(checked_at + timedelta(seconds=10)).isoformat(),
+                )
+
+                self.assertEqual(len(all_heartbeats), 2)
+                self.assertEqual({heartbeat.service_role for heartbeat in all_heartbeats}, {"worker", "browser-runner"})
+                self.assertEqual([heartbeat.service_role for heartbeat in active_only], ["worker"])
+                self.assertEqual(active_only[0].metadata["role"], "worker")
             finally:
                 store.close()
 

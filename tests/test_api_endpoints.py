@@ -5,6 +5,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -24,6 +25,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.access_headers = self.auth_headers("owner", {"proj": "owner"})
         self.viewer_headers = self.auth_headers("viewer", {"proj": "viewer"})
         self.other_access_headers = self.auth_headers("other-owner", {"other-proj": "owner"})
+        self.worker_service_headers = self.auth_headers("worker-service", {}, kind="service", service_roles=["worker"])
         self.store = create_store(
             database_url=f"sqlite:///{(self.root / 'metadata.db').as_posix()}",
             artifact_root=self.root / "artifacts",
@@ -730,6 +732,60 @@ class ApiEndpointTest(unittest.TestCase):
         )
 
         self.assertEqual(uploaded.status_code, 200)
+
+    def test_ops_endpoints_record_heartbeats_and_deliver_alerts(self):
+        webhook_response = MagicMock()
+        webhook_response.__enter__.return_value = webhook_response
+        webhook_response.__exit__.return_value = False
+        webhook_response.read.return_value = b"{}"
+
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_ALERT_WEBHOOK_URL": "https://ops.example/webhook",
+                "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS": "1",
+            },
+            clear=False,
+        ), patch("apps.api.app.main.urlopen", return_value=webhook_response) as mocked_urlopen:
+            heartbeat = self.client.post(
+                "/ops/heartbeats",
+                json={
+                    "serviceRole": "worker",
+                    "instanceId": "worker-service-a",
+                    "status": "degraded",
+                    "ttlSeconds": 30,
+                    "metrics": {"phase": "running", "jobCount": 1},
+                    "alerts": [
+                        {
+                            "code": "worker_overloaded",
+                            "severity": "warning",
+                            "message": "Worker is approaching capacity.",
+                            "field": "jobCount",
+                            "value": 1,
+                            "threshold": 0,
+                        }
+                    ],
+                    "metadata": {"queue": "shared"},
+                },
+                headers=self.worker_service_headers,
+            )
+            metrics = self.client.get("/ops/metrics", headers=self.access_headers)
+            heartbeats = self.client.get("/ops/heartbeats?service_role=worker", headers=self.access_headers)
+            alerts = self.client.get("/ops/alerts", headers=self.access_headers)
+
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(metrics.status_code, 200)
+        self.assertEqual(heartbeats.status_code, 200)
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(heartbeat.json()["serviceRole"], "worker")
+        self.assertGreaterEqual(metrics.json()["activeHeartbeatCount"], 2)
+        self.assertEqual(metrics.json()["serviceHeartbeatCounts"]["worker"], 1)
+        self.assertIn("api", metrics.json()["serviceHeartbeatCounts"])
+        self.assertEqual(heartbeats.json()[0]["status"], "degraded")
+        self.assertEqual(alerts.json()["delivery"]["status"], "delivered")
+        self.assertTrue(alerts.json()["delivery"]["attempted"])
+        self.assertTrue(alerts.json()["delivery"]["webhookUrlConfigured"])
+        self.assertTrue(mocked_urlopen.called)
 
 
 if __name__ == "__main__":

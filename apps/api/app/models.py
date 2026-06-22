@@ -112,6 +112,7 @@ RuntimeAssertionKind = Literal["selector_visible", "text_contains", "url_contain
 BrowserRunStatus = Literal["queued", "running", "pass", "fail", "best_effort"]
 BrowserRunnerHealthStatus = Literal["ok", "degraded"]
 BrowserRunnerAlertSeverity = Literal["warning", "critical"]
+OpsAlertSeverity = Literal["warning", "critical"]
 
 
 def to_camel(value: str) -> str:
@@ -539,6 +540,67 @@ class BrowserRunnerQueueHealth(ContractModel):
     poll_seconds: float = Field(ge=0)
     metrics: BrowserRunnerQueueMetrics
     alerts: list[BrowserRunnerQueueAlert]
+
+
+class OpsAlert(ContractModel):
+    code: str
+    severity: OpsAlertSeverity
+    message: str
+    field: str
+    value: Any = None
+    threshold: Any = None
+    service_role: str | None = None
+    instance_id: str | None = None
+    checked_at: str | None = None
+
+
+class OpsHeartbeatRequest(ContractModel):
+    service_role: str
+    instance_id: str
+    status: BrowserRunnerHealthStatus = "ok"
+    ttl_seconds: int = Field(default=90, ge=1)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    alerts: list[OpsAlert] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    checked_at: str | None = None
+
+
+class OpsHeartbeatRecord(ContractModel):
+    service_role: str
+    instance_id: str
+    status: BrowserRunnerHealthStatus
+    checked_at: str
+    expires_at: str
+    metrics: dict[str, Any]
+    alerts: list[OpsAlert]
+    metadata: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
+class OpsMetricsSnapshot(ContractModel):
+    checked_at: str
+    service_role: str
+    deployment_profile: str | None = None
+    job_status_counts: dict[str, int] = Field(default_factory=dict)
+    active_heartbeat_count: int = Field(ge=0)
+    stale_heartbeat_count: int = Field(ge=0)
+    service_heartbeat_counts: dict[str, int] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    alerts: list[OpsAlert] = Field(default_factory=list)
+
+
+class OpsAlertDelivery(ContractModel):
+    status: Literal["not_configured", "delivered", "failed"]
+    attempted: bool
+    webhook_url_configured: bool
+    error: str | None = None
+
+
+class OpsAlertResponse(ContractModel):
+    checked_at: str
+    alerts: list[OpsAlert]
+    delivery: OpsAlertDelivery
 
 
 class ToolCall(ContractModel):

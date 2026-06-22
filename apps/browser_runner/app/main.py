@@ -33,10 +33,12 @@ from apps.api.app.models import (
     BrowserRunStatus,
     BrowserRunSummary,
     FailureClass,
+    OpsAlert,
+    OpsHeartbeatRequest,
     RunStatus,
 )
 from apps.api.app.models import utc_now
-from apps.api.app.store import DATABASE_URL_ENV, DEFAULT_DATABASE_URL
+from apps.api.app.store import DATABASE_URL_ENV, DEFAULT_DATABASE_URL, create_store
 from apps.worker.worker.runtime_smoke import (
     BrowserSmokeAdapter,
     BrowserSmokeCapture,
@@ -811,6 +813,12 @@ class BrowserRunnerQueue:
         self._scheduler_started = False
         self.backend.initialize()
         self.recover_expired_leases(schedule=False)
+        self.ops_store = None
+        try:
+            self.ops_store = self._create_ops_store(database_url=database_url, engine=engine)
+        except Exception:
+            self.ops_store = None
+        self._record_ops_heartbeat()
         if self.auto_start:
             self._scheduler.start()
             self._scheduler_started = True
@@ -843,9 +851,8 @@ class BrowserRunnerQueue:
         return self._metrics_snapshot()
 
     def health(self) -> BrowserRunnerQueueHealth:
-        metrics = self._metrics_snapshot()
-        alerts = self._alerts(metrics)
-        status = "degraded" if metrics.backend_status == "degraded" or alerts else "ok"
+        status, metrics, alerts = self._ops_snapshot()
+        self._record_ops_heartbeat(status=status, metrics=metrics, alerts=alerts)
         return BrowserRunnerQueueHealth(
             status=status,
             deployment_profile=DEPLOYMENT_PROFILE.status,
@@ -864,6 +871,8 @@ class BrowserRunnerQueue:
         if self._scheduler_started:
             self._scheduler.join(timeout=max(1.0, self.poll_seconds + 1))
         self.executor.shutdown(wait=True, cancel_futures=False)
+        if getattr(self, "ops_store", None) is not None:
+            self.ops_store.close()
         self.backend.close()
 
     def recover_expired_leases(self, *, now: str | None = None, schedule: bool = True) -> list[BrowserRunSummary]:
@@ -924,6 +933,7 @@ class BrowserRunnerQueue:
                 lease_expires_at=None,
             )
         finally:
+            self._record_ops_heartbeat()
             self._discard_submitted(run_id)
             if self.auto_start:
                 self._schedule_due_runs()
@@ -1105,6 +1115,90 @@ class BrowserRunnerQueue:
                 )
             )
         return alerts
+
+    def _ops_snapshot(self) -> tuple[str, BrowserRunnerQueueMetrics, list[BrowserRunnerQueueAlert]]:
+        metrics = self._metrics_snapshot()
+        alerts = self._alerts(metrics)
+        status = "degraded" if metrics.backend_status == "degraded" or alerts else "ok"
+        return status, metrics, alerts
+
+    def _create_ops_store(self, *, database_url: str | None, engine: Engine | None):
+        shared_engine = engine if engine is not None else getattr(self.backend, "engine", None)
+        if shared_engine is not None:
+            return create_store(
+                engine=shared_engine,
+                artifact_root=self.workdir / "ops-artifacts",
+            )
+        metadata_path = self.workdir / "ops-metadata.db"
+        shared_database_url = database_url or f"sqlite:///{metadata_path.as_posix()}"
+        return create_store(
+            database_url=shared_database_url,
+            artifact_root=self.workdir / "ops-artifacts",
+        )
+
+    def _record_ops_heartbeat(
+        self,
+        *,
+        status: str | None = None,
+        metrics: BrowserRunnerQueueMetrics | None = None,
+        alerts: list[BrowserRunnerQueueAlert] | None = None,
+    ) -> None:
+        store = getattr(self, "ops_store", None)
+        if store is None:
+            return
+        try:
+            current_metrics = metrics or self._metrics_snapshot()
+            current_alerts = alerts or self._alerts(current_metrics)
+            current_status = status or ("degraded" if current_metrics.backend_status == "degraded" or current_alerts else "ok")
+            store.record_ops_heartbeat(
+                OpsHeartbeatRequest(
+                    service_role="browser-runner",
+                    instance_id=self.worker_id,
+                    status=current_status,
+                    ttl_seconds=max(int(self.lease_seconds * 2), 90),
+                    metrics={
+                        "queueBackend": current_metrics.queue_backend,
+                        "backendStatus": current_metrics.backend_status,
+                        "backendError": current_metrics.backend_error,
+                        "queuedCount": current_metrics.queued_count,
+                        "runningCount": current_metrics.running_count,
+                        "terminalCount": current_metrics.terminal_count,
+                        "totalCount": current_metrics.total_count,
+                        "oldestQueuedAgeMs": current_metrics.oldest_queued_age_ms,
+                        "claimLatencyMs": current_metrics.claim_latency_ms,
+                        "averageRunDurationMs": current_metrics.average_run_duration_ms,
+                        "retryRate": current_metrics.retry_rate,
+                        "leaseRecoveryCount": current_metrics.lease_recovery_count,
+                        "expiredRunningCount": current_metrics.expired_running_count,
+                        "maxWorkers": self.max_workers,
+                        "maxAttempts": self.max_attempts,
+                        "leaseSeconds": self.lease_seconds,
+                        "retryBackoffSeconds": self.retry_backoff_seconds,
+                        "pollSeconds": self.poll_seconds,
+                    },
+                    alerts=[
+                        OpsAlert(
+                            code=alert.code,
+                            severity=alert.severity,
+                            message=alert.message,
+                            field=alert.field,
+                            value=alert.value,
+                            threshold=alert.threshold,
+                            service_role="browser-runner",
+                            instance_id=self.worker_id,
+                            checked_at=current_metrics.checked_at,
+                        )
+                        for alert in current_alerts
+                    ],
+                    metadata={
+                        "deploymentProfile": DEPLOYMENT_PROFILE.status,
+                        "queueBackend": current_metrics.queue_backend,
+                        "workerId": self.worker_id,
+                    },
+                )
+            )
+        except Exception:
+            return
 
     def _update(self, run_id: str, **changes) -> None:
         self.backend.update(run_id, **changes)

@@ -24,6 +24,9 @@ from .models import (
     FailureClass,
     JobRecord,
     JobStatus,
+    OpsAlert,
+    OpsHeartbeatRecord,
+    OpsHeartbeatRequest,
     RetentionCategory,
     RetentionClass,
     RetentionCleanupItem,
@@ -122,6 +125,21 @@ artifacts_table = Table(
     Column("deletion_reason", String, nullable=True),
 )
 
+ops_heartbeats_table = Table(
+    "ops_heartbeats",
+    metadata,
+    Column("service_role", String, primary_key=True),
+    Column("instance_id", String, primary_key=True),
+    Column("status", String, nullable=False),
+    Column("checked_at", String, nullable=False),
+    Column("expires_at", String, nullable=False),
+    Column("metrics", JSON, nullable=False),
+    Column("alerts", JSON, nullable=False),
+    Column("heartbeat_metadata", JSON, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
 
 class DatabaseStore:
     def __init__(
@@ -129,9 +147,11 @@ class DatabaseStore:
         database_url: str | None = None,
         artifact_root: Path | str | None = None,
         artifact_store: ArtifactStore | None = None,
+        engine: Engine | None = None,
     ) -> None:
         self.database_url = database_url or os.getenv(DATABASE_URL_ENV, DEFAULT_DATABASE_URL)
-        self.engine: Engine = create_engine(self.database_url, future=True)
+        self.engine: Engine = engine or create_engine(self.database_url, future=True)
+        self._owns_engine = engine is None
         self.artifact_root = Path(artifact_root or os.getenv(ARTIFACT_ROOT_ENV, "artifacts"))
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.artifact_store = artifact_store or create_artifact_store(self.artifact_root)
@@ -142,11 +162,13 @@ class DatabaseStore:
             return
         metadata.create_all(self.engine)
         self._ensure_jobs_queue_columns()
+        self._ensure_ops_heartbeat_columns()
         self._ensure_artifacts_lifecycle_columns()
         self._schema_ready = True
 
     def close(self) -> None:
-        self.engine.dispose()
+        if self._owns_engine:
+            self.engine.dispose()
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
         self.initialize()
@@ -365,6 +387,86 @@ class DatabaseStore:
                 if updated_row is not None:
                     updated_jobs.append(self._job_from_row(updated_row))
         return updated_jobs
+
+    def record_ops_heartbeat(self, request: OpsHeartbeatRequest) -> OpsHeartbeatRecord:
+        self.initialize()
+        checked_at = request.checked_at or utc_now()
+        checked_time = parse_timestamp(checked_at)
+        expires_at = (checked_time + timedelta(seconds=request.ttl_seconds)).isoformat()
+        timestamp = utc_now()
+        alerts = [
+            normalize_ops_alert(alert, request.service_role, request.instance_id, checked_at).model_dump(by_alias=True)
+            for alert in request.alerts
+        ]
+        row_values = {
+            "service_role": request.service_role,
+            "instance_id": request.instance_id,
+            "status": request.status,
+            "checked_at": checked_at,
+            "expires_at": expires_at,
+            "metrics": request.metrics,
+            "alerts": alerts,
+            "heartbeat_metadata": request.metadata,
+            "updated_at": timestamp,
+        }
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(ops_heartbeats_table).where(
+                    ops_heartbeats_table.c.service_role == request.service_role,
+                    ops_heartbeats_table.c.instance_id == request.instance_id,
+                )
+            ).mappings().first()
+            if existing is None:
+                connection.execute(insert(ops_heartbeats_table).values(**row_values, created_at=timestamp))
+            else:
+                connection.execute(
+                    update(ops_heartbeats_table)
+                    .where(
+                        ops_heartbeats_table.c.service_role == request.service_role,
+                        ops_heartbeats_table.c.instance_id == request.instance_id,
+                    )
+                    .values(**row_values)
+                )
+            row = connection.execute(
+                select(ops_heartbeats_table).where(
+                    ops_heartbeats_table.c.service_role == request.service_role,
+                    ops_heartbeats_table.c.instance_id == request.instance_id,
+                )
+            ).mappings().first()
+        if row is None:
+            raise KeyError(f"Heartbeat not found: {request.service_role}/{request.instance_id}")
+        return self._ops_heartbeat_from_row(row)
+
+    def list_ops_heartbeats(
+        self,
+        *,
+        service_role: str | None = None,
+        include_stale: bool = True,
+        now: str | None = None,
+    ) -> list[OpsHeartbeatRecord]:
+        self.initialize()
+        query = select(ops_heartbeats_table)
+        if service_role is not None:
+            query = query.where(ops_heartbeats_table.c.service_role == service_role)
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                query.order_by(ops_heartbeats_table.c.service_role, ops_heartbeats_table.c.instance_id)
+            ).mappings().all()
+        records = [self._ops_heartbeat_from_row(row) for row in rows]
+        if include_stale:
+            return records
+        current_time = parse_timestamp(now or utc_now())
+        return [record for record in records if parse_timestamp(record.expires_at) > current_time]
+
+    def job_status_counts(self) -> dict[str, int]:
+        self.initialize()
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(jobs_table.c.status)).all()
+        counts: dict[str, int] = {}
+        for row in rows:
+            status = str(row[0])
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     def list_artifacts(
         self,
@@ -674,11 +776,24 @@ class DatabaseStore:
         data.setdefault("deletion_reason", None)
         return ArtifactRecord.model_validate(data)
 
+    def _ops_heartbeat_from_row(self, row: Any) -> OpsHeartbeatRecord:
+        data = dict(row)
+        data["metadata"] = data.pop("heartbeat_metadata", None) or {}
+        data["metrics"] = data.get("metrics") or {}
+        data["alerts"] = data.get("alerts") or []
+        return OpsHeartbeatRecord.model_validate(data)
+
     def _ensure_jobs_queue_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("jobs")}
         with self.engine.begin() as connection:
             if "run_attempt" not in existing_columns:
                 connection.execute(text("ALTER TABLE jobs ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0"))
+
+    def _ensure_ops_heartbeat_columns(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("ops_heartbeats")}
+        with self.engine.begin() as connection:
+            if "heartbeat_metadata" not in existing_columns:
+                connection.execute(text("ALTER TABLE ops_heartbeats ADD COLUMN heartbeat_metadata JSON"))
 
     def _ensure_artifacts_lifecycle_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("artifacts")}
@@ -763,6 +878,20 @@ def lease_expires_at(worker_lease: Any) -> datetime | None:
         return parse_timestamp(value)
     except ValueError:
         return None
+
+
+def normalize_ops_alert(alert: OpsAlert, service_role: str, instance_id: str, checked_at: str) -> OpsAlert:
+    return OpsAlert(
+        code=alert.code,
+        severity=alert.severity,
+        message=alert.message,
+        field=alert.field,
+        value=alert.value,
+        threshold=alert.threshold,
+        service_role=alert.service_role or service_role,
+        instance_id=alert.instance_id or instance_id,
+        checked_at=alert.checked_at or checked_at,
+    )
 
 
 def normalize_cleanup_reason(reason: str) -> str:
@@ -877,8 +1006,9 @@ def create_store(
     database_url: str | None = None,
     artifact_root: Path | str | None = None,
     artifact_store: ArtifactStore | None = None,
+    engine: Engine | None = None,
 ) -> DatabaseStore:
-    return DatabaseStore(database_url=database_url, artifact_root=artifact_root, artifact_store=artifact_store)
+    return DatabaseStore(database_url=database_url, artifact_root=artifact_root, artifact_store=artifact_store, engine=engine)
 
 
 store = create_store()
