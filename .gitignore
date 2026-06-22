@@ -25,6 +25,7 @@ coverage/
 playwright-report/
 test-results/
 *.tsbuildinfo
-docs/
+docs/*
+!docs/browser-runner-capacity-baseline.md
 design-system/
 dev_docs/
