@@ -28,11 +28,13 @@ from .models import (
     InferenceRecord,
     JobRecord,
     JobSummary,
+    MemoryRecord,
     RetentionCleanupRequest,
     RetentionCleanupResult,
     ReviewRun,
     RuntimeValidationRun,
     ToolCall,
+    ToolRegistryEntry,
 )
 from .store import store
 
@@ -202,6 +204,32 @@ def list_tool_calls(
 ) -> list[ToolCall]:
     require_job(job_id, access)
     return list_tool_call_payloads(job_id)
+
+
+@app.get("/jobs/{job_id}/tool-registry", response_model=list[ToolRegistryEntry])
+def list_tool_registry(
+    job_id: str,
+    access: AccessContext = Depends(require_access),
+) -> list[ToolRegistryEntry]:
+    require_job(job_id, access)
+    return list_tool_registry_payloads(job_id)
+
+
+@app.get("/jobs/{job_id}/memory-records", response_model=list[MemoryRecord])
+def list_memory_records(
+    job_id: str,
+    memory_type: str | None = None,
+    memoryType: str | None = None,
+    access: AccessContext = Depends(require_access),
+) -> list[MemoryRecord]:
+    require_job(job_id, access)
+    records = list_memory_record_payloads(job_id)
+    requested_memory_type = memory_type or memoryType
+    if requested_memory_type is None:
+        return records
+    if requested_memory_type not in {"short_term", "long_term", "entity", "scenario"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported memory type: {requested_memory_type}")
+    return [record for record in records if record.memory_type == requested_memory_type]
 
 
 @app.get("/jobs/{job_id}/runtime-validations/latest", response_model=RuntimeValidationRun)
@@ -674,3 +702,34 @@ def tool_call_from_artifact(job_id: str, artifact: ArtifactRecord) -> ToolCall:
         return ToolCall.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Invalid tool call artifact: {artifact.id}") from error
+
+
+def list_tool_registry_payloads(job_id: str) -> list[ToolRegistryEntry]:
+    artifacts = store.list_artifacts(job_id, kind="tool_registry")
+    entries: list[ToolRegistryEntry] = []
+    for artifact in artifacts:
+        entries.extend(tool_registry_entries_from_artifact(job_id, artifact))
+    return entries
+
+
+def tool_registry_entries_from_artifact(job_id: str, artifact: ArtifactRecord) -> list[ToolRegistryEntry]:
+    try:
+        payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+        raw_entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_entries, list):
+            raise ValueError("tool registry entries must be a list")
+        return [ToolRegistryEntry.model_validate(entry) for entry in raw_entries]
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Invalid tool registry artifact: {artifact.id}") from error
+
+
+def list_memory_record_payloads(job_id: str) -> list[MemoryRecord]:
+    artifacts = store.list_artifacts(job_id, kind="memory_record")
+    return [memory_record_from_artifact(job_id, artifact) for artifact in artifacts]
+
+
+def memory_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> MemoryRecord:
+    try:
+        return MemoryRecord.model_validate_json(store.read_artifact(job_id, artifact.id))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Invalid memory record artifact: {artifact.id}") from error

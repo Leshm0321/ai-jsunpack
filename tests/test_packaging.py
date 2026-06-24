@@ -124,6 +124,55 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                memory_record = store.write_artifact(
+                    job.id,
+                    kind="memory_record",
+                    stage="agent_planning",
+                    filename="memory-record-short-term.json",
+                    content=json.dumps(
+                        {
+                            "id": "memory_test",
+                            "scope": "job",
+                            "projectId": job.project_id,
+                            "jobId": job.id,
+                            "memoryType": "short_term",
+                            "content": "Packaging test memory.",
+                            "sourceArtifactIds": [runtime_trace.id],
+                            "sensitivityClass": "derived",
+                            "retentionClass": "project",
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
+                tool_registry = store.write_artifact(
+                    job.id,
+                    kind="tool_registry",
+                    stage="agent_planning",
+                    filename="tool-registry.json",
+                    content=json.dumps(
+                        {
+                            "kind": "tool_registry",
+                            "jobId": job.id,
+                            "entries": [
+                                {
+                                    "id": "tool_registry_test",
+                                    "jobId": job.id,
+                                    "toolName": "crewai.agent_pass",
+                                    "toolVersion": "0.2.0",
+                                    "category": "model",
+                                    "caller": "WorkerPipeline",
+                                    "inputArtifactKinds": ["input_inventory", "ast_index"],
+                                    "outputArtifactKinds": ["agent_plan", "inference_record"],
+                                    "failureClasses": ["none", "policy_denied", "agent_failed"],
+                                    "description": "Packaging test registry.",
+                                }
+                            ],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
@@ -155,13 +204,20 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertFalse(package_contents[f"evidence/build_log/{build_log.id}"]["included"])
                 self.assertEqual(package_contents[f"evidence/runtime_trace/{runtime_trace.id}.json"]["artifactId"], runtime_trace.id)
                 self.assertIn("risk-and-failure-groups", report_sections)
+                self.assertIn("agent-runtime-audit", report_sections)
                 self.assertIn("evidence-attachment-index", report_sections)
                 self.assertIn(f"artifact://{review_run.id}", report_sections["risk-and-failure-groups"]["evidenceLinks"])
+                self.assertIn(f"artifact://{memory_record.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
+                self.assertIn(f"artifact://{tool_registry.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
                 self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", names)
+                self.assertIn("tool-registry.json", names)
+                self.assertIn("memory-records.json", names)
+                self.assertIn("runtime-diagnoses.json", names)
+                self.assertIn("report-sections.json", names)
                 self.assertNotIn(f"evidence/build_log/{build_log.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_screenshot/{runtime_screenshot.id}.png", names)
                 report_text = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")

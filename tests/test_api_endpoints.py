@@ -206,6 +206,42 @@ class ApiEndpointTest(unittest.TestCase):
             "duration": 3.25,
             "failureClass": "none",
         }
+        tool_registry_entry = {
+            "id": "tool_registry_api_test",
+            "jobId": job_id,
+            "toolName": "crewai_stub.agent_pass",
+            "toolVersion": "0.1.0",
+            "category": "model",
+            "caller": "WorkerPipeline",
+            "inputArtifactKinds": ["input_inventory", "ast_index"],
+            "outputArtifactKinds": ["agent_plan", "inference_record", "review_run", "tool_call"],
+            "failureClasses": ["none", "policy_denied", "agent_failed"],
+            "description": "API fixture registry entry.",
+        }
+        memory_payloads = [
+            {
+                "id": "memory_api_short",
+                "scope": "job",
+                "projectId": "proj",
+                "jobId": job_id,
+                "memoryType": "short_term",
+                "content": "Short-term job memory.",
+                "sourceArtifactIds": ["artifact_inventory", "artifact_ast"],
+                "sensitivityClass": "derived",
+                "retentionClass": "project",
+            },
+            {
+                "id": "memory_api_long",
+                "scope": "project",
+                "projectId": "proj",
+                "jobId": job_id,
+                "memoryType": "long_term",
+                "content": "Project-level memory.",
+                "sourceArtifactIds": ["artifact_inventory", "artifact_ast"],
+                "sensitivityClass": "derived",
+                "retentionClass": "project",
+            },
+        ]
         self.store.write_artifact(
             job_id,
             kind="inference_record",
@@ -233,10 +269,45 @@ class ApiEndpointTest(unittest.TestCase):
             content_type="application/json",
             producer="test.api",
         )
+        self.store.write_artifact(
+            job_id,
+            kind="tool_registry",
+            stage="agent_planning",
+            filename="tool-registry.json",
+            content=json.dumps({"kind": "tool_registry", "jobId": job_id, "entries": [tool_registry_entry]}).encode(
+                "utf-8"
+            ),
+            content_type="application/json",
+            producer="test.api",
+        )
+        for memory_payload in memory_payloads:
+            self.store.write_artifact(
+                job_id,
+                kind="memory_record",
+                stage="agent_planning",
+                filename=f"memory-{memory_payload['memoryType']}.json",
+                content=json.dumps(memory_payload).encode("utf-8"),
+                content_type="application/json",
+                producer="test.api",
+            )
 
         inference_response = self.client.get(f"/jobs/{job_id}/inference-records", headers=self.access_headers)
         review_response = self.client.get(f"/jobs/{job_id}/review-runs", headers=self.access_headers)
         tool_call_response = self.client.get(f"/jobs/{job_id}/tool-calls", headers=self.access_headers)
+        tool_registry_response = self.client.get(f"/jobs/{job_id}/tool-registry", headers=self.access_headers)
+        memory_response = self.client.get(f"/jobs/{job_id}/memory-records", headers=self.access_headers)
+        long_memory_response = self.client.get(
+            f"/jobs/{job_id}/memory-records?memory_type=long_term",
+            headers=self.access_headers,
+        )
+        short_memory_camel_response = self.client.get(
+            f"/jobs/{job_id}/memory-records?memoryType=short_term",
+            headers=self.access_headers,
+        )
+        invalid_memory_response = self.client.get(
+            f"/jobs/{job_id}/memory-records?memory_type=unsupported",
+            headers=self.access_headers,
+        )
         audit_records_response = self.client.get(f"/jobs/{job_id}/audit-records", headers=self.access_headers)
         audit_review_response = self.client.get(f"/jobs/{job_id}/audit-records?category=review", headers=self.access_headers)
         unsupported_audit_response = self.client.get(
@@ -247,12 +318,21 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(inference_response.status_code, 200)
         self.assertEqual(review_response.status_code, 200)
         self.assertEqual(tool_call_response.status_code, 200)
+        self.assertEqual(tool_registry_response.status_code, 200)
+        self.assertEqual(memory_response.status_code, 200)
+        self.assertEqual(long_memory_response.status_code, 200)
+        self.assertEqual(short_memory_camel_response.status_code, 200)
+        self.assertEqual(invalid_memory_response.status_code, 400)
         self.assertEqual(audit_records_response.status_code, 200)
         self.assertEqual(audit_review_response.status_code, 200)
         self.assertEqual(unsupported_audit_response.status_code, 400)
         self.assertEqual(inference_response.json(), [inference_payload])
         self.assertEqual(review_response.json(), [review_payload])
         self.assertEqual(tool_call_response.json(), [tool_call_payload])
+        self.assertEqual(tool_registry_response.json(), [tool_registry_entry])
+        self.assertEqual(memory_response.json(), memory_payloads)
+        self.assertEqual(long_memory_response.json(), [memory_payloads[1]])
+        self.assertEqual(short_memory_camel_response.json(), [memory_payloads[0]])
         self.assertEqual(
             audit_records_response.json(),
             {

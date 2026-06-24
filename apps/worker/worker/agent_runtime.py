@@ -20,10 +20,14 @@ from apps.api.app.models import (
     InferenceType,
     InferenceValidationStatus,
     MemoryRecord,
+    RepairInstruction,
     ReviewRun,
+    RuntimeDiagnosis,
     RunStatus,
     ToolCall,
     ToolCallStatus,
+    ToolRegistryEntry,
+    ReportSection,
 )
 from packages.knowledge import KnowledgeHit, StaticKnowledgeRetriever
 from packages.memory import JobMemoryContext, JobMemoryService
@@ -61,12 +65,20 @@ class AgentRuntimeRequest:
 @dataclass(frozen=True)
 class AgentRuntimeResult:
     plan_artifact: ArtifactRecord
-    memory_artifact: ArtifactRecord
+    memory_artifacts: list[ArtifactRecord]
     knowledge_artifact: ArtifactRecord
+    tool_registry_artifact: ArtifactRecord
     inference_artifacts: list[ArtifactRecord]
+    runtime_diagnosis_artifacts: list[ArtifactRecord]
+    report_section_artifacts: list[ArtifactRecord]
+    repair_instruction_artifacts: list[ArtifactRecord]
     review_artifact: ArtifactRecord
     tool_call_artifact: ArtifactRecord
     message: str
+
+    @property
+    def memory_artifact(self) -> ArtifactRecord:
+        return self.memory_artifacts[0]
 
 
 @dataclass(frozen=True)
@@ -200,10 +212,46 @@ class AgentReviewDraft:
 
 
 @dataclass(frozen=True)
+class AgentRuntimeDiagnosisDraft:
+    target_stage: str
+    status: RunStatus
+    failure_class: FailureClass
+    diagnosis: str
+    recommended_actions: list[str]
+    confidence: float
+    uncertainty_reasons: list[str]
+    agent_name: str = "RuntimeAgent"
+
+
+@dataclass(frozen=True)
+class AgentReportSectionDraft:
+    title: str
+    anchor: str
+    summary: str
+    content: str
+    status: RunStatus
+    confidence: float
+    uncertainty_reasons: list[str]
+    agent_name: str = "ReportAgent"
+
+
+@dataclass(frozen=True)
+class AgentRepairInstructionDraft:
+    target_stage: str
+    failure_class: FailureClass
+    decision: str
+    status: str = "skipped"
+    risk_level: str = "low"
+
+
+@dataclass(frozen=True)
 class AgentProviderDraft:
     plan_payload: dict[str, Any]
     evidence_refs: list[EvidenceRef]
     inferences: list[AgentInferenceDraft]
+    runtime_diagnoses: list[AgentRuntimeDiagnosisDraft]
+    report_sections: list[AgentReportSectionDraft]
+    repair_instructions: list[AgentRepairInstructionDraft]
     review: AgentReviewDraft
     model_provider: str
     model_name: str
@@ -224,7 +272,7 @@ class AgentProvider(Protocol):
         *,
         request: AgentRuntimeRequest,
         memory_context: JobMemoryContext,
-        memory_artifact_id: str,
+        memory_artifact_ids: list[str],
         knowledge_hits: list[KnowledgeHit],
         knowledge_artifact_id: str,
         evidence_refs: list[EvidenceRef],
@@ -361,7 +409,7 @@ class CrewAIAgentProvider:
         *,
         request: AgentRuntimeRequest,
         memory_context: JobMemoryContext,
-        memory_artifact_id: str,
+        memory_artifact_ids: list[str],
         knowledge_hits: list[KnowledgeHit],
         knowledge_artifact_id: str,
         evidence_refs: list[EvidenceRef],
@@ -376,7 +424,7 @@ class CrewAIAgentProvider:
         plan_payload = self._plan_payload(
             request=request,
             policy=policy,
-            memory_artifact_id=memory_artifact_id,
+            memory_artifact_ids=memory_artifact_ids,
             knowledge_artifact_id=knowledge_artifact_id,
             knowledge_hits=knowledge_hits,
             input_summary=redaction.input_summary,
@@ -424,6 +472,21 @@ class CrewAIAgentProvider:
             },
             evidence_refs=redaction.evidence_refs,
             inferences=[self._draft_from_crewai(inference) for inference in crew_output.inferences],
+            runtime_diagnoses=self._runtime_diagnoses(
+                status=self._run_status(crew_output.review_status, default="best_effort"),
+                failure_class="none",
+                uncertainty=crew_output.limitations or ["Runtime Agent output is based on available Core evidence."],
+            ),
+            report_sections=self._report_sections(
+                status=self._run_status(crew_output.review_status, default="best_effort"),
+                summary=crew_output.review_decision,
+                uncertainty=crew_output.limitations or ["Report Agent section is generated from Agent pass evidence."],
+            ),
+            repair_instructions=self._repair_instructions(
+                status=self._run_status(crew_output.review_status, default="best_effort"),
+                failure_class="none",
+                decision=crew_output.review_decision,
+            ),
             review=AgentReviewDraft(
                 status=self._run_status(crew_output.review_status, default="best_effort"),
                 decision=crew_output.review_decision,
@@ -548,7 +611,7 @@ class CrewAIAgentProvider:
         *,
         request: AgentRuntimeRequest,
         policy: AgentModelPolicy,
-        memory_artifact_id: str,
+        memory_artifact_ids: list[str],
         knowledge_artifact_id: str,
         knowledge_hits: list[KnowledgeHit],
         input_summary: dict[str, Any],
@@ -564,9 +627,21 @@ class CrewAIAgentProvider:
             "promptVersion": policy.prompt_version,
             "cloudMode": policy.cloud_mode,
             "inputArtifactIds": request.input_artifact_ids,
-            "memoryRecordArtifactId": memory_artifact_id,
+            "memoryRecordArtifactId": memory_artifact_ids[0] if memory_artifact_ids else None,
+            "memoryRecordArtifactIds": memory_artifact_ids,
             "knowledgeEvidenceArtifactId": knowledge_artifact_id,
-            "plannedAgents": ["PlannerAgent", "AnalysisAgent", "FrameworkAgent", "RuntimeAgent", "ReviewAgent"],
+            "plannedAgents": [
+                "PlannerAgent",
+                "AnalysisAgent",
+                "NamingAgent",
+                "TypeAgent",
+                "FrameworkAgent",
+                "DeadCodeAgent",
+                "RuntimeAgent",
+                "RepairAgent",
+                "ReportAgent",
+                "ReviewAgent",
+            ],
             "inputSummary": input_summary,
             "knowledgeHitIds": [hit.id for hit in knowledge_hits],
             "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in evidence_refs],
@@ -649,6 +724,21 @@ class CrewAIAgentProvider:
                     "CrewAI model execution was not attempted because model policy was not satisfied.",
                 ]
             ),
+            runtime_diagnoses=self._runtime_diagnoses(
+                status="best_effort",
+                failure_class="policy_denied",
+                uncertainty=[reason],
+            ),
+            report_sections=self._report_sections(
+                status="best_effort",
+                summary=f"CrewAI runtime was blocked by model policy: {reason}",
+                uncertainty=[reason],
+            ),
+            repair_instructions=self._repair_instructions(
+                status="best_effort",
+                failure_class="policy_denied",
+                decision="No Agent repair action was generated because model policy denied execution.",
+            ),
             review=AgentReviewDraft(
                 status="best_effort",
                 decision=f"CrewAI runtime was blocked by model policy: {reason}",
@@ -682,6 +772,21 @@ class CrewAIAgentProvider:
                     "Deterministic Core evidence remains available for later Agent retry.",
                 ]
             ),
+            runtime_diagnoses=self._runtime_diagnoses(
+                status="fail",
+                failure_class="agent_failed",
+                uncertainty=[detail],
+            ),
+            report_sections=self._report_sections(
+                status="fail",
+                summary=detail,
+                uncertainty=[detail],
+            ),
+            repair_instructions=self._repair_instructions(
+                status="fail",
+                failure_class="agent_failed",
+                decision="No Agent repair action was generated because Agent execution failed.",
+            ),
             review=AgentReviewDraft(status="fail", decision=detail, failure_class="agent_failed"),
             model_provider=policy.model_provider,
             model_name=policy.model_name,
@@ -696,11 +801,25 @@ class CrewAIAgentProvider:
     def _best_effort_inferences(self, *, uncertainty: list[str]) -> list[AgentInferenceDraft]:
         return [
             AgentInferenceDraft(
+                type="naming",
+                agent_name="NamingAgent",
+                confidence=0.2,
+                uncertainty_reasons=uncertainty,
+                alternatives=["preserve original symbol names until NamingAgent can run"],
+            ),
+            AgentInferenceDraft(
                 type="module_split",
                 agent_name="AnalysisAgent",
                 confidence=0.2,
                 uncertainty_reasons=uncertainty,
                 alternatives=["retry with an allowed CrewAI model provider"],
+            ),
+            AgentInferenceDraft(
+                type="type_inference",
+                agent_name="TypeAgent",
+                confidence=0.2,
+                uncertainty_reasons=uncertainty,
+                alternatives=["emit unknown TypeScript boundaries until TypeAgent can run"],
             ),
             AgentInferenceDraft(
                 type="framework",
@@ -710,12 +829,93 @@ class CrewAIAgentProvider:
                 alternatives=["classify framework after CrewAI execution succeeds"],
             ),
             AgentInferenceDraft(
+                type="dead_code",
+                agent_name="DeadCodeAgent",
+                confidence=0.2,
+                uncertainty_reasons=uncertainty,
+                alternatives=["retain suspected dead code until evidence-backed review succeeds"],
+            ),
+            AgentInferenceDraft(
                 type="runtime",
                 agent_name="RuntimeAgent",
                 confidence=0.25,
                 uncertainty_reasons=uncertainty,
                 alternatives=["re-evaluate after runtime smoke and model review evidence are available"],
             ),
+            AgentInferenceDraft(
+                type="repair",
+                agent_name="RepairAgent",
+                confidence=0.2,
+                uncertainty_reasons=uncertainty,
+                alternatives=["defer repair planning to deterministic build/runtime gates"],
+            ),
+        ]
+
+    def _runtime_diagnoses(
+        self,
+        *,
+        status: RunStatus,
+        failure_class: FailureClass,
+        uncertainty: list[str],
+    ) -> list[AgentRuntimeDiagnosisDraft]:
+        return [
+            AgentRuntimeDiagnosisDraft(
+                target_stage="runtime_compare",
+                status=status,
+                failure_class=failure_class,
+                diagnosis=(
+                    "Runtime Agent preserved browser validation uncertainty as structured diagnosis "
+                    "for downstream review and report generation."
+                ),
+                recommended_actions=[
+                    "Inspect runtime_validation and runtime_comparison artifacts when available.",
+                    "Keep deterministic build/runtime gates as the authority for applied repairs.",
+                ],
+                confidence=0.35 if status != "pass" else 0.7,
+                uncertainty_reasons=uncertainty,
+            )
+        ]
+
+    def _report_sections(
+        self,
+        *,
+        status: RunStatus,
+        summary: str,
+        uncertainty: list[str],
+    ) -> list[AgentReportSectionDraft]:
+        return [
+            AgentReportSectionDraft(
+                title="Agent Runtime Summary",
+                anchor="agent-runtime-summary",
+                summary=summary,
+                content=(
+                    "Planner, Analysis, Naming, Type, Framework, Dead-Code, Runtime, Repair, "
+                    "Report, and Review Agent surfaces are represented as schema-valid audit records."
+                ),
+                status=status,
+                confidence=0.35 if status != "pass" else 0.75,
+                uncertainty_reasons=uncertainty,
+            )
+        ]
+
+    def _repair_instructions(
+        self,
+        *,
+        status: RunStatus,
+        failure_class: FailureClass,
+        decision: str,
+    ) -> list[AgentRepairInstructionDraft]:
+        return [
+            AgentRepairInstructionDraft(
+                target_stage="runtime_compare",
+                failure_class=failure_class,
+                decision=(
+                    f"Repair Agent recorded no free-form source mutation. {decision} "
+                    "Deterministic build/runtime repair loops remain responsible for applied changes."
+                ),
+                status="skipped" if status != "pass" else "planned",
+                risk_level="low",
+            )
         ]
 
     def _draft_from_crewai(self, inference: CrewInferenceOutput) -> AgentInferenceDraft:
@@ -730,7 +930,18 @@ class CrewAIAgentProvider:
 
     def _empty_crewai_output(self) -> CrewAgentPassOutput:
         return CrewAgentPassOutput(
-            plannedAgents=["PlannerAgent", "AnalysisAgent", "FrameworkAgent", "RuntimeAgent", "ReviewAgent"],
+            plannedAgents=[
+                "PlannerAgent",
+                "AnalysisAgent",
+                "NamingAgent",
+                "TypeAgent",
+                "FrameworkAgent",
+                "DeadCodeAgent",
+                "RuntimeAgent",
+                "RepairAgent",
+                "ReportAgent",
+                "ReviewAgent",
+            ],
             inferences=[
                 CrewInferenceOutput(
                     type="module_split",
@@ -802,10 +1013,21 @@ class AgentRuntime:
                 ast_index_payload=request.ast_index_payload,
                 cloud_mode=request.cloud_mode,
             )
-            memory_artifact = self._write_memory_artifact(
+            memory_artifacts = [
+                self._write_memory_artifact(
+                    job_id=job_id,
+                    store=store,
+                    memory_record=memory_record,
+                    parent_artifact_ids=request.input_artifact_ids,
+                )
+                for memory_record in memory_context.records
+            ]
+            memory_artifact_ids = [artifact.id for artifact in memory_artifacts]
+            tool_registry_entries = self._tool_registry_entries(job_id)
+            tool_registry_artifact = self._write_tool_registry_artifact(
                 job_id=job_id,
                 store=store,
-                memory_record=memory_context.record,
+                entries=tool_registry_entries,
                 parent_artifact_ids=request.input_artifact_ids,
             )
             knowledge_hits = self.knowledge_retriever.retrieve(
@@ -816,35 +1038,50 @@ class AgentRuntime:
                 job_id=job_id,
                 store=store,
                 hits=knowledge_hits,
-                parent_artifact_ids=[*request.input_artifact_ids, memory_artifact.id],
+                parent_artifact_ids=[*request.input_artifact_ids, *memory_artifact_ids, tool_registry_artifact.id],
             )
             evidence_refs = self._evidence_refs(
                 request=request,
-                memory_artifact=memory_artifact,
-                memory_record=memory_context.record,
+                memory_artifacts=memory_artifacts,
+                memory_records=memory_context.records,
                 knowledge_artifact=knowledge_artifact,
                 knowledge_hits=knowledge_hits,
             )
             provider_draft = self.provider.run(
                 request=request,
                 memory_context=memory_context,
-                memory_artifact_id=memory_artifact.id,
+                memory_artifact_ids=memory_artifact_ids,
                 knowledge_hits=knowledge_hits,
                 knowledge_artifact_id=knowledge_artifact.id,
                 evidence_refs=evidence_refs,
             )
+            provider_plan_payload = {
+                **provider_draft.plan_payload,
+                "toolRegistryArtifactId": tool_registry_artifact.id,
+            }
             plan_artifact = store.write_artifact(
                 job_id,
                 kind="agent_plan",
                 stage="agent_planning",
                 filename="agent-plan.json",
-                content=self._json_bytes(provider_draft.plan_payload),
+                content=self._json_bytes(provider_plan_payload),
                 content_type="application/json",
                 producer="worker.agent_runtime",
-                parent_artifact_ids=[*request.input_artifact_ids, memory_artifact.id, knowledge_artifact.id],
+                parent_artifact_ids=[
+                    *request.input_artifact_ids,
+                    *memory_artifact_ids,
+                    knowledge_artifact.id,
+                    tool_registry_artifact.id,
+                ],
             )
 
             store.update_status(job_id, "agent_pass")
+            agent_input_artifact_ids = [
+                *request.input_artifact_ids,
+                *memory_artifact_ids,
+                knowledge_artifact.id,
+                tool_registry_artifact.id,
+            ]
             inference_artifacts: list[ArtifactRecord] = []
             for index, draft in enumerate(provider_draft.inferences, start=1):
                 record = InferenceRecord(
@@ -855,7 +1092,7 @@ class AgentRuntime:
                     model_provider=provider_draft.model_provider,
                     model_name=provider_draft.model_name,
                     prompt_version=provider_draft.prompt_version,
-                    input_artifact_ids=[*request.input_artifact_ids, memory_artifact.id, knowledge_artifact.id],
+                    input_artifact_ids=agent_input_artifact_ids,
                     output_artifact_ids=[plan_artifact.id],
                     evidence_refs=provider_draft.evidence_refs,
                     confidence=draft.confidence,
@@ -873,11 +1110,106 @@ class AgentRuntime:
                         content=record.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                         content_type="application/json",
                         producer="worker.agent_runtime",
-                        parent_artifact_ids=[*request.input_artifact_ids, memory_artifact.id, knowledge_artifact.id, plan_artifact.id],
+                        parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id],
                     )
                 )
 
             inference_artifact_ids = [artifact.id for artifact in inference_artifacts]
+            runtime_diagnosis_artifacts: list[ArtifactRecord] = []
+            for index, draft in enumerate(provider_draft.runtime_diagnoses, start=1):
+                diagnosis = RuntimeDiagnosis(
+                    id=f"runtime_diagnosis_{uuid4().hex[:12]}",
+                    job_id=job_id,
+                    attempt=0,
+                    agent_name=draft.agent_name,
+                    target_stage=draft.target_stage,
+                    status=draft.status,
+                    failure_class=draft.failure_class,
+                    input_artifact_ids=agent_input_artifact_ids,
+                    evidence_refs=provider_draft.evidence_refs,
+                    diagnosis=draft.diagnosis,
+                    recommended_actions=draft.recommended_actions,
+                    confidence=max(0, min(1, draft.confidence)),
+                    uncertainty_reasons=draft.uncertainty_reasons,
+                )
+                runtime_diagnosis_artifacts.append(
+                    store.write_artifact(
+                        job_id,
+                        kind="runtime_diagnosis",
+                        stage="agent_pass",
+                        filename=f"runtime-diagnosis-{index}.json",
+                        content=diagnosis.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+                        content_type="application/json",
+                        producer="worker.agent_runtime",
+                        parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id],
+                    )
+                )
+            runtime_diagnosis_artifact_ids = [artifact.id for artifact in runtime_diagnosis_artifacts]
+
+            report_section_artifacts: list[ArtifactRecord] = []
+            for index, draft in enumerate(provider_draft.report_sections, start=1):
+                report_section = ReportSection(
+                    id=f"report_section_{uuid4().hex[:12]}",
+                    job_id=job_id,
+                    agent_name=draft.agent_name,
+                    title=draft.title,
+                    anchor=draft.anchor,
+                    summary=draft.summary,
+                    content=draft.content,
+                    input_artifact_ids=agent_input_artifact_ids,
+                    evidence_refs=provider_draft.evidence_refs,
+                    status=draft.status,
+                    confidence=max(0, min(1, draft.confidence)),
+                    uncertainty_reasons=draft.uncertainty_reasons,
+                )
+                report_section_artifacts.append(
+                    store.write_artifact(
+                        job_id,
+                        kind="report_section",
+                        stage="agent_pass",
+                        filename=f"report-section-{index}.json",
+                        content=report_section.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+                        content_type="application/json",
+                        producer="worker.agent_runtime",
+                        parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id, *runtime_diagnosis_artifact_ids],
+                    )
+                )
+            report_section_artifact_ids = [artifact.id for artifact in report_section_artifacts]
+
+            repair_instruction_artifacts: list[ArtifactRecord] = []
+            for index, draft in enumerate(provider_draft.repair_instructions, start=1):
+                repair_instruction = RepairInstruction(
+                    id=f"repair_{uuid4().hex[:12]}",
+                    job_id=job_id,
+                    attempt=0,
+                    target_stage=draft.target_stage,  # type: ignore[arg-type]
+                    failure_class=draft.failure_class,
+                    input_artifact_ids=agent_input_artifact_ids,
+                    evidence_refs=provider_draft.evidence_refs,
+                    actions=[],
+                    status=draft.status,  # type: ignore[arg-type]
+                    risk_level=draft.risk_level,  # type: ignore[arg-type]
+                    decision=draft.decision,
+                )
+                repair_instruction_artifacts.append(
+                    store.write_artifact(
+                        job_id,
+                        kind="repair_instruction",
+                        stage="agent_pass",
+                        filename=f"agent-repair-instruction-{index}.json",
+                        content=repair_instruction.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+                        content_type="application/json",
+                        producer="worker.agent_runtime",
+                        parent_artifact_ids=[
+                            *agent_input_artifact_ids,
+                            plan_artifact.id,
+                            *runtime_diagnosis_artifact_ids,
+                            *report_section_artifact_ids,
+                        ],
+                    )
+                )
+            repair_instruction_artifact_ids = [artifact.id for artifact in repair_instruction_artifacts]
+
             review_run = ReviewRun(
                 id=f"review_{uuid4().hex[:12]}",
                 job_id=job_id,
@@ -887,7 +1219,7 @@ class AgentRuntime:
                 decision=provider_draft.review.decision,
                 failure_class=provider_draft.review.failure_class,
                 evidence_refs=provider_draft.evidence_refs,
-                repair_instruction_ids=provider_draft.review.repair_instruction_ids,
+                repair_instruction_ids=[*provider_draft.review.repair_instruction_ids, *repair_instruction_artifact_ids],
                 logs_artifact_id=provider_draft.review.logs_artifact_id,
             )
             review_artifact = store.write_artifact(
@@ -898,17 +1230,30 @@ class AgentRuntime:
                 content=review_run.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                 content_type="application/json",
                 producer="worker.agent_runtime",
-                parent_artifact_ids=[plan_artifact.id, *inference_artifact_ids],
+                parent_artifact_ids=[
+                    plan_artifact.id,
+                    *inference_artifact_ids,
+                    *runtime_diagnosis_artifact_ids,
+                    *report_section_artifact_ids,
+                    *repair_instruction_artifact_ids,
+                ],
             )
 
-            output_artifact_ids = [plan_artifact.id, *inference_artifact_ids, review_artifact.id]
+            output_artifact_ids = [
+                plan_artifact.id,
+                *inference_artifact_ids,
+                *runtime_diagnosis_artifact_ids,
+                *report_section_artifact_ids,
+                *repair_instruction_artifact_ids,
+                review_artifact.id,
+            ]
             tool_call = ToolCall(
                 id=f"tool_call_{uuid4().hex[:12]}",
                 job_id=job_id,
                 caller="WorkerPipeline",
                 tool_name=provider_draft.tool_name,
                 tool_version=provider_draft.tool_version,
-                input_artifact_ids=[*request.input_artifact_ids, memory_artifact.id, knowledge_artifact.id],
+                input_artifact_ids=agent_input_artifact_ids,
                 output_artifact_ids=output_artifact_ids,
                 status=provider_draft.tool_status,
                 duration=self._duration_ms(started_at),
@@ -929,9 +1274,13 @@ class AgentRuntime:
 
         return AgentRuntimeResult(
             plan_artifact=plan_artifact,
-            memory_artifact=memory_artifact,
+            memory_artifacts=memory_artifacts,
             knowledge_artifact=knowledge_artifact,
+            tool_registry_artifact=tool_registry_artifact,
             inference_artifacts=inference_artifacts,
+            runtime_diagnosis_artifacts=runtime_diagnosis_artifacts,
+            report_section_artifacts=report_section_artifacts,
+            repair_instruction_artifacts=repair_instruction_artifacts,
             review_artifact=review_artifact,
             tool_call_artifact=tool_call_artifact,
             message=provider_draft.message,
@@ -949,12 +1298,85 @@ class AgentRuntime:
             job_id,
             kind="memory_record",
             stage="agent_planning",
-            filename="memory-record.json",
+            filename=f"memory-record-{memory_record.memory_type}.json",
             content=memory_record.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.memory",
             parent_artifact_ids=parent_artifact_ids,
         )
+
+    def _write_tool_registry_artifact(
+        self,
+        *,
+        job_id: str,
+        store,
+        entries: list[ToolRegistryEntry],
+        parent_artifact_ids: list[str],
+    ) -> ArtifactRecord:
+        payload = {
+            "kind": "tool_registry",
+            "jobId": job_id,
+            "entries": [entry.model_dump(by_alias=True) for entry in entries],
+        }
+        return store.write_artifact(
+            job_id,
+            kind="tool_registry",
+            stage="agent_planning",
+            filename="tool-registry.json",
+            content=self._json_bytes(payload),
+            content_type="application/json",
+            producer="worker.tool_registry",
+            parent_artifact_ids=parent_artifact_ids,
+            sensitivity_class="derived",
+        )
+
+    def _tool_registry_entries(self, job_id: str) -> list[ToolRegistryEntry]:
+        return [
+            ToolRegistryEntry(
+                id=f"tool_registry_{uuid4().hex[:12]}",
+                job_id=job_id,
+                tool_name="crewai.agent_pass",
+                tool_version=AGENT_TOOL_VERSION,
+                category="model",
+                caller="WorkerPipeline",
+                input_artifact_kinds=["input_inventory", "ast_index", "memory_record", "knowledge_evidence"],
+                output_artifact_kinds=[
+                    "agent_plan",
+                    "inference_record",
+                    "runtime_diagnosis",
+                    "report_section",
+                    "repair_instruction",
+                    "review_run",
+                    "tool_call",
+                ],
+                failure_classes=["none", "policy_denied", "agent_failed"],
+                description="Runs schema-first Agent analysis over deterministic Core evidence.",
+            ),
+            ToolRegistryEntry(
+                id=f"tool_registry_{uuid4().hex[:12]}",
+                job_id=job_id,
+                tool_name="memory.context",
+                tool_version="0.1.0",
+                category="memory",
+                caller="AgentRuntime",
+                input_artifact_kinds=["input_inventory", "ast_index"],
+                output_artifact_kinds=["memory_record"],
+                failure_classes=["none", "unknown"],
+                description="Builds short-term, long-term, entity, and scenario memory records for the current project.",
+            ),
+            ToolRegistryEntry(
+                id=f"tool_registry_{uuid4().hex[:12]}",
+                job_id=job_id,
+                tool_name="knowledge.static_retrieval",
+                tool_version="0.1.0",
+                category="knowledge",
+                caller="AgentRuntime",
+                input_artifact_kinds=["input_inventory", "ast_index", "memory_record"],
+                output_artifact_kinds=["knowledge_evidence"],
+                failure_classes=["none", "unknown"],
+                description="Retrieves static build, framework, runtime, and reconstruction evidence hints.",
+            ),
+        ]
 
     def _write_knowledge_artifact(
         self,
@@ -984,8 +1406,8 @@ class AgentRuntime:
         self,
         *,
         request: AgentRuntimeRequest,
-        memory_artifact: ArtifactRecord,
-        memory_record: MemoryRecord,
+        memory_artifacts: list[ArtifactRecord],
+        memory_records: list[MemoryRecord],
         knowledge_artifact: ArtifactRecord,
         knowledge_hits: list[KnowledgeHit],
     ) -> list[EvidenceRef]:
@@ -1002,12 +1424,15 @@ class AgentRuntime:
                 locator="artifact:ast_index",
                 excerpt=self._ast_excerpt(request.ast_index_payload),
             ),
-            EvidenceRef(
-                artifact_id=memory_artifact.id,
-                label="Job short-term memory",
-                locator="memory:short_term",
-                excerpt=memory_record.content[:240],
-            ),
+            *[
+                EvidenceRef(
+                    artifact_id=artifact.id,
+                    label=f"Memory: {record.memory_type}",
+                    locator=f"memory:{record.memory_type}",
+                    excerpt=record.content[:240],
+                )
+                for artifact, record in zip(memory_artifacts, memory_records)
+            ],
             *[
                 EvidenceRef(
                     artifact_id=knowledge_artifact.id,

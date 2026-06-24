@@ -93,6 +93,9 @@ class WorkerPipelineTest(unittest.TestCase):
                 run = WorkerPipeline(runtime_smoke_runner=runner).run(job.id, input_path=input_root, store=store)
                 artifacts = store.list_artifacts(job.id)
                 artifact_by_kind = {artifact.kind: artifact for artifact in artifacts}
+                artifacts_by_kind: dict[str, list] = {}
+                for artifact in artifacts:
+                    artifacts_by_kind.setdefault(artifact.kind, []).append(artifact)
                 persisted_job = store.get_job(job.id)
 
                 self.assertEqual(run.events[0].status, "leased")
@@ -115,7 +118,10 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("reconstruction_plan", artifact_by_kind)
                 self.assertIn("generated_project", artifact_by_kind)
                 self.assertIn("memory_record", artifact_by_kind)
+                self.assertIn("tool_registry", artifact_by_kind)
                 self.assertIn("knowledge_evidence", artifact_by_kind)
+                self.assertIn("runtime_diagnosis", artifact_by_kind)
+                self.assertIn("report_section", artifact_by_kind)
                 self.assertIn("build_log", artifact_by_kind)
                 self.assertIn("build_artifact", artifact_by_kind)
                 self.assertIn("review_run", artifact_by_kind)
@@ -139,7 +145,13 @@ class WorkerPipelineTest(unittest.TestCase):
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
-                memory_artifact = artifact_by_kind["memory_record"]
+                memory_artifacts = artifacts_by_kind["memory_record"]
+                memory_by_type = {
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))["memoryType"]: artifact
+                    for artifact in memory_artifacts
+                }
+                memory_artifact = memory_by_type["short_term"]
+                tool_registry_artifact = artifact_by_kind["tool_registry"]
                 knowledge_artifact = artifact_by_kind["knowledge_evidence"]
                 agent_plan_artifact = artifact_by_kind["agent_plan"]
                 reconstruction_plan_artifact = artifact_by_kind["reconstruction_plan"]
@@ -148,6 +160,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 inventory_payload = json.loads(Path(inventory_artifact.storage_uri).read_text(encoding="utf-8"))
                 ast_index_payload = json.loads(Path(ast_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 memory_payload = json.loads(Path(memory_artifact.storage_uri).read_text(encoding="utf-8"))
+                memory_payloads = {
+                    memory_type: json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for memory_type, artifact in memory_by_type.items()
+                }
+                tool_registry_payload = json.loads(Path(tool_registry_artifact.storage_uri).read_text(encoding="utf-8"))
                 knowledge_payload = json.loads(Path(knowledge_artifact.storage_uri).read_text(encoding="utf-8"))
                 agent_plan_payload = json.loads(Path(agent_plan_artifact.storage_uri).read_text(encoding="utf-8"))
                 reconstruction_plan_payload = json.loads(
@@ -211,22 +228,34 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue((Path(generated_project_artifact.storage_uri) / "src" / "main.ts").exists())
                 self.assertEqual(memory_payload["memoryType"], "short_term")
                 self.assertIn("boot", memory_payload["content"])
+                self.assertEqual(set(memory_payloads), {"short_term", "long_term", "entity", "scenario"})
+                self.assertEqual(memory_payloads["long_term"]["scope"], "project")
+                self.assertEqual(memory_payloads["entity"]["scope"], "project")
+                self.assertEqual(memory_payloads["scenario"]["scope"], "project")
+                self.assertEqual(tool_registry_payload["kind"], "tool_registry")
+                self.assertTrue(any(entry["toolName"] == "crewai.agent_pass" for entry in tool_registry_payload["entries"]))
                 self.assertEqual(knowledge_payload["kind"], "knowledge_evidence")
                 self.assertTrue(knowledge_payload["hits"])
                 self.assertEqual(agent_plan_payload["provider"], "crewai")
                 self.assertEqual(agent_plan_payload["runtimeStatus"], "policy_denied")
                 self.assertFalse(agent_plan_payload["modelPolicy"]["allowed"])
                 self.assertEqual(agent_plan_payload["memoryRecordArtifactId"], memory_artifact.id)
+                self.assertEqual(set(agent_plan_payload["memoryRecordArtifactIds"]), {artifact.id for artifact in memory_artifacts})
+                self.assertEqual(agent_plan_payload["toolRegistryArtifactId"], tool_registry_artifact.id)
                 self.assertEqual(agent_plan_payload["knowledgeEvidenceArtifactId"], knowledge_artifact.id)
                 self.assertEqual(
                     agent_plan_artifact.parent_artifact_ids,
-                    [inventory_artifact.id, ast_index_artifact.id, memory_artifact.id, knowledge_artifact.id],
+                    [
+                        inventory_artifact.id,
+                        ast_index_artifact.id,
+                        *[artifact.id for artifact in memory_artifacts],
+                        knowledge_artifact.id,
+                        tool_registry_artifact.id,
+                    ],
                 )
                 self.assertEqual(inference_payload["modelProvider"], "local")
-                self.assertEqual(
-                    inference_payload["inputArtifactIds"],
-                    [inventory_artifact.id, ast_index_artifact.id, memory_artifact.id, knowledge_artifact.id],
-                )
+                self.assertIn(tool_registry_artifact.id, inference_payload["inputArtifactIds"])
+                self.assertTrue(all(artifact.id in inference_payload["inputArtifactIds"] for artifact in memory_artifacts))
                 self.assertEqual(inference_payload["outputArtifactIds"], [agent_plan_artifact.id])
                 self.assertTrue(
                     any(ref["artifactId"] == knowledge_artifact.id for ref in inference_payload["evidenceRefs"])
@@ -290,10 +319,12 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("completed_best_effort", audit_report)
                 self.assertIn("## Evidence Attachment Index", audit_report)
                 self.assertIn("## Runtime Compare Difference Summary", audit_report)
+                self.assertIn("## Agent Runtime Audit", audit_report)
                 html_report = Path(artifact_by_kind["html_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("<!doctype html>", html_report)
                 self.assertIn("Evidence Attachment Index", html_report)
                 self.assertIn("Runtime Compare Difference Summary", html_report)
+                self.assertIn("Agent Runtime Audit", html_report)
                 evidence_index_payload = json.loads(
                     Path(artifact_by_kind["evidence_index"].storage_uri).read_text(encoding="utf-8")
                 )
@@ -319,6 +350,10 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("runtime-comparisons.json", names)
                 self.assertIn("review-runs.json", names)
                 self.assertIn("tool-calls.json", names)
+                self.assertIn("tool-registry.json", names)
+                self.assertIn("memory-records.json", names)
+                self.assertIn("runtime-diagnoses.json", names)
+                self.assertIn("report-sections.json", names)
                 self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", names)
                 self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", names)
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", names)
@@ -363,8 +398,11 @@ class WorkerPipelineTest(unittest.TestCase):
                 artifact_by_kind = {artifact.kind: artifact for artifact in artifacts}
                 inference_artifact = next(artifact for artifact in artifacts if artifact.kind == "inference_record")
 
-                memory_payload = json.loads(
-                    Path(artifact_by_kind["memory_record"].storage_uri).read_text(encoding="utf-8")
+                memory_payload = next(
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for artifact in artifacts
+                    if artifact.kind == "memory_record"
+                    and json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))["memoryType"] == "short_term"
                 )
                 agent_plan_payload = json.loads(
                     Path(artifact_by_kind["agent_plan"].storage_uri).read_text(encoding="utf-8")

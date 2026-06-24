@@ -50,9 +50,12 @@ ArtifactKind = Literal[
     "runtime_comparison",
     "review_run",
     "tool_call",
+    "tool_registry",
     "memory_record",
     "knowledge_evidence",
     "repair_instruction",
+    "runtime_diagnosis",
+    "report_section",
     "result_package",
     "audit_report",
     "html_report",
@@ -83,6 +86,7 @@ ReviewType = Literal["build", "typecheck", "runtime_smoke", "runtime_compare", "
 RunStatus = Literal["pass", "retry", "best_effort", "fail"]
 RuntimeTarget = Literal["original", "reconstructed"]
 ToolCallStatus = Literal["pass", "fail"]
+ToolRegistryCategory = Literal["code", "build", "runtime", "audit", "knowledge", "memory", "model"]
 MemoryScope = Literal["job", "project", "global"]
 MemoryType = Literal["short_term", "long_term", "entity", "scenario"]
 RepairTargetStage = Literal["building", "typechecking", "runtime_smoke", "runtime_compare"]
@@ -616,6 +620,19 @@ class ToolCall(ContractModel):
     failure_class: FailureClass
 
 
+class ToolRegistryEntry(ContractModel):
+    id: str
+    job_id: str
+    tool_name: str
+    tool_version: str
+    category: ToolRegistryCategory
+    caller: str
+    input_artifact_kinds: list[ArtifactKind]
+    output_artifact_kinds: list[ArtifactKind]
+    failure_classes: list[FailureClass]
+    description: str
+
+
 class MemoryRecord(ContractModel):
     id: str
     scope: MemoryScope
@@ -626,6 +643,37 @@ class MemoryRecord(ContractModel):
     source_artifact_ids: list[str]
     sensitivity_class: SensitivityClass
     retention_class: RetentionClass
+
+
+class RuntimeDiagnosis(ContractModel):
+    id: str
+    job_id: str
+    attempt: int = Field(ge=0)
+    agent_name: str
+    target_stage: str
+    status: RunStatus
+    failure_class: FailureClass
+    input_artifact_ids: list[str]
+    evidence_refs: list[EvidenceRef]
+    diagnosis: str
+    recommended_actions: list[str]
+    confidence: float = Field(ge=0, le=1)
+    uncertainty_reasons: list[str]
+
+
+class ReportSection(ContractModel):
+    id: str
+    job_id: str
+    agent_name: str
+    title: str
+    anchor: str
+    summary: str
+    content: str
+    input_artifact_ids: list[str]
+    evidence_refs: list[EvidenceRef]
+    status: RunStatus
+    confidence: float = Field(ge=0, le=1)
+    uncertainty_reasons: list[str]
 
 
 class RetentionCleanupRequest(ContractModel):

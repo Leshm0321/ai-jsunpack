@@ -45,9 +45,12 @@ export const ARTIFACT_KINDS = [
   "runtime_comparison",
   "review_run",
   "tool_call",
+  "tool_registry",
   "memory_record",
   "knowledge_evidence",
   "repair_instruction",
+  "runtime_diagnosis",
+  "report_section",
   "result_package",
   "audit_report",
   "html_report",
@@ -562,6 +565,19 @@ export interface ToolCall {
   failureClass: FailureClass;
 }
 
+export interface ToolRegistryEntry {
+  id: string;
+  jobId: string;
+  toolName: string;
+  toolVersion: string;
+  category: "code" | "build" | "runtime" | "audit" | "knowledge" | "memory" | "model";
+  caller: string;
+  inputArtifactKinds: ArtifactKind[];
+  outputArtifactKinds: ArtifactKind[];
+  failureClasses: FailureClass[];
+  description: string;
+}
+
 export interface MemoryRecord {
   id: string;
   scope: "job" | "project" | "global";
@@ -572,6 +588,37 @@ export interface MemoryRecord {
   sourceArtifactIds: string[];
   sensitivityClass: SensitivityClass;
   retentionClass: RetentionClass;
+}
+
+export interface RuntimeDiagnosis {
+  id: string;
+  jobId: string;
+  attempt: number;
+  agentName: string;
+  targetStage: string;
+  status: "pass" | "retry" | "best_effort" | "fail";
+  failureClass: FailureClass;
+  inputArtifactIds: string[];
+  evidenceRefs: EvidenceRef[];
+  diagnosis: string;
+  recommendedActions: string[];
+  confidence: number;
+  uncertaintyReasons: string[];
+}
+
+export interface ReportSection {
+  id: string;
+  jobId: string;
+  agentName: string;
+  title: string;
+  anchor: string;
+  summary: string;
+  content: string;
+  inputArtifactIds: string[];
+  evidenceRefs: EvidenceRef[];
+  status: "pass" | "retry" | "best_effort" | "fail";
+  confidence: number;
+  uncertaintyReasons: string[];
 }
 
 export interface RetentionCleanupRequest {
@@ -725,6 +772,14 @@ const repairActionsSchema = {
     required: ["action", "path", "value", "reason"],
     additionalProperties: false
   }
+} as const satisfies JsonSchema;
+const artifactKindArraySchema = {
+  type: "array",
+  items: { type: "string", enum: ARTIFACT_KINDS }
+} as const satisfies JsonSchema;
+const failureClassArraySchema = {
+  type: "array",
+  items: { type: "string", enum: FAILURE_CLASSES }
 } as const satisfies JsonSchema;
 const sandboxRuntimeCapabilitiesSchema = {
   type: "array",
@@ -1741,6 +1796,37 @@ export const SHARED_JSON_SCHEMAS = {
     ],
     additionalProperties: false
   },
+  toolRegistryEntry: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/tool-registry-entry.json",
+    title: "ToolRegistryEntry",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      toolName: stringSchema,
+      toolVersion: stringSchema,
+      category: { type: "string", enum: ["code", "build", "runtime", "audit", "knowledge", "memory", "model"] },
+      caller: stringSchema,
+      inputArtifactKinds: artifactKindArraySchema,
+      outputArtifactKinds: artifactKindArraySchema,
+      failureClasses: failureClassArraySchema,
+      description: stringSchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "toolName",
+      "toolVersion",
+      "category",
+      "caller",
+      "inputArtifactKinds",
+      "outputArtifactKinds",
+      "failureClasses",
+      "description"
+    ],
+    additionalProperties: false
+  },
   memoryRecord: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://ai-jsunpack.local/schemas/memory-record.json",
@@ -1766,6 +1852,78 @@ export const SHARED_JSON_SCHEMAS = {
       "sourceArtifactIds",
       "sensitivityClass",
       "retentionClass"
+    ],
+    additionalProperties: false
+  },
+  runtimeDiagnosis: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/runtime-diagnosis.json",
+    title: "RuntimeDiagnosis",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      attempt: { type: "integer", minimum: 0 },
+      agentName: stringSchema,
+      targetStage: stringSchema,
+      status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+      failureClass: { type: "string", enum: FAILURE_CLASSES },
+      inputArtifactIds: stringArraySchema,
+      evidenceRefs: evidenceRefsSchema,
+      diagnosis: stringSchema,
+      recommendedActions: stringArraySchema,
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      uncertaintyReasons: stringArraySchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "attempt",
+      "agentName",
+      "targetStage",
+      "status",
+      "failureClass",
+      "inputArtifactIds",
+      "evidenceRefs",
+      "diagnosis",
+      "recommendedActions",
+      "confidence",
+      "uncertaintyReasons"
+    ],
+    additionalProperties: false
+  },
+  reportSection: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/report-section.json",
+    title: "ReportSection",
+    type: "object",
+    properties: {
+      id: stringSchema,
+      jobId: stringSchema,
+      agentName: stringSchema,
+      title: stringSchema,
+      anchor: stringSchema,
+      summary: stringSchema,
+      content: stringSchema,
+      inputArtifactIds: stringArraySchema,
+      evidenceRefs: evidenceRefsSchema,
+      status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      uncertaintyReasons: stringArraySchema
+    },
+    required: [
+      "id",
+      "jobId",
+      "agentName",
+      "title",
+      "anchor",
+      "summary",
+      "content",
+      "inputArtifactIds",
+      "evidenceRefs",
+      "status",
+      "confidence",
+      "uncertaintyReasons"
     ],
     additionalProperties: false
   },
@@ -2353,6 +2511,19 @@ export const EXAMPLE_TOOL_CALL = {
   failureClass: "none"
 } as const satisfies ToolCall;
 
+export const EXAMPLE_TOOL_REGISTRY_ENTRY = {
+  id: "tool_registry_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  toolName: "crewai.agent_pass",
+  toolVersion: "0.2.0",
+  category: "model",
+  caller: "WorkerPipeline",
+  inputArtifactKinds: ["input_inventory", "ast_index", "memory_record", "knowledge_evidence"],
+  outputArtifactKinds: ["agent_plan", "inference_record", "review_run", "tool_call"],
+  failureClasses: ["none", "policy_denied", "agent_failed"],
+  description: "Runs schema-first Agent analysis over deterministic Core evidence."
+} as const satisfies ToolRegistryEntry;
+
 export const EXAMPLE_MEMORY_RECORD = {
   id: "memory_contract_example",
   scope: "job",
@@ -2364,6 +2535,37 @@ export const EXAMPLE_MEMORY_RECORD = {
   sensitivityClass: "derived",
   retentionClass: "project"
 } as const satisfies MemoryRecord;
+
+export const EXAMPLE_RUNTIME_DIAGNOSIS = {
+  id: "runtime_diagnosis_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  attempt: 0,
+  agentName: "RuntimeAgent",
+  targetStage: "runtime_compare",
+  status: "best_effort",
+  failureClass: "runtime_error",
+  inputArtifactIds: [EXAMPLE_ARTIFACT.id],
+  evidenceRefs: [EXAMPLE_EVIDENCE_REF],
+  diagnosis: "Runtime comparison needs additional browser evidence before applying a repair.",
+  recommendedActions: ["Inspect runtime_trace and runtime_comparison artifacts."],
+  confidence: 0.6,
+  uncertaintyReasons: ["Contract fixture does not include a real browser trace."]
+} as const satisfies RuntimeDiagnosis;
+
+export const EXAMPLE_REPORT_SECTION = {
+  id: "report_section_contract_example",
+  jobId: EXAMPLE_JOB.id,
+  agentName: "ReportAgent",
+  title: "Agent Runtime Summary",
+  anchor: "agent-runtime-summary",
+  summary: "Contract fixture report section.",
+  content: "The Agent runtime produced schema-valid audit evidence.",
+  inputArtifactIds: [EXAMPLE_ARTIFACT.id],
+  evidenceRefs: [EXAMPLE_EVIDENCE_REF],
+  status: "pass",
+  confidence: 0.8,
+  uncertaintyReasons: ["Fixture content is intentionally minimal."]
+} as const satisfies ReportSection;
 
 export const EXAMPLE_RETENTION_CLEANUP_REQUEST = {
   dryRun: true,
@@ -2439,7 +2641,10 @@ export const SHARED_CONTRACT_EXAMPLES = {
   opsAlertDelivery: EXAMPLE_OPS_ALERT_DELIVERY,
   opsAlertResponse: EXAMPLE_OPS_ALERT_RESPONSE,
   toolCall: EXAMPLE_TOOL_CALL,
+  toolRegistryEntry: EXAMPLE_TOOL_REGISTRY_ENTRY,
   memoryRecord: EXAMPLE_MEMORY_RECORD,
+  runtimeDiagnosis: EXAMPLE_RUNTIME_DIAGNOSIS,
+  reportSection: EXAMPLE_REPORT_SECTION,
   retentionCleanupRequest: EXAMPLE_RETENTION_CLEANUP_REQUEST,
   retentionCleanupResult: EXAMPLE_RETENTION_CLEANUP_RESULT,
   repairInstruction: EXAMPLE_REPAIR_INSTRUCTION

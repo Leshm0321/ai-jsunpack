@@ -71,6 +71,9 @@ RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
     "runtime_trace": "logs",
     "runtime_screenshot": "screenshots",
     "memory_record": "memory",
+    "tool_registry": "derived",
+    "runtime_diagnosis": "derived",
+    "report_section": "derived",
 }
 DEFAULT_RETENTION_BY_CATEGORY: dict[RetentionCategory, RetentionClass] = {
     "source": "archive",
