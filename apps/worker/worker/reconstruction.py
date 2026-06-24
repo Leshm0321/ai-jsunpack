@@ -4,6 +4,7 @@ import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from apps.api.app.models import ArtifactRecord
 
@@ -50,12 +51,18 @@ class ReconstructionRunner:
                     input_path=input_path,
                     output_dir=output_dir,
                 )
+                reconstruction_plan_payload = self._with_writer_feedback(
+                    job_id=job_id,
+                    store=store,
+                    payload=core_result.reconstruction_plan_payload,
+                    parent_artifact_ids=parents,
+                )
                 plan_artifact = store.write_artifact(
                     job_id,
                     kind="reconstruction_plan",
                     stage="reconstructing",
                     filename="reconstruction-plan.json",
-                    content=self._json_bytes(core_result.reconstruction_plan_payload),
+                    content=self._json_bytes(reconstruction_plan_payload),
                     content_type="application/json",
                     producer="worker.reconstruction",
                     parent_artifact_ids=parents,
@@ -79,6 +86,81 @@ class ReconstructionRunner:
             project_path=store.artifact_local_path(generated_project_artifact),
             message="Deterministic writer produced a generated_project directory for sandbox validation.",
         )
+
+    def _with_writer_feedback(
+        self,
+        *,
+        job_id: str,
+        store,
+        payload: dict[str, Any],
+        parent_artifact_ids: list[str],
+    ) -> dict[str, Any]:
+        feedback = self._writer_feedback_inputs(
+            job_id=job_id,
+            store=store,
+            parent_artifact_ids=parent_artifact_ids,
+        )
+        if not feedback["lowRiskRepairInstructions"] and not feedback["auditOnlyRepairInstructions"]:
+            return payload
+        updated = dict(payload)
+        updated["agentFeedbackInputs"] = feedback
+        limitations = list(updated.get("limitations") if isinstance(updated.get("limitations"), list) else [])
+        limitations.append(
+            "Agent Review/Fix feedback was read as deterministic writer input; only low-risk supported actions are eligible for automatic consumption."
+        )
+        updated["limitations"] = limitations
+        return updated
+
+    def _writer_feedback_inputs(self, *, job_id: str, store, parent_artifact_ids: list[str]) -> dict[str, Any]:
+        low_risk: list[dict[str, Any]] = []
+        audit_only: list[dict[str, Any]] = []
+        for artifact_id in parent_artifact_ids:
+            artifact = store.get_artifact(job_id, artifact_id)
+            if artifact is None or artifact.kind != "repair_instruction":
+                continue
+            try:
+                payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+            except Exception as error:
+                audit_only.append(
+                    {
+                        "artifactId": artifact.id,
+                        "reason": f"repair_instruction could not be read: {error}",
+                    }
+                )
+                continue
+            if not isinstance(payload, dict):
+                continue
+            summary = self._repair_instruction_summary(artifact_id=artifact.id, payload=payload)
+            actions = payload.get("actions")
+            is_low_risk = (
+                payload.get("riskLevel") == "low"
+                and payload.get("status") in {"planned", "applied"}
+                and isinstance(actions, list)
+                and bool(actions)
+            )
+            if is_low_risk:
+                low_risk.append(summary)
+            else:
+                audit_only.append(summary)
+        return {
+            "source": "agent_repair_instruction_parent_artifacts",
+            "consumptionPolicy": "low_risk_supported_actions_only",
+            "lowRiskRepairInstructions": low_risk,
+            "auditOnlyRepairInstructions": audit_only,
+        }
+
+    def _repair_instruction_summary(self, *, artifact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        actions = payload.get("actions")
+        return {
+            "artifactId": artifact_id,
+            "targetStage": payload.get("targetStage"),
+            "status": payload.get("status"),
+            "riskLevel": payload.get("riskLevel"),
+            "failureClass": payload.get("failureClass"),
+            "actionCount": len(actions) if isinstance(actions, list) else 0,
+            "actions": actions if isinstance(actions, list) else [],
+            "decision": payload.get("decision"),
+        }
 
     def _json_bytes(self, payload: dict) -> bytes:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")

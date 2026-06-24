@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from apps.api.app.models import CreateJobRequest, EvidenceRef
 from apps.api.app.store import create_store
 from apps.worker.worker.agent_runtime import AgentContextRedactor, AgentRuntime, AgentRuntimeRequest, ModelPolicyResolver
+from apps.worker.worker.reconstruction import ReconstructionRunner
 from packages.knowledge import StaticKnowledgeRetriever
 
 
@@ -318,12 +320,18 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 )
 
                 result = AgentRuntime().run(job_id=job.id, store=store, request=request)
+                agent_plan_payload = json.loads(store.read_artifact(job.id, result.plan_artifact.id))
                 knowledge_payload = json.loads(store.read_artifact(job.id, result.knowledge_artifact.id))
                 hit_by_id = {hit["id"]: hit for hit in knowledge_payload["hits"]}
                 source_kinds = {
                     source["kind"]
                     for source in knowledge_payload["retrievalSources"]["currentJobArtifacts"]
                 }
+                agent_repair_payloads = [
+                    json.loads(store.read_artifact(job.id, artifact.id))
+                    for artifact in result.repair_instruction_artifacts
+                ]
+                low_risk_action_repairs = [payload for payload in agent_repair_payloads if payload["actions"]]
 
                 self.assertIn("knowledge_validation_build_build_build_error", hit_by_id)
                 self.assertIn("knowledge_browser_shim_runtime_boundary_remote_browser_runner", hit_by_id)
@@ -346,7 +354,98 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 self.assertTrue(
                     {"build_artifact", "runtime_trace", "review_run", "repair_instruction"}.issubset(source_kinds)
                 )
+                self.assertEqual(agent_plan_payload["reviewFixFeedback"]["lowRiskRepairCount"], 1)
+                self.assertEqual(agent_plan_payload["reviewFixFeedback"]["auditOnlyRepairCount"], 0)
+                self.assertEqual(agent_plan_payload["reviewFixFeedback"]["crossJobHistory"], False)
+                self.assertTrue(low_risk_action_repairs)
+                self.assertEqual(low_risk_action_repairs[0]["targetStage"], "runtime_compare")
+                self.assertEqual(low_risk_action_repairs[0]["status"], "planned")
+                self.assertEqual(low_risk_action_repairs[0]["riskLevel"], "low")
+                self.assertEqual(low_risk_action_repairs[0]["actions"][0]["action"], "mirror_original_static_entry")
                 self.assertFalse(knowledge_payload["retrievalSources"]["crossJobHistory"])
+            finally:
+                store.close()
+
+    def test_reconstruction_plan_records_writer_feedback_inputs(self):
+        class FakeCoreBridge:
+            def reconstruct_input_package(self, *, job_id, input_path, output_dir):
+                output_dir.mkdir(parents=True)
+                (output_dir / "index.html").write_text("<div>generated</div>", encoding="utf-8")
+                return SimpleNamespace(
+                    reconstruction_plan_payload={
+                        "kind": "reconstruction_plan",
+                        "strategy": "static_host_project",
+                        "limitations": [],
+                    },
+                    generated_project_path=output_dir,
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            input_root.mkdir()
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                low_risk_repair = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="repair_instruction",
+                    stage="agent_pass",
+                    filename="low-risk-repair.json",
+                    payload={
+                        "kind": "repair_instruction",
+                        "targetStage": "runtime_compare",
+                        "status": "planned",
+                        "riskLevel": "low",
+                        "failureClass": "runtime_error",
+                        "decision": "Mirror static entry.",
+                        "attempt": 0,
+                        "actions": [
+                            {
+                                "action": "mirror_original_static_entry",
+                                "path": "projectRoot",
+                                "value": "public/original",
+                                "reason": "Runtime compare retry can mirror original static files.",
+                            }
+                        ],
+                    },
+                )
+                high_risk_repair = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="repair_instruction",
+                    stage="agent_pass",
+                    filename="high-risk-repair.json",
+                    payload={
+                        "kind": "repair_instruction",
+                        "targetStage": "runtime_compare",
+                        "status": "skipped",
+                        "riskLevel": "high",
+                        "failureClass": "runtime_error",
+                        "decision": "Rewrite runtime bootstrap manually.",
+                        "attempt": 0,
+                        "actions": [],
+                    },
+                )
+
+                result = ReconstructionRunner(core_bridge=FakeCoreBridge()).run(
+                    job_id=job.id,
+                    input_path=input_root,
+                    store=store,
+                    parent_artifact_ids=[low_risk_repair.id, high_risk_repair.id],
+                )
+                plan_payload = json.loads(store.read_artifact(job.id, result.plan_artifact.id))
+                feedback = plan_payload["agentFeedbackInputs"]
+
+                self.assertEqual(feedback["consumptionPolicy"], "low_risk_supported_actions_only")
+                self.assertEqual(feedback["lowRiskRepairInstructions"][0]["artifactId"], low_risk_repair.id)
+                self.assertEqual(feedback["lowRiskRepairInstructions"][0]["actionCount"], 1)
+                self.assertEqual(feedback["auditOnlyRepairInstructions"][0]["artifactId"], high_risk_repair.id)
+                self.assertIn("Agent Review/Fix feedback was read", plan_payload["limitations"][0])
             finally:
                 store.close()
 
