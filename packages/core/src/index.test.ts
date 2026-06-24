@@ -29,6 +29,55 @@ test("analyzeInputPackage inventories dist assets and indexes bundle symbols", a
   }
 });
 
+test("analyzeInputPackage builds analysis graphs and low-risk transform evidence", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-graphs-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(
+      path.join(root, "index.html"),
+      '<div id="app"></div><script type="module" src="/assets/app.js"></script><link rel="stylesheet" href="/assets/app.css">'
+    );
+    await writeFile(
+      path.join(root, "assets", "app.js"),
+      [
+        "import { helper } from './helper.js';",
+        "const value = 1 + 2;",
+        "const api = window['document'];",
+        "helper(), console.log(value, api);",
+        "export { value };",
+        "//# sourceMappingURL=app.js.map"
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "assets", "helper.js"), "export function helper(){return 'ok'}");
+    await writeFile(path.join(root, "assets", "app.css"), "#app{display:block}");
+    await writeFile(
+      path.join(root, "assets", "app.js.map"),
+      JSON.stringify({
+        version: 3,
+        file: "app.js",
+        sources: ["../src/main.ts"],
+        sourcesContent: ["export const main = 1;"],
+        names: [],
+        mappings: ""
+      })
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.ok(result.graphAnalysis.chunkGraph.edges.some((edge) => edge.kind === "entry_includes_script"));
+    assert.ok(result.graphAnalysis.moduleCandidateGraph.edges.some((edge) => edge.kind === "static_import" && edge.to === "script:assets/helper.js"));
+    assert.ok(result.graphAnalysis.moduleCandidateGraph.nodes.some((node) => node.id === "source:src/main.ts"));
+    assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "computed_property_literal_restore" && entry.status === "applied"));
+    assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "low_risk_constant_fold" && entry.status === "applied"));
+    assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "sequence_expression_expand" && entry.status === "applied"));
+    assert.ok(result.transformAnalysis.rollbackMap.length >= 3);
+    assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("window.document"));
+    assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("const value = 3"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("analyzeInputPackage maps bundles to source candidates from source maps", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-sourcemap-"));
   try {
@@ -278,11 +327,23 @@ test("writeProject emits a buildable generated project shell", async () => {
     const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
       kind: string;
       copiedSourceFiles: string[];
+      transformedSourceFiles: string[];
+      analysisFiles: string[];
     };
 
     assert.equal(result.projectPath, outputDir);
     assert.equal(manifest.kind, "generated_project");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
+    assert.ok(manifest.transformedSourceFiles.includes("src/transformed/assets/app.js"));
+    assert.ok(manifest.analysisFiles.includes("src/analysis/graph-analysis.json"));
+    const graphAnalysis = JSON.parse(await readFile(path.join(outputDir, "src", "analysis", "graph-analysis.json"), "utf8")) as {
+      graphAnalysis: { chunkGraph: { edges: unknown[] } };
+    };
+    const transformLog = JSON.parse(await readFile(path.join(outputDir, "src", "analysis", "transform-log.json"), "utf8")) as {
+      transformLog: unknown[];
+    };
+    assert.ok(graphAnalysis.graphAnalysis.chunkGraph.edges.length > 0);
+    assert.ok(Array.isArray(transformLog.transformLog));
     await runScript(outputDir, ["scripts/typecheck.mjs"]);
     await runScript(outputDir, ["scripts/build.mjs"]);
     const buildManifest = JSON.parse(await readFile(path.join(outputDir, "dist", "build-manifest.json"), "utf8")) as {

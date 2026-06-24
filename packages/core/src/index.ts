@@ -3,11 +3,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, inflateRawSync } from "node:zlib";
+import generate from "@babel/generator";
 import { TraceMap, sourceContentFor } from "@jridgewell/trace-mapping";
 import type { SourceMapInput } from "@jridgewell/trace-mapping";
 import { parse } from "@babel/parser";
 import traverseModule, { type NodePath, type TraverseOptions } from "@babel/traverse";
-import type * as t from "@babel/types";
+import * as t from "@babel/types";
 import type { AstIndex, HeadlessAnalysisResult, InputFileRecord, InputInventory } from "@ai-jsunpack/shared";
 
 export interface AnalyzeInputConfig {
@@ -18,6 +19,8 @@ export interface AnalyzeInputConfig {
 
 export interface CoreAnalysisResult extends HeadlessAnalysisResult {
   sourceMapAnalysis: SourceMapArtifactAnalysis;
+  graphAnalysis: GraphAnalysis;
+  transformAnalysis: TransformAnalysis;
 }
 
 export interface NormalizedInputPackage {
@@ -40,8 +43,19 @@ export interface ReconstructionPlan {
   manifests: string[];
   detectedRuntime: string[];
   generatedFiles: string[];
+  inputInventory: InputInventory;
+  astIndexes: AstIndex[];
+  sourceMapAnalysis: SourceMapArtifactAnalysis;
+  graphAnalysis: GraphAnalysis;
+  scriptTransforms: ScriptTransformRecord[];
+  transformLog: TransformLogEntry[];
+  rollbackMap: RollbackMapEntry[];
   evidenceSummary: {
     astIndexFiles: string[];
+    chunkGraphEdgeCount: number;
+    resourceGraphEdgeCount: number;
+    moduleCandidateCount: number;
+    transformCount: number;
     symbolCount: number;
   };
   limitations: string[];
@@ -60,6 +74,8 @@ export interface GeneratedProjectManifest {
   entrypoint: string;
   generatedFiles: string[];
   copiedSourceFiles: string[];
+  transformedSourceFiles: string[];
+  analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
 }
@@ -101,6 +117,72 @@ export interface SourceMapArtifactAnalysis {
   warnings: string[];
 }
 
+export interface GraphNodeRecord {
+  id: string;
+  kind: string;
+  label: string;
+}
+
+export interface GraphEdgeRecord {
+  from: string;
+  to: string;
+  kind: string;
+}
+
+export interface GraphAnalysis {
+  chunkGraph: {
+    nodes: GraphNodeRecord[];
+    edges: GraphEdgeRecord[];
+    entryPoints: string[];
+    warnings: string[];
+  };
+  resourceGraph: {
+    nodes: GraphNodeRecord[];
+    edges: GraphEdgeRecord[];
+    warnings: string[];
+  };
+  moduleCandidateGraph: {
+    nodes: GraphNodeRecord[];
+    edges: GraphEdgeRecord[];
+    sourceCandidates: string[];
+    warnings: string[];
+  };
+}
+
+export interface ScriptTransformRecord {
+  filePath: string;
+  originalHash: string;
+  transformedHash: string;
+  transformedSource: string;
+  transforms: string[];
+  wrapperMarks: string[];
+}
+
+export interface TransformLogEntry {
+  filePath: string;
+  kind: string;
+  status: "applied" | "skipped";
+  originalLoc?: string;
+  originalSnippet?: string;
+  transformedSnippet?: string;
+  detail?: string;
+}
+
+export interface RollbackMapEntry {
+  filePath: string;
+  kind: string;
+  originalLoc?: string;
+  transformedLoc?: string;
+  originalSnippet?: string;
+  transformedSnippet?: string;
+}
+
+export interface TransformAnalysis {
+  scriptTransforms: ScriptTransformRecord[];
+  transformLog: TransformLogEntry[];
+  rollbackMap: RollbackMapEntry[];
+}
+
 type HtmlReferenceKind = "asset" | "manifest" | "script" | "style";
 
 const TEXT_EXTENSIONS = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".json", ".map"]);
@@ -117,6 +199,12 @@ const GENERATED_PROJECT_FILES = [
   "index.html",
   "src/main.ts",
   "src/reconstruction-manifest.json",
+  "src/analysis/input-inventory.json",
+  "src/analysis/ast-indexes.json",
+  "src/analysis/source-map-analysis.json",
+  "src/analysis/graph-analysis.json",
+  "src/analysis/transform-log.json",
+  "src/analysis/rollback-map.json",
   "scripts/build.mjs",
   "scripts/typecheck.mjs"
 ];
@@ -139,12 +227,16 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
       inventory.scripts.map(async (scriptPath) => buildAstIndexForFile(path.join(rootDir, scriptPath), rootDir))
     );
     const detectedRuntime = detectBundleRuntime(inventory, astIndexes);
+    const graphAnalysis = buildGraphAnalysis(inventory, astIndexes, sourceMapAnalysis);
+    const transformAnalysis = await buildTransformAnalysis(rootDir, astIndexes);
 
     return {
       inventory,
       astIndexes,
       detectedRuntime,
       sourceMapAnalysis,
+      graphAnalysis,
+      transformAnalysis,
       artifacts: []
     };
   } finally {
@@ -279,7 +371,7 @@ export async function buildAstIndexForFile(filePath: string, rootDir = path.dirn
     });
     indexProgramDeclarations(ast.program.body, symbols, imports, exports);
 
-    const traverseAst = traverseModule as unknown as (ast: unknown, visitors: TraverseOptions) => void;
+    const traverseAst = getTraverse();
 
     traverseAst(ast, {
       ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
@@ -402,6 +494,417 @@ export function detectBundleRuntime(inventory: InputInventory, indexes: AstIndex
   return [...detected];
 }
 
+export function buildGraphAnalysis(
+  inventory: InputInventory,
+  astIndexes: AstIndex[],
+  sourceMapAnalysis: SourceMapArtifactAnalysis
+): GraphAnalysis {
+  const fileKindByPath = new Map(inventory.files.map((file) => [file.path, file.kind]));
+  const chunkNodes = new Map<string, GraphNodeRecord>();
+  const chunkEdges = new Map<string, GraphEdgeRecord>();
+  const resourceNodes = new Map<string, GraphNodeRecord>();
+  const resourceEdges = new Map<string, GraphEdgeRecord>();
+  const moduleNodes = new Map<string, GraphNodeRecord>();
+  const moduleEdges = new Map<string, GraphEdgeRecord>();
+  const warnings: string[] = [];
+
+  for (const entry of inventory.entries) {
+    addGraphNode(chunkNodes, `entry:${entry}`, "entry", entry);
+    addGraphNode(resourceNodes, `entry:${entry}`, "entry", entry);
+  }
+
+  for (const script of inventory.scripts) {
+    addGraphNode(chunkNodes, `script:${script}`, "script", script);
+    addGraphNode(moduleNodes, `script:${script}`, "script", script);
+    for (const entry of inventory.entries) {
+      addGraphEdge(chunkEdges, `entry:${entry}`, `script:${script}`, "entry_includes_script");
+    }
+  }
+
+  for (const style of inventory.styles) {
+    addGraphNode(resourceNodes, `style:${style}`, "style", style);
+    for (const entry of inventory.entries) {
+      addGraphEdge(resourceEdges, `entry:${entry}`, `style:${style}`, "entry_includes_style");
+    }
+  }
+
+  for (const asset of inventory.assets) {
+    addGraphNode(resourceNodes, `asset:${asset}`, "asset", asset);
+    for (const entry of inventory.entries) {
+      addGraphEdge(resourceEdges, `entry:${entry}`, `asset:${asset}`, "entry_references_asset");
+    }
+  }
+
+  for (const sourceMap of sourceMapAnalysis.bundleAnalyses) {
+    addGraphNode(moduleNodes, `script:${sourceMap.bundlePath}`, "script", sourceMap.bundlePath);
+    addGraphNode(moduleNodes, `source_map:${sourceMap.sourceMapPath}`, "source_map", sourceMap.sourceMapPath);
+    addGraphEdge(moduleEdges, `script:${sourceMap.bundlePath}`, `source_map:${sourceMap.sourceMapPath}`, "has_source_map");
+    for (const candidate of sourceMap.sourceCandidates) {
+      addGraphNode(moduleNodes, `source:${candidate}`, "source_candidate", candidate);
+      addGraphEdge(moduleEdges, `source_map:${sourceMap.sourceMapPath}`, `source:${candidate}`, "maps_to_source_candidate");
+    }
+  }
+
+  for (const astIndex of astIndexes) {
+    addGraphNode(moduleNodes, `script:${astIndex.filePath}`, "script", astIndex.filePath);
+    for (const importSource of astIndex.imports) {
+      const resolved = resolveScriptImportCandidate(astIndex.filePath, importSource, fileKindByPath);
+      const targetId = resolved ? `script:${resolved}` : `external:${importSource}`;
+      addGraphNode(moduleNodes, targetId, resolved ? "script" : "external_module", resolved ?? importSource);
+      addGraphEdge(moduleEdges, `script:${astIndex.filePath}`, targetId, "static_import");
+      if (resolved) {
+        addGraphEdge(chunkEdges, `script:${astIndex.filePath}`, `script:${resolved}`, "static_import");
+      }
+    }
+    for (const symbol of astIndex.symbols) {
+      const symbolId = `symbol:${astIndex.filePath}:${symbol.name}`;
+      addGraphNode(moduleNodes, symbolId, symbol.kind, symbol.name);
+      addGraphEdge(moduleEdges, `script:${astIndex.filePath}`, symbolId, "declares_symbol");
+    }
+  }
+
+  if (inventory.entries.length === 0 && inventory.scripts.length > 0) {
+    warnings.push("No HTML entry was available; chunk graph uses scripts as candidate roots.");
+  }
+  if (sourceMapAnalysis.bundleCount === 0) {
+    warnings.push("No source maps were available; module candidates are limited to imports and AST symbols.");
+  }
+
+  return {
+    chunkGraph: {
+      nodes: [...chunkNodes.values()].sort(compareGraphNode),
+      edges: [...chunkEdges.values()].sort(compareGraphEdge),
+      entryPoints: inventory.entries.length > 0 ? inventory.entries : inventory.scripts,
+      warnings
+    },
+    resourceGraph: {
+      nodes: [...resourceNodes.values()].sort(compareGraphNode),
+      edges: [...resourceEdges.values()].sort(compareGraphEdge),
+      warnings: inventory.assets.length === 0 && inventory.styles.length === 0 ? ["No referenced styles or assets were found."] : []
+    },
+    moduleCandidateGraph: {
+      nodes: [...moduleNodes.values()].sort(compareGraphNode),
+      edges: [...moduleEdges.values()].sort(compareGraphEdge),
+      sourceCandidates: sourceMapAnalysis.sourceCandidates,
+      warnings: sourceMapAnalysis.warnings
+    }
+  };
+}
+
+async function buildTransformAnalysis(rootDir: string, astIndexes: AstIndex[]): Promise<TransformAnalysis> {
+  const scriptTransforms: ScriptTransformRecord[] = [];
+  const transformLog: TransformLogEntry[] = [];
+  const rollbackMap: RollbackMapEntry[] = [];
+
+  for (const astIndex of astIndexes) {
+    const source = await fs.readFile(path.join(rootDir, astIndex.filePath), "utf8");
+    const result = transformScriptSource(astIndex.filePath, source);
+    scriptTransforms.push(result.record);
+    transformLog.push(...result.transformLog);
+    rollbackMap.push(...result.rollbackMap);
+  }
+
+  return {
+    scriptTransforms,
+    transformLog,
+    rollbackMap
+  };
+}
+
+function transformScriptSource(
+  filePath: string,
+  source: string
+): { record: ScriptTransformRecord; transformLog: TransformLogEntry[]; rollbackMap: RollbackMapEntry[] } {
+  const transformLog: TransformLogEntry[] = [];
+  const rollbackMap: RollbackMapEntry[] = [];
+  const transforms = new Set<string>();
+  const wrapperMarks = new Set<string>();
+
+  let ast: ReturnType<typeof parse>;
+  try {
+    ast = parse(source, {
+      sourceType: "unambiguous",
+      plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+      errorRecovery: true,
+      tokens: true
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unknown Babel parse error.";
+    transformLog.push({ filePath, kind: "parse", status: "skipped", detail });
+    return {
+      record: {
+        filePath,
+        originalHash: sha256(Buffer.from(source)),
+        transformedHash: sha256(Buffer.from(source)),
+        transformedSource: source,
+        transforms: [],
+        wrapperMarks: []
+      },
+      transformLog,
+      rollbackMap
+    };
+  }
+
+  markProgramWrappers(filePath, ast.program.body, wrapperMarks, transformLog);
+  const traverseAst = getTraverse();
+
+  traverseAst(ast, {
+    ExpressionStatement(path: NodePath<t.ExpressionStatement>) {
+      if (path.node.expression.type !== "SequenceExpression") {
+        return;
+      }
+      const expressions = path.node.expression.expressions;
+      if (expressions.length < 2 || expressions.some((expression) => expression.type === "YieldExpression" || expression.type === "AwaitExpression")) {
+        transformLog.push({
+          filePath,
+          kind: "sequence_expression_expand",
+          status: "skipped",
+          originalLoc: formatNodeLoc(path.node),
+          detail: "Sequence expression includes await/yield or too few expressions."
+        });
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      const replacementStatements = expressions.map((expression) => t.expressionStatement(expression));
+      const transformedSnippet = replacementStatements.map((statement) => codeForNode(statement)).join("\n");
+      path.replaceWithMultiple(replacementStatements);
+      transforms.add("sequence_expression_expand");
+      logAppliedTransform(filePath, "sequence_expression_expand", originalLoc, originalSnippet, transformedSnippet, transformLog, rollbackMap);
+    },
+    MemberExpression(path: NodePath<t.MemberExpression>) {
+      if (!path.node.computed || !t.isStringLiteral(path.node.property) || !isIdentifierName(path.node.property.value)) {
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      path.node.property = t.identifier(path.node.property.value);
+      path.node.computed = false;
+      transforms.add("computed_property_literal_restore");
+      logAppliedTransform(filePath, "computed_property_literal_restore", originalLoc, originalSnippet, codeForNode(path.node), transformLog, rollbackMap);
+    },
+    BinaryExpression(path: NodePath<t.BinaryExpression>) {
+      const literal = evaluateLowRiskBinaryExpression(path.node);
+      if (!literal) {
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      const transformedSnippet = codeForNode(literal);
+      path.replaceWith(literal);
+      transforms.add("low_risk_constant_fold");
+      logAppliedTransform(filePath, "low_risk_constant_fold", originalLoc, originalSnippet, transformedSnippet, transformLog, rollbackMap);
+    }
+  });
+
+  const transformedSource = generate.default(ast, { comments: true, retainLines: true }, source).code;
+
+  return {
+    record: {
+      filePath,
+      originalHash: sha256(Buffer.from(source)),
+      transformedHash: sha256(Buffer.from(transformedSource)),
+      transformedSource,
+      transforms: [...transforms].sort(),
+      wrapperMarks: [...wrapperMarks].sort()
+    },
+    transformLog,
+    rollbackMap
+  };
+}
+
+function addGraphNode(nodes: Map<string, GraphNodeRecord>, id: string, kind: string, label: string): void {
+  if (nodes.has(id)) {
+    return;
+  }
+  nodes.set(id, { id, kind, label });
+}
+
+function addGraphEdge(edges: Map<string, GraphEdgeRecord>, from: string, to: string, kind: string): void {
+  const edgeId = `${from} -> ${to} :: ${kind}`;
+  if (edges.has(edgeId)) {
+    return;
+  }
+  edges.set(edgeId, { from, to, kind });
+}
+
+function compareGraphNode(left: GraphNodeRecord, right: GraphNodeRecord): number {
+  return left.id.localeCompare(right.id);
+}
+
+function compareGraphEdge(left: GraphEdgeRecord, right: GraphEdgeRecord): number {
+  const byFrom = left.from.localeCompare(right.from);
+  if (byFrom !== 0) {
+    return byFrom;
+  }
+  const byTo = left.to.localeCompare(right.to);
+  if (byTo !== 0) {
+    return byTo;
+  }
+  return left.kind.localeCompare(right.kind);
+}
+
+function getTraverse(): (ast: unknown, visitors: TraverseOptions) => void {
+  const traverse = (traverseModule as unknown as { default?: (ast: unknown, visitors: TraverseOptions) => void })?.default ?? (traverseModule as unknown as (ast: unknown, visitors: TraverseOptions) => void);
+  if (typeof traverse !== "function") {
+    throw new Error("Babel traverse runtime is unavailable.");
+  }
+  return traverse;
+}
+
+function resolveScriptImportCandidate(
+  importerPath: string,
+  importSource: string,
+  fileKindByPath: Map<string, InputFileRecord["kind"]>
+): string | null {
+  if (!importSource || importSource.startsWith("\0")) {
+    return null;
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(importSource) && !importSource.startsWith("file:")) {
+    return null;
+  }
+  const trimmed = importSource.trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+  const normalized = trimmed.replace(/\\/g, "/").split(/[?#]/, 1)[0];
+  const importerDir = path.posix.dirname(importerPath);
+  const relativeCandidates = normalized.startsWith(".")
+    ? [path.posix.normalize(path.posix.join(importerDir, normalized))]
+    : [normalized, path.posix.normalize(path.posix.join(importerDir, normalized))];
+  const extensionCandidates = normalized.includes(".")
+    ? relativeCandidates
+    : [...relativeCandidates.flatMap((candidate) => [candidate, `${candidate}.js`, `${candidate}.ts`, `${candidate}.tsx`, `${candidate}.mjs`, `${candidate}.cjs`])];
+  for (const candidate of extensionCandidates) {
+    const normalizedCandidate = toPosix(candidate).replace(/^\.?\//, "");
+    if (fileKindByPath.get(normalizedCandidate) === "script" || fileKindByPath.get(normalizedCandidate) === "unknown") {
+      return normalizedCandidate;
+    }
+  }
+  return null;
+}
+
+function markProgramWrappers(
+  filePath: string,
+  body: t.Statement[],
+  wrapperMarks: Set<string>,
+  transformLog: TransformLogEntry[]
+): void {
+  if (body.length === 0) {
+    return;
+  }
+  const firstStatement = body[0];
+  if (firstStatement.type === "ExpressionStatement" && firstStatement.expression.type === "CallExpression") {
+    wrapperMarks.add("call_expression_wrapper");
+    transformLog.push({
+      filePath,
+      kind: "wrapper_mark",
+      status: "applied",
+      originalLoc: formatNodeLoc(firstStatement),
+      detail: "Marked call-expression wrapper for later reconstruction."
+    });
+  }
+  if (body.length === 1 && body[0].type === "FunctionDeclaration") {
+    wrapperMarks.add("single_function_wrapper");
+    transformLog.push({
+      filePath,
+      kind: "wrapper_mark",
+      status: "applied",
+      originalLoc: formatNodeLoc(body[0]),
+      detail: "Marked single-function wrapper for later reconstruction."
+    });
+  }
+}
+
+function evaluateLowRiskBinaryExpression(node: t.BinaryExpression): t.Expression | null {
+  if (!t.isExpression(node.left) || !t.isExpression(node.right)) {
+    return null;
+  }
+  const left = literalValueForExpression(node.left);
+  const right = literalValueForExpression(node.right);
+  if (left === undefined || right === undefined) {
+    return null;
+  }
+  switch (node.operator) {
+    case "+":
+      if (typeof left === "string" || typeof right === "string") {
+        return t.stringLiteral(String(left) + String(right));
+      }
+      if (typeof left === "number" && typeof right === "number") {
+        return t.numericLiteral(left + right);
+      }
+      return null;
+    case "-":
+      if (typeof left === "number" && typeof right === "number") {
+        return t.numericLiteral(left - right);
+      }
+      return null;
+    case "*":
+      if (typeof left === "number" && typeof right === "number") {
+        return t.numericLiteral(left * right);
+      }
+      return null;
+    case "/":
+      if (typeof left === "number" && typeof right === "number" && right !== 0) {
+        return t.numericLiteral(left / right);
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
+function literalValueForExpression(node: t.Expression): string | number | boolean | null | undefined {
+  if (t.isStringLiteral(node)) {
+    return node.value;
+  }
+  if (t.isNumericLiteral(node)) {
+    return node.value;
+  }
+  if (t.isBooleanLiteral(node)) {
+    return node.value;
+  }
+  if (t.isNullLiteral(node)) {
+    return null;
+  }
+  return undefined;
+}
+
+function logAppliedTransform(
+  filePath: string,
+  kind: string,
+  originalLoc: string | undefined,
+  originalSnippet: string,
+  transformedSnippet: string,
+  transformLog: TransformLogEntry[],
+  rollbackMap: RollbackMapEntry[]
+): void {
+  transformLog.push({
+    filePath,
+    kind,
+    status: "applied",
+    originalLoc,
+    originalSnippet,
+    transformedSnippet
+  });
+  rollbackMap.push({
+    filePath,
+    kind,
+    originalLoc,
+    transformedLoc: originalLoc,
+    originalSnippet,
+    transformedSnippet
+  });
+}
+
+function codeForNode(node: t.Node): string {
+  return generate.default(node, { comments: false, compact: true }).code;
+}
+
+function isIdentifierName(value: string): boolean {
+  return /^[$A-Z_a-z][$0-9A-Z_a-z]*$/.test(value);
+}
+
 export function planReconstruction(
   analysis: CoreAnalysisResult,
   config: AnalyzeInputConfig = {}
@@ -425,8 +928,19 @@ export function planReconstruction(
     manifests: analysis.inventory.manifests,
     detectedRuntime: analysis.detectedRuntime,
     generatedFiles: GENERATED_PROJECT_FILES,
+    inputInventory: analysis.inventory,
+    astIndexes: analysis.astIndexes,
+    sourceMapAnalysis: analysis.sourceMapAnalysis,
+    graphAnalysis: analysis.graphAnalysis,
+    scriptTransforms: analysis.transformAnalysis.scriptTransforms,
+    transformLog: analysis.transformAnalysis.transformLog,
+    rollbackMap: analysis.transformAnalysis.rollbackMap,
     evidenceSummary: {
       astIndexFiles: analysis.astIndexes.map((index) => index.filePath),
+      chunkGraphEdgeCount: analysis.graphAnalysis.chunkGraph.edges.length,
+      resourceGraphEdgeCount: analysis.graphAnalysis.resourceGraph.edges.length,
+      moduleCandidateCount: analysis.graphAnalysis.moduleCandidateGraph.nodes.filter((node) => node.kind === "source_candidate").length,
+      transformCount: analysis.transformAnalysis.transformLog.filter((entry) => entry.status === "applied" && entry.kind !== "wrapper_mark").length,
       symbolCount: analysis.astIndexes.reduce((count, index) => count + index.symbols.length, 0)
     },
     limitations
@@ -440,6 +954,8 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
     const projectRoot = assertSafeOutputDir(config.outputDir);
     await fs.rm(projectRoot, { recursive: true, force: true });
     await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "analysis"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "transformed"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "public", "original"), { recursive: true });
 
@@ -452,6 +968,22 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       await fs.copyFile(sourcePath, targetPath);
       copiedSourceFiles.push(`public/original/${toPosix(safeRelative)}`);
     }
+    const transformedSourceFiles: string[] = [];
+    for (const transform of plan.scriptTransforms) {
+      const safeRelative = safeRelativePath(transform.filePath);
+      const targetPath = path.join(projectRoot, "src", "transformed", safeRelative);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, transform.transformedSource, "utf8");
+      transformedSourceFiles.push(`src/transformed/${toPosix(safeRelative)}`);
+    }
+    const analysisFiles = [
+      "src/analysis/input-inventory.json",
+      "src/analysis/ast-indexes.json",
+      "src/analysis/source-map-analysis.json",
+      "src/analysis/graph-analysis.json",
+      "src/analysis/transform-log.json",
+      "src/analysis/rollback-map.json"
+    ];
 
     const manifest: GeneratedProjectManifest = {
       kind: "generated_project",
@@ -460,6 +992,8 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       entrypoint: "index.html",
       generatedFiles: GENERATED_PROJECT_FILES,
       copiedSourceFiles,
+      transformedSourceFiles,
+      analysisFiles,
       sourceRoot: "public/original",
       limitations: plan.limitations
     };
@@ -484,6 +1018,37 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
         resolveJsonModule: true
       },
       include: ["src/**/*.ts"]
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "input-inventory.json"), {
+      kind: "input_inventory",
+      jobId: plan.jobId,
+      inventory: plan.inputInventory
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "ast-indexes.json"), {
+      kind: "ast_index",
+      jobId: plan.jobId,
+      astIndexes: plan.astIndexes,
+      detectedRuntime: plan.detectedRuntime
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "source-map-analysis.json"), {
+      kind: "source_map_analysis",
+      jobId: plan.jobId,
+      sourceMapAnalysis: plan.sourceMapAnalysis
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "graph-analysis.json"), {
+      kind: "graph_analysis",
+      jobId: plan.jobId,
+      graphAnalysis: plan.graphAnalysis
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "transform-log.json"), {
+      kind: "transform_log",
+      jobId: plan.jobId,
+      transformLog: plan.transformLog
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "rollback-map.json"), {
+      kind: "rollback_map",
+      jobId: plan.jobId,
+      rollbackMap: plan.rollbackMap
     });
     await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
     await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
@@ -1297,6 +1862,8 @@ function mainTsSource(manifest: GeneratedProjectManifest): string {
   entrypoint: string;
   generatedFiles: string[];
   copiedSourceFiles: string[];
+  transformedSourceFiles: string[];
+  analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
 }
@@ -1387,7 +1954,12 @@ const mainSource = await readFile(path.join(root, "src", "main.ts"), "utf8");
 if (manifest.kind !== "generated_project") {
   throw new Error("Generated project manifest kind is invalid.");
 }
-if (!Array.isArray(manifest.copiedSourceFiles) || !Array.isArray(manifest.generatedFiles)) {
+if (
+  !Array.isArray(manifest.copiedSourceFiles) ||
+  !Array.isArray(manifest.generatedFiles) ||
+  !Array.isArray(manifest.transformedSourceFiles) ||
+  !Array.isArray(manifest.analysisFiles)
+) {
   throw new Error("Generated project manifest file lists are invalid.");
 }
 if (!mainSource.includes("export interface ReconstructionManifest")) {
@@ -1396,6 +1968,12 @@ if (!mainSource.includes("export interface ReconstructionManifest")) {
 for (const filePath of manifest.copiedSourceFiles) {
   if (path.isAbsolute(filePath) || filePath.includes("..")) {
     throw new Error(\`Unsafe copied source file path: \${filePath}\`);
+  }
+  await access(path.join(root, filePath));
+}
+for (const filePath of [...manifest.transformedSourceFiles, ...manifest.analysisFiles]) {
+  if (path.isAbsolute(filePath) || filePath.includes("..")) {
+    throw new Error(\`Unsafe generated evidence file path: \${filePath}\`);
   }
   await access(path.join(root, filePath));
 }
