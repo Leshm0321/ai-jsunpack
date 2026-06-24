@@ -1,7 +1,12 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from apps.api.app.models import EvidenceRef
-from apps.worker.worker.agent_runtime import AgentContextRedactor, AgentRuntimeRequest, ModelPolicyResolver
+from apps.api.app.models import CreateJobRequest, EvidenceRef
+from apps.api.app.store import create_store
+from apps.worker.worker.agent_runtime import AgentContextRedactor, AgentRuntime, AgentRuntimeRequest, ModelPolicyResolver
+from packages.knowledge import StaticKnowledgeRetriever
 
 
 class AgentRuntimePolicyTest(unittest.TestCase):
@@ -127,6 +132,234 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(result.input_summary["scripts"], ["assets/app.js"])
         self.assertEqual(result.memory_excerpt, "Job memory mentions boot.")
         self.assertEqual(result.evidence_refs[0].excerpt, "symbols=['boot']")
+
+    def test_static_knowledge_retriever_recognizes_core_and_runtime_patterns(self):
+        retriever = StaticKnowledgeRetriever()
+        inventory_payload = {
+            "kind": "input_inventory",
+            "inventory": {
+                "entries": [],
+                "scripts": ["assets/app.js", "assets/vendor.js"],
+                "styles": ["assets/app.css"],
+                "manifests": ["manifest.webmanifest"],
+                "sourceMaps": [],
+                "warnings": [],
+                "isSingleBundle": False,
+            },
+        }
+        ast_index_payload = {
+            "kind": "ast_index",
+            "detectedRuntime": ["multi_chunk", "vite_or_rollup"],
+            "astIndexes": [
+                {
+                    "filePath": "assets/app.js",
+                    "imports": ["react", "vue"],
+                    "exports": ["default"],
+                    "symbols": [
+                        {"name": "a", "kind": "variable"},
+                        {"name": "b", "kind": "variable"},
+                        {"name": "c", "kind": "function"},
+                        {"name": "window", "kind": "identifier"},
+                        {"name": "process", "kind": "identifier"},
+                        {"name": "globalThis", "kind": "identifier"},
+                    ],
+                    "warnings": [],
+                }
+            ],
+        }
+
+        hits = retriever.retrieve(inventory_payload=inventory_payload, ast_index_payload=ast_index_payload)
+        hit_ids = {hit.id for hit in hits}
+        categories = {hit.category for hit in hits}
+
+        self.assertIn("knowledge_browser_shim_missing_html_entry", hit_ids)
+        self.assertIn("knowledge_browser_shim_generated_host", hit_ids)
+        self.assertIn("knowledge_runtime_multi_chunk", hit_ids)
+        self.assertIn("knowledge_framework_react", hit_ids)
+        self.assertIn("knowledge_framework_vue", hit_ids)
+        self.assertIn("knowledge_framework_vite_rollup", hit_ids)
+        self.assertIn("knowledge_obfuscation_short_symbols", hit_ids)
+        self.assertIn("knowledge_browser_shim_dom_globals", hit_ids)
+        self.assertIn("knowledge_browser_shim_node_globals", hit_ids)
+        self.assertIn("knowledge_browser_shim_global_this", hit_ids)
+        self.assertTrue({"browser_shim", "build_runtime", "framework_feature", "obfuscation_pattern"}.issubset(categories))
+
+        artifact_payload = retriever.artifact_payload(
+            job_id="job_knowledge",
+            input_artifact_ids=["artifact_inventory", "artifact_ast"],
+            hits=hits,
+        )
+        self.assertEqual(artifact_payload["retrievalSources"]["core"], ["input_inventory", "ast_index"])
+        self.assertFalse(artifact_payload["retrievalSources"]["currentJobArtifacts"])
+
+    def test_agent_runtime_reads_current_job_validation_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                inventory_payload = {
+                    "kind": "input_inventory",
+                    "inventory": {
+                        "entries": ["index.html"],
+                        "scripts": ["assets/app.js"],
+                        "styles": [],
+                        "sourceMaps": [],
+                        "manifests": [],
+                        "isSingleBundle": False,
+                        "warnings": [],
+                    },
+                }
+                ast_index_payload = {
+                    "kind": "ast_index",
+                    "detectedRuntime": ["vite_or_rollup"],
+                    "astIndexes": [
+                        {
+                            "filePath": "assets/app.js",
+                            "imports": [],
+                            "exports": ["boot"],
+                            "symbols": [{"name": "boot", "kind": "function"}],
+                            "warnings": [],
+                        }
+                    ],
+                }
+                inventory_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="input_inventory",
+                    stage="intake",
+                    filename="input-inventory.json",
+                    payload=inventory_payload,
+                )
+                ast_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="ast_index",
+                    stage="indexing",
+                    filename="ast-index.json",
+                    payload=ast_index_payload,
+                )
+                build_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="build_artifact",
+                    stage="building",
+                    filename="build-artifact.json",
+                    payload={
+                        "kind": "build_artifact",
+                        "reviewType": "build",
+                        "status": "fail",
+                        "failureClass": "build_error",
+                        "decision": "Build failed because package.json lacked a safe build script.",
+                        "attempt": 0,
+                    },
+                )
+                runtime_trace_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="runtime_trace",
+                    stage="runtime_smoke",
+                    filename="runtime-trace.json",
+                    payload={
+                        "kind": "runtime_trace",
+                        "target": "reconstructed",
+                        "status": "best_effort",
+                        "failureClass": "runtime_error",
+                        "consoleErrors": ["ReferenceError: process is not defined"],
+                        "pageErrors": [],
+                        "failedRequests": [],
+                        "attempt": 0,
+                        "executionBoundary": {"runnerKind": "remote_browser_runner"},
+                    },
+                )
+                review_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="review_run",
+                    stage="reviewing",
+                    filename="runtime-review.json",
+                    payload={
+                        "kind": "review_run",
+                        "reviewType": "runtime_compare",
+                        "status": "fail",
+                        "failureClass": "runtime_error",
+                        "decision": "Runtime compare still differs after initial reconstruction.",
+                        "attempt": 0,
+                    },
+                )
+                repair_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="runtime-repair.json",
+                    payload={
+                        "kind": "repair_instruction",
+                        "targetStage": "runtime_compare",
+                        "status": "planned",
+                        "riskLevel": "low",
+                        "failureClass": "runtime_error",
+                        "decision": "Mirror original static entry for runtime compare retry.",
+                        "attempt": 1,
+                    },
+                )
+                request = AgentRuntimeRequest(
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    cloud_mode=job.cloud_mode,
+                    job_config=job.config,
+                    inventory_artifact_id=inventory_artifact.id,
+                    ast_index_artifact_id=ast_artifact.id,
+                    inventory_payload=inventory_payload,
+                    ast_index_payload=ast_index_payload,
+                )
+
+                result = AgentRuntime().run(job_id=job.id, store=store, request=request)
+                knowledge_payload = json.loads(store.read_artifact(job.id, result.knowledge_artifact.id))
+                hit_by_id = {hit["id"]: hit for hit in knowledge_payload["hits"]}
+                source_kinds = {
+                    source["kind"]
+                    for source in knowledge_payload["retrievalSources"]["currentJobArtifacts"]
+                }
+
+                self.assertIn("knowledge_validation_build_build_build_error", hit_by_id)
+                self.assertIn("knowledge_browser_shim_runtime_boundary_remote_browser_runner", hit_by_id)
+                self.assertIn("knowledge_validation_runtime_trace_reconstructed_runtime_error", hit_by_id)
+                self.assertIn("knowledge_review_feedback_runtime_compare_runtime_error", hit_by_id)
+                self.assertIn("knowledge_repair_case_runtime_compare_low", hit_by_id)
+                self.assertEqual(
+                    hit_by_id["knowledge_repair_case_runtime_compare_low"]["sourceArtifactIds"],
+                    [repair_artifact.id],
+                )
+                self.assertEqual(
+                    hit_by_id["knowledge_validation_build_build_build_error"]["sourceArtifactIds"],
+                    [build_artifact.id],
+                )
+                self.assertEqual(
+                    hit_by_id["knowledge_browser_shim_runtime_boundary_remote_browser_runner"]["sourceArtifactIds"],
+                    [runtime_trace_artifact.id],
+                )
+                self.assertIn(review_artifact.id, hit_by_id["knowledge_review_feedback_runtime_compare_runtime_error"]["sourceArtifactIds"])
+                self.assertTrue(
+                    {"build_artifact", "runtime_trace", "review_run", "repair_instruction"}.issubset(source_kinds)
+                )
+                self.assertFalse(knowledge_payload["retrievalSources"]["crossJobHistory"])
+            finally:
+                store.close()
+
+    def _write_json_artifact(self, *, store, job_id: str, kind: str, stage: str, filename: str, payload: dict):
+        return store.write_artifact(
+            job_id,
+            kind=kind,  # type: ignore[arg-type]
+            stage=stage,  # type: ignore[arg-type]
+            filename=filename,
+            content=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            content_type="application/json",
+            producer="tests.agent_runtime",
+        )
 
 
 if __name__ == "__main__":

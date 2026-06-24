@@ -29,7 +29,7 @@ from apps.api.app.models import (
     ToolRegistryEntry,
     ReportSection,
 )
-from packages.knowledge import KnowledgeHit, StaticKnowledgeRetriever
+from packages.knowledge import POST_CORE_KINDS, KnowledgeHit, StaticKnowledgeRetriever
 from packages.memory import JobMemoryContext, JobMemoryService
 
 
@@ -1005,6 +1005,7 @@ class AgentRuntime:
         started_at = time.perf_counter()
         try:
             store.update_status(job_id, "agent_planning")
+            prior_artifact_payloads = self._current_job_artifact_payloads(job_id=job_id, store=store)
             memory_context = self.memory_service.create_context(
                 job_id=job_id,
                 project_id=request.project_id,
@@ -1033,12 +1034,14 @@ class AgentRuntime:
             knowledge_hits = self.knowledge_retriever.retrieve(
                 inventory_payload=request.inventory_payload,
                 ast_index_payload=request.ast_index_payload,
+                prior_artifact_payloads=prior_artifact_payloads,
             )
             knowledge_artifact = self._write_knowledge_artifact(
                 job_id=job_id,
                 store=store,
                 hits=knowledge_hits,
                 parent_artifact_ids=[*request.input_artifact_ids, *memory_artifact_ids, tool_registry_artifact.id],
+                prior_artifact_payloads=prior_artifact_payloads,
             )
             evidence_refs = self._evidence_refs(
                 request=request,
@@ -1371,10 +1374,21 @@ class AgentRuntime:
                 tool_version="0.1.0",
                 category="knowledge",
                 caller="AgentRuntime",
-                input_artifact_kinds=["input_inventory", "ast_index", "memory_record"],
+                input_artifact_kinds=[
+                    "input_inventory",
+                    "ast_index",
+                    "memory_record",
+                    "build_artifact",
+                    "build_log",
+                    "runtime_trace",
+                    "runtime_validation",
+                    "runtime_comparison",
+                    "review_run",
+                    "repair_instruction",
+                ],
                 output_artifact_kinds=["knowledge_evidence"],
                 failure_classes=["none", "unknown"],
-                description="Retrieves static build, framework, runtime, and reconstruction evidence hints.",
+                description="Retrieves static build, framework, runtime, repair, and current-job validation evidence hints.",
             ),
         ]
 
@@ -1385,11 +1399,13 @@ class AgentRuntime:
         store,
         hits: list[KnowledgeHit],
         parent_artifact_ids: list[str],
+        prior_artifact_payloads: list[dict[str, Any]] | None = None,
     ) -> ArtifactRecord:
         payload = self.knowledge_retriever.artifact_payload(
             job_id=job_id,
             input_artifact_ids=parent_artifact_ids,
             hits=hits,
+            prior_artifact_payloads=prior_artifact_payloads,
         )
         return store.write_artifact(
             job_id,
@@ -1401,6 +1417,21 @@ class AgentRuntime:
             producer="worker.knowledge",
             parent_artifact_ids=parent_artifact_ids,
         )
+
+    def _current_job_artifact_payloads(self, *, job_id: str, store) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for artifact in store.list_artifacts(job_id):
+            if artifact.kind not in POST_CORE_KINDS:
+                continue
+            try:
+                payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                payload.setdefault("artifactId", artifact.id)
+                payload.setdefault("kind", artifact.kind)
+                payloads.append(payload)
+        return payloads
 
     def _evidence_refs(
         self,
