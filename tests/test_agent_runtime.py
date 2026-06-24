@@ -194,6 +194,218 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(artifact_payload["retrievalSources"]["core"], ["input_inventory", "ast_index"])
         self.assertFalse(artifact_payload["retrievalSources"]["currentJobArtifacts"])
 
+    def test_static_knowledge_retriever_includes_historical_project_repair_cases(self):
+        retriever = StaticKnowledgeRetriever()
+        historical_hits = retriever.retrieve(
+            inventory_payload={"kind": "input_inventory", "inventory": {"entries": [], "scripts": []}},
+            ast_index_payload={"kind": "ast_index", "astIndexes": []},
+            historical_artifact_payloads=[
+                {
+                    "kind": "repair_instruction",
+                    "artifactId": "artifact_history_repair",
+                    "jobId": "job_history",
+                    "projectId": "proj",
+                    "targetStage": "runtime_compare",
+                    "status": "planned",
+                    "riskLevel": "low",
+                    "failureClass": "runtime_error",
+                    "decision": "Mirror the original static entry.",
+                },
+                {
+                    "kind": "review_run",
+                    "artifactId": "artifact_history_review",
+                    "jobId": "job_history",
+                    "projectId": "proj",
+                    "reviewType": "runtime_compare",
+                    "status": "fail",
+                    "failureClass": "runtime_error",
+                    "decision": "Runtime compare still differs.",
+                },
+            ],
+        )
+        hit_ids = {hit.id for hit in historical_hits}
+        artifact_payload = retriever.artifact_payload(
+            job_id="job_knowledge",
+            input_artifact_ids=["artifact_inventory", "artifact_ast"],
+            hits=historical_hits,
+            historical_artifact_payloads=[
+                {
+                    "kind": "repair_instruction",
+                    "artifactId": "artifact_history_repair",
+                    "jobId": "job_history",
+                    "projectId": "proj",
+                    "targetStage": "runtime_compare",
+                    "status": "planned",
+                    "riskLevel": "low",
+                    "failureClass": "runtime_error",
+                    "decision": "Mirror the original static entry.",
+                }
+            ],
+        )
+
+        self.assertIn("knowledge_historical_repair_case_runtime_compare_low_artifact_history_repair", hit_ids)
+        self.assertIn("knowledge_historical_review_feedback_runtime_compare_runtime_error_artifact_history_review", hit_ids)
+        self.assertTrue(artifact_payload["retrievalSources"]["crossJobHistory"])
+        self.assertTrue(artifact_payload["retrievalSources"]["historicalProjectArtifacts"])
+        self.assertEqual(
+            {item["artifactId"] for item in artifact_payload["retrievalSources"]["historicalProjectArtifacts"]},
+            {"artifact_history_repair"},
+        )
+
+    def test_agent_runtime_reads_same_project_historical_repair_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                project_id = "proj"
+                other_project_id = "other-proj"
+                historical_job = store.create_job(CreateJobRequest(project_id=project_id, owner_id="owner"))
+                other_job = store.create_job(CreateJobRequest(project_id=other_project_id, owner_id="owner"))
+                job = store.create_job(CreateJobRequest(project_id=project_id, owner_id="owner"))
+                inventory_payload = {
+                    "kind": "input_inventory",
+                    "inventory": {
+                        "entries": ["index.html"],
+                        "scripts": ["assets/app.js"],
+                        "styles": [],
+                        "sourceMaps": [],
+                        "manifests": [],
+                        "isSingleBundle": False,
+                        "warnings": [],
+                    },
+                }
+                ast_index_payload = {
+                    "kind": "ast_index",
+                    "detectedRuntime": ["vite_or_rollup"],
+                    "astIndexes": [
+                        {
+                            "filePath": "assets/app.js",
+                            "imports": [],
+                            "exports": ["boot"],
+                            "symbols": [{"name": "boot", "kind": "function"}],
+                            "warnings": [],
+                        }
+                    ],
+                }
+                inventory_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="input_inventory",
+                    stage="intake",
+                    filename="input-inventory.json",
+                    payload=inventory_payload,
+                )
+                ast_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="ast_index",
+                    stage="indexing",
+                    filename="ast-index.json",
+                    payload=ast_index_payload,
+                )
+                historical_repair = self._write_json_artifact(
+                    store=store,
+                    job_id=historical_job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="history-repair.json",
+                    payload={
+                        "kind": "repair_instruction",
+                        "targetStage": "runtime_compare",
+                        "status": "planned",
+                        "riskLevel": "low",
+                        "failureClass": "runtime_error",
+                        "decision": "Mirror the original static entry.",
+                        "attempt": 0,
+                    },
+                )
+                historical_review = self._write_json_artifact(
+                    store=store,
+                    job_id=historical_job.id,
+                    kind="review_run",
+                    stage="reviewing",
+                    filename="history-review.json",
+                    payload={
+                        "kind": "review_run",
+                        "reviewType": "runtime_compare",
+                        "status": "fail",
+                        "failureClass": "runtime_error",
+                        "decision": "Runtime compare still differs.",
+                        "attempt": 0,
+                    },
+                )
+                _ = self._write_json_artifact(
+                    store=store,
+                    job_id=other_job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="other-repair.json",
+                    payload={
+                        "kind": "repair_instruction",
+                        "targetStage": "runtime_compare",
+                        "status": "planned",
+                        "riskLevel": "low",
+                        "failureClass": "runtime_error",
+                        "decision": "Do not leak me.",
+                        "attempt": 0,
+                    },
+                )
+                request = AgentRuntimeRequest(
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    cloud_mode=job.cloud_mode,
+                    job_config=job.config,
+                    inventory_artifact_id=inventory_artifact.id,
+                    ast_index_artifact_id=ast_artifact.id,
+                    inventory_payload=inventory_payload,
+                    ast_index_payload=ast_index_payload,
+                )
+
+                result = AgentRuntime().run(job_id=job.id, store=store, request=request)
+                knowledge_payload = json.loads(store.read_artifact(job.id, result.knowledge_artifact.id))
+                hit_by_id = {hit["id"]: hit for hit in knowledge_payload["hits"]}
+                retrieval_sources = knowledge_payload["retrievalSources"]
+                evidence_refs = [
+                    ref for ref in json.loads(store.read_artifact(job.id, result.plan_artifact.id))["evidenceRefs"]
+                    if ref["locator"].startswith("knowledge:")
+                ]
+
+                self.assertTrue(
+                    any(hit_id.startswith("knowledge_historical_repair_case_runtime_compare_low_") for hit_id in hit_by_id)
+                )
+                self.assertTrue(
+                    any(hit_id.startswith("knowledge_historical_review_feedback_runtime_compare_runtime_error_") for hit_id in hit_by_id)
+                )
+                self.assertTrue(retrieval_sources["crossJobHistory"])
+                self.assertTrue(
+                    any(
+                        item["jobId"] == historical_job.id
+                        for item in retrieval_sources["historicalProjectArtifacts"]
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        item.get("jobId") == other_job.id
+                        for item in retrieval_sources["historicalProjectArtifacts"]
+                    )
+                )
+                self.assertGreaterEqual(retrieval_sources["historicalProjectArtifacts"][0]["attempt"], 0)
+                self.assertEqual(
+                    {item["jobId"] for item in retrieval_sources["historicalProjectArtifacts"]},
+                    {historical_job.id},
+                )
+                self.assertTrue(
+                    any(
+                        ref["locator"].startswith("knowledge:repair_case/historical/")
+                        for ref in evidence_refs
+                    )
+                )
+            finally:
+                store.close()
+
     def test_agent_runtime_reads_current_job_validation_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

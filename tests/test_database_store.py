@@ -191,6 +191,68 @@ class DatabaseStoreTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_list_project_artifact_payloads_scopes_by_project_and_excludes_current_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                current_job = store.create_job(CreateJobRequest(project_id="proj-a", owner_id="owner"))
+                historical_job = store.create_job(CreateJobRequest(project_id="proj-a", owner_id="owner"))
+                other_project_job = store.create_job(CreateJobRequest(project_id="proj-b", owner_id="owner"))
+
+                current_repair = store.write_artifact(
+                    current_job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="current-repair.json",
+                    content=b'{"kind":"repair_instruction","status":"planned"}',
+                    content_type="application/json",
+                    producer="test.database_store",
+                )
+                historical_repair = store.write_artifact(
+                    historical_job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="historical-repair.json",
+                    content=b'{"kind":"repair_instruction","status":"planned"}',
+                    content_type="application/json",
+                    producer="test.database_store",
+                )
+                historical_review = store.write_artifact(
+                    historical_job.id,
+                    kind="review_run",
+                    stage="reviewing",
+                    filename="historical-review.json",
+                    content=b'{"kind":"review_run","status":"fail"}',
+                    content_type="application/json",
+                    producer="test.database_store",
+                )
+                store.write_artifact(
+                    other_project_job.id,
+                    kind="repair_instruction",
+                    stage="repairing",
+                    filename="other-repair.json",
+                    content=b'{"kind":"repair_instruction","status":"planned"}',
+                    content_type="application/json",
+                    producer="test.database_store",
+                )
+
+                payloads = store.list_project_artifact_payloads(
+                    project_id="proj-a",
+                    kinds=("repair_instruction", "review_run"),
+                    exclude_job_id=current_job.id,
+                )
+                artifact_ids = {payload["artifactId"] for payload in payloads}
+
+                self.assertEqual(artifact_ids, {historical_repair.id, historical_review.id})
+                self.assertTrue(all(payload["projectId"] == "proj-a" for payload in payloads))
+                self.assertNotIn(current_repair.id, artifact_ids)
+            finally:
+                store.close()
+
     def test_worker_queue_requeues_expired_leases_until_attempt_limit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

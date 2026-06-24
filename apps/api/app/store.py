@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -470,6 +471,49 @@ class DatabaseStore:
             status = str(row[0])
             counts[status] = counts.get(status, 0) + 1
         return counts
+
+    def list_project_artifact_payloads(
+        self,
+        *,
+        project_id: str,
+        kinds: tuple[str, ...] | None = None,
+        exclude_job_id: str | None = None,
+        include_deleted: bool = False,
+        limit: int | None = 12,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        query = select(artifacts_table).join(jobs_table, artifacts_table.c.job_id == jobs_table.c.id)
+        query = query.where(jobs_table.c.project_id == project_id)
+        if not include_deleted:
+            query = query.where(artifacts_table.c.deleted_at.is_(None))
+        if exclude_job_id is not None:
+            query = query.where(jobs_table.c.id != exclude_job_id)
+        if kinds:
+            query = query.where(artifacts_table.c.kind.in_(kinds))
+        query = query.order_by(
+            jobs_table.c.created_at.desc(),
+            artifacts_table.c.created_at.desc(),
+            artifacts_table.c.id.desc(),
+        )
+        if limit is not None:
+            query = query.limit(max(0, limit))
+        with self.engine.begin() as connection:
+            rows = connection.execute(query).mappings().all()
+
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            artifact = self._artifact_from_row(row)
+            try:
+                payload = json.loads(self.read_artifact_record(artifact).decode("utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                payload.setdefault("artifactId", artifact.id)
+                payload.setdefault("jobId", artifact.job_id)
+                payload.setdefault("projectId", project_id)
+                payload.setdefault("kind", artifact.kind)
+                payloads.append(payload)
+        return payloads
 
     def list_artifacts(
         self,

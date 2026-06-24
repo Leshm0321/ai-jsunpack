@@ -28,7 +28,7 @@ class KnowledgeHit:
 
 
 class StaticKnowledgeRetriever:
-    """Deterministic knowledge retrieval for Core and current-job validation evidence."""
+    """Deterministic knowledge retrieval for Core, current-job, and same-project historical evidence."""
 
     def retrieve(
         self,
@@ -36,11 +36,13 @@ class StaticKnowledgeRetriever:
         inventory_payload: dict[str, Any],
         ast_index_payload: dict[str, Any],
         prior_artifact_payloads: list[dict[str, Any]] | None = None,
+        historical_artifact_payloads: list[dict[str, Any]] | None = None,
     ) -> list[KnowledgeHit]:
         inventory = self._mapping(inventory_payload.get("inventory"))
         ast_indexes = self._list(ast_index_payload.get("astIndexes"))
         detected_runtime = self._string_list(ast_index_payload.get("detectedRuntime"))
         prior_payloads = [payload for payload in (prior_artifact_payloads or []) if isinstance(payload, dict)]
+        historical_payloads = [payload for payload in (historical_artifact_payloads or []) if isinstance(payload, dict)]
 
         hits: list[KnowledgeHit] = []
         self._extend_core_hits(
@@ -53,6 +55,7 @@ class StaticKnowledgeRetriever:
         self._extend_obfuscation_hits(hits=hits, inventory=inventory, ast_indexes=ast_indexes)
         self._extend_browser_shim_hits(hits=hits, inventory=inventory, ast_indexes=ast_indexes)
         self._extend_prior_evidence_hits(hits=hits, payloads=prior_payloads)
+        self._extend_historical_repair_hits(hits=hits, payloads=historical_payloads)
 
         if not hits:
             hits.append(
@@ -75,13 +78,15 @@ class StaticKnowledgeRetriever:
         input_artifact_ids: list[str],
         hits: list[KnowledgeHit],
         prior_artifact_payloads: list[dict[str, Any]] | None = None,
+        historical_artifact_payloads: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         prior_payloads = [payload for payload in (prior_artifact_payloads or []) if isinstance(payload, dict)]
+        historical_payloads = [payload for payload in (historical_artifact_payloads or []) if isinstance(payload, dict)]
         return {
             "kind": "knowledge_evidence",
             "jobId": job_id,
             "inputArtifactIds": input_artifact_ids,
-            "retrievalSources": self._retrieval_sources(prior_payloads),
+            "retrievalSources": self._retrieval_sources(prior_payloads, historical_payloads),
             "hits": [
                 {
                     "id": hit.id,
@@ -96,10 +101,10 @@ class StaticKnowledgeRetriever:
                 for hit in hits
             ],
             "limitations": [
-                "Retriever emits deterministic local knowledge hints from Core evidence and current-job artifacts only.",
+                "Retriever emits deterministic local knowledge hints from Core, current-job, and same-project historical artifacts.",
                 "Current-job validation and repair artifacts are used only when they already exist before Agent planning.",
+                "Historical repair cases are limited to same-project evidence and remain evidence references only.",
                 "Knowledge hits are evidence references and do not override current input artifacts.",
-                "Cross-job historical repair case retrieval is not enabled in this pass.",
             ],
         }
 
@@ -512,7 +517,68 @@ class StaticKnowledgeRetriever:
                     )
                 )
 
-    def _retrieval_sources(self, prior_payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    def _extend_historical_repair_hits(self, *, hits: list[KnowledgeHit], payloads: list[dict[str, Any]]) -> None:
+        for payload in payloads:
+            kind = str(payload.get("kind") or "")
+            artifact_id = self._artifact_id(payload)
+            source_artifact_ids = [artifact_id] if artifact_id else []
+            if kind == "repair_instruction":
+                target_stage = str(payload.get("targetStage") or "repair")
+                risk = str(payload.get("riskLevel") or "unknown")
+                decision = self._excerpt(payload, fallback="Historical repair case available for evidence reference only.")
+                slug = self._slug(f"{target_stage}_{risk}_{artifact_id or 'historical'}") or "historical_repair_case"
+                hits.append(
+                    KnowledgeHit(
+                        id=f"knowledge_historical_repair_case_{slug}",
+                        category="historical_repair_case",
+                        label=f"Historical repair case: {target_stage}",
+                        locator=f"knowledge:repair_case/historical/{slug}",
+                        excerpt=decision,
+                        confidence=0.66 if risk == "low" else 0.58,
+                        source_artifact_ids=source_artifact_ids,
+                        source_kinds=[kind],
+                    )
+                )
+            elif kind == "review_run":
+                review_type = str(payload.get("reviewType") or "review")
+                failure_class = str(payload.get("failureClass") or "none")
+                status = str(payload.get("status") or "")
+                if status in {"fail", "retry", "best_effort"}:
+                    slug = self._slug(f"{review_type}_{failure_class}_{artifact_id or 'historical'}") or "historical_review"
+                    hits.append(
+                        KnowledgeHit(
+                            id=f"knowledge_historical_review_feedback_{slug}",
+                            category="historical_validation_feedback",
+                            label=f"Historical review feedback: {review_type}",
+                            locator=f"knowledge:validation_feedback/historical_review/{slug}",
+                            excerpt=self._excerpt(
+                                payload,
+                                fallback="Historical review evidence is evidence-only and same-project scoped.",
+                            ),
+                            confidence=0.62,
+                            source_artifact_ids=source_artifact_ids,
+                            source_kinds=[kind],
+                        )
+                    )
+            elif kind == "runtime_comparison":
+                status = str(payload.get("status") or "")
+                if status in {"fail", "retry", "best_effort"}:
+                    failure_class = str(payload.get("failureClass") or "unknown")
+                    slug = self._slug(f"{status}_{failure_class}_{artifact_id or 'historical'}") or "historical_runtime_compare"
+                    hits.append(
+                        KnowledgeHit(
+                            id=f"knowledge_historical_runtime_comparison_{slug}",
+                            category="historical_validation_feedback",
+                            label="Historical runtime comparison feedback",
+                            locator=f"knowledge:validation_feedback/historical_runtime_compare/{slug}",
+                            excerpt="Historical runtime comparison differences are evidence-only and same-project scoped.",
+                            confidence=0.64,
+                            source_artifact_ids=source_artifact_ids,
+                            source_kinds=[kind],
+                        )
+                    )
+
+    def _retrieval_sources(self, prior_payloads: list[dict[str, Any]], historical_payloads: list[dict[str, Any]]) -> dict[str, Any]:
         post_core_sources = [
             {
                 "artifactId": self._artifact_id(payload),
@@ -524,10 +590,23 @@ class StaticKnowledgeRetriever:
             for payload in prior_payloads
             if str(payload.get("kind") or "") in POST_CORE_KINDS
         ]
+        historical_sources = [
+            {
+                "artifactId": self._artifact_id(payload),
+                "kind": str(payload.get("kind") or "unknown"),
+                "jobId": payload.get("jobId"),
+                "status": payload.get("status"),
+                "failureClass": payload.get("failureClass"),
+                "attempt": payload.get("attempt"),
+            }
+            for payload in historical_payloads
+            if str(payload.get("kind") or "") in {"repair_instruction", "review_run", "runtime_comparison"}
+        ]
         return {
             "core": ["input_inventory", "ast_index"],
             "currentJobArtifacts": post_core_sources,
-            "crossJobHistory": False,
+            "historicalProjectArtifacts": historical_sources,
+            "crossJobHistory": bool(historical_sources),
         }
 
     def _dedupe_hits(self, hits: list[KnowledgeHit]) -> list[KnowledgeHit]:

@@ -945,6 +945,11 @@ class CrewAIAgentProvider:
     def _feedback_refinement(self, *, knowledge_hits: list[KnowledgeHit]) -> AgentFeedbackRefinement:
         validation_hits = [hit for hit in knowledge_hits if hit.category == "validation_feedback"]
         repair_hits = [hit for hit in knowledge_hits if hit.category == "repair_case"]
+        historical_hits = [
+            hit
+            for hit in knowledge_hits
+            if hit.category in {"historical_repair_case", "historical_validation_feedback"}
+        ]
         low_risk_repair_hits: list[tuple[KnowledgeHit, list[RepairAction]]] = []
         for hit in repair_hits:
             if self._repair_risk(hit) != "low":
@@ -1000,13 +1005,14 @@ class CrewAIAgentProvider:
             )
         return AgentFeedbackRefinement(
             plan_payload={
-                "source": "current_job_knowledge_evidence",
+                "source": "current_job_and_historical_project_knowledge_evidence",
                 "validationFeedbackCount": len(validation_hits),
                 "lowRiskRepairCount": len(low_risk_repair_hits),
                 "auditOnlyRepairCount": len(audit_only_repair_hits),
+                "historicalEvidenceCount": len(historical_hits),
                 "targetStages": sorted({self._target_stage_for_hit(hit) for hit in [*validation_hits, *repair_hits]}),
                 "consumptionPolicy": "Only low-risk repair_instruction actions are eligible for deterministic writer or repair-runner consumption.",
-                "crossJobHistory": False,
+                "crossJobHistory": bool(historical_hits),
             },
             inferences=inferences,
             runtime_diagnoses=runtime_diagnoses,
@@ -1166,7 +1172,7 @@ class CrewAIAgentProvider:
                 confidence=max(0, min(1, hit.confidence)),
                 uncertainty_reasons=[
                     "Diagnosis is derived from current-job Review/Fix feedback.",
-                    "Cross-job historical repair retrieval is not included in this pass.",
+                    "Historical repair evidence remains same-project scoped and evidence-only.",
                 ],
             )
             for hit in validation_hits[:4]
@@ -1201,7 +1207,7 @@ class CrewAIAgentProvider:
                 confidence=0.72 if low_risk_repair_hits else 0.58,
                 uncertainty_reasons=[
                     "Feedback comes from current-job evidence only.",
-                    "Cross-job historical repair case retrieval remains out of scope for this pass.",
+                    "Historical repair case retrieval remains evidence-only and same-project scoped.",
                 ],
                 agent_name="ReviewAgent",
             )
@@ -1363,6 +1369,18 @@ class AgentRuntime:
         try:
             store.update_status(job_id, "agent_planning")
             prior_artifact_payloads = self._current_job_artifact_payloads(job_id=job_id, store=store)
+            historical_artifact_payloads = self._historical_project_artifact_payloads(
+                job_id=job_id,
+                project_id=request.project_id,
+                store=store,
+            )
+            historical_artifact_ids = [
+                artifact_id
+                for artifact_id in (
+                    payload.get("artifactId") for payload in historical_artifact_payloads
+                )
+                if isinstance(artifact_id, str) and artifact_id
+            ]
             memory_context = self.memory_service.create_context(
                 job_id=job_id,
                 project_id=request.project_id,
@@ -1392,13 +1410,20 @@ class AgentRuntime:
                 inventory_payload=request.inventory_payload,
                 ast_index_payload=request.ast_index_payload,
                 prior_artifact_payloads=prior_artifact_payloads,
+                historical_artifact_payloads=historical_artifact_payloads,
             )
             knowledge_artifact = self._write_knowledge_artifact(
                 job_id=job_id,
                 store=store,
                 hits=knowledge_hits,
-                parent_artifact_ids=[*request.input_artifact_ids, *memory_artifact_ids, tool_registry_artifact.id],
+                parent_artifact_ids=[
+                    *request.input_artifact_ids,
+                    *memory_artifact_ids,
+                    tool_registry_artifact.id,
+                    *historical_artifact_ids,
+                ],
                 prior_artifact_payloads=prior_artifact_payloads,
+                historical_artifact_payloads=historical_artifact_payloads,
             )
             evidence_refs = self._evidence_refs(
                 request=request,
@@ -1745,7 +1770,7 @@ class AgentRuntime:
                 ],
                 output_artifact_kinds=["knowledge_evidence"],
                 failure_classes=["none", "unknown"],
-                description="Retrieves static build, framework, runtime, repair, and current-job validation evidence hints.",
+                description="Retrieves static build, framework, runtime, repair, current-job validation, and same-project historical evidence hints.",
             ),
         ]
 
@@ -1757,12 +1782,14 @@ class AgentRuntime:
         hits: list[KnowledgeHit],
         parent_artifact_ids: list[str],
         prior_artifact_payloads: list[dict[str, Any]] | None = None,
+        historical_artifact_payloads: list[dict[str, Any]] | None = None,
     ) -> ArtifactRecord:
         payload = self.knowledge_retriever.artifact_payload(
             job_id=job_id,
             input_artifact_ids=parent_artifact_ids,
             hits=hits,
             prior_artifact_payloads=prior_artifact_payloads,
+            historical_artifact_payloads=historical_artifact_payloads,
         )
         return store.write_artifact(
             job_id,
@@ -1789,6 +1816,20 @@ class AgentRuntime:
                 payload.setdefault("kind", artifact.kind)
                 payloads.append(payload)
         return payloads
+
+    def _historical_project_artifact_payloads(
+        self,
+        *,
+        job_id: str,
+        project_id: str,
+        store,
+    ) -> list[dict[str, Any]]:
+        return store.list_project_artifact_payloads(
+            project_id=project_id,
+            kinds=("repair_instruction", "review_run", "runtime_comparison"),
+            exclude_job_id=job_id,
+            limit=12,
+        )
 
     def _evidence_refs(
         self,
