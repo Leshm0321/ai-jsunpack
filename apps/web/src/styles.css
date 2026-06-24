@@ -1191,6 +1191,42 @@ button.graph-node:focus-visible {
   grid-column: 2;
 }
 
+.report-section-detail-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.report-section-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.report-section-detail-row > div {
+  min-width: 0;
+}
+
+.report-section-detail-row > div span,
+.report-section-detail-row > div strong,
+.report-section-detail-row > div small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.report-section-detail-row > div span {
+  margin-top: 0;
+}
+
+.report-section-detail-row > div strong {
+  margin-top: 3px;
+}
+
 .report-overflow-note {
   display: inline-flex;
   align-items: center;
@@ -1996,6 +2032,10 @@ button.graph-node:focus-visible {
 
   .report-section-row .evidence-link-group {
     grid-column: auto;
+  }
+
+  .report-section-detail-row {
+    grid-template-columns: 1fr;
   }
 
   .audit-row {

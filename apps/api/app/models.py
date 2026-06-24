@@ -661,6 +661,13 @@ class RuntimeDiagnosis(ContractModel):
     uncertainty_reasons: list[str]
 
 
+class ReportSectionDetail(ContractModel):
+    label: str
+    value: str
+    status: RunStatus = "best_effort"
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReportSection(ContractModel):
     id: str
     job_id: str
@@ -674,6 +681,7 @@ class ReportSection(ContractModel):
     status: RunStatus
     confidence: float = Field(ge=0, le=1)
     uncertainty_reasons: list[str]
+    details: list[ReportSectionDetail] = Field(default_factory=list)
 
 
 class RetentionCleanupRequest(ContractModel):

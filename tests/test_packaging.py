@@ -102,6 +102,74 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="image/png",
                     producer="test",
                 )
+                runtime_scenario = store.write_artifact(
+                    job.id,
+                    kind="runtime_scenario",
+                    stage="runtime_compare",
+                    filename="runtime-scenario.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_scenario",
+                            "jobId": job.id,
+                            "name": "default-load",
+                            "entry": "index.html",
+                            "networkPolicy": "deny",
+                            "timeoutMs": 2500,
+                            "viewport": {"name": "desktop", "width": 1280, "height": 720},
+                            "waitForSelector": "#app",
+                            "interactions": [],
+                            "assertions": [],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
+                runtime_comparison = store.write_artifact(
+                    job.id,
+                    kind="runtime_comparison",
+                    stage="runtime_compare",
+                    filename="runtime-comparison.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_comparison",
+                            "jobId": job.id,
+                            "attempt": 2,
+                            "scenarioArtifactId": runtime_scenario.id,
+                            "status": "fail",
+                            "differences": {
+                                "comparisonScope": {
+                                    "scenarioName": "default-load",
+                                    "networkPolicy": "deny",
+                                    "timeoutMs": 2500,
+                                    "viewport": {"name": "desktop", "width": 1280, "height": 720},
+                                },
+                                "domDifferences": [
+                                    {"path": "html/body[1]/div[1]", "summary": "text changed"}
+                                ],
+                                "networkDiff": {
+                                    "changed": True,
+                                    "originalCount": 3,
+                                    "reconstructedCount": 4,
+                                    "originalOnly": ["/api/a"],
+                                    "reconstructedOnly": ["/api/b"],
+                                    "groups": {"api": ["/api/a", "/api/b"]},
+                                },
+                                "consoleDiff": {
+                                    "changed": True,
+                                    "originalCount": 1,
+                                    "reconstructedCount": 2,
+                                    "originalOnly": ["warn:old"],
+                                    "reconstructedOnly": ["warn:new"],
+                                    "groups": {"warn": ["warn:old", "warn:new"]},
+                                },
+                            },
+                            "traceArtifactIds": [runtime_trace.id],
+                            "screenshotArtifactIds": [],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
                 review_run = store.write_artifact(
                     job.id,
                     kind="review_run",
@@ -180,7 +248,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 attachments = {item["artifactId"]: item for item in evidence_index["attachments"]}
 
                 self.assertEqual(evidence_index["includedCount"], 1)
-                self.assertEqual(evidence_index["omittedCount"], 2)
+                self.assertEqual(evidence_index["omittedCount"], 4)
                 package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
                 self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "runtime_error")
@@ -210,6 +278,17 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"artifact://{memory_record.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{tool_registry.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
+                runtime_compare_section = report_sections["runtime-compare-difference-summary"]
+                self.assertTrue(runtime_compare_section["details"])
+                runtime_compare_detail = runtime_compare_section["details"][0]
+                self.assertEqual(runtime_compare_detail["label"], "Runtime compare scope")
+                self.assertEqual(runtime_compare_detail["status"], "fail")
+                self.assertIn("default-load", runtime_compare_detail["value"])
+                self.assertEqual(runtime_compare_detail["details"]["comparisonScope"]["scenarioName"], "default-load")
+                self.assertEqual(runtime_compare_detail["details"]["domDifferences"][0]["path"], "html/body[1]/div[1]")
+                self.assertEqual(runtime_compare_detail["details"]["networkDiff"]["groups"], ["api"])
+                self.assertEqual(runtime_compare_detail["details"]["consoleDiff"]["groups"], ["warn"])
+                self.assertIn(f"artifact://{runtime_comparison.id}", runtime_compare_detail["details"]["evidenceLinks"])
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
@@ -472,12 +551,55 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                runtime_scenario = store.write_artifact(
+                    job.id,
+                    kind="runtime_scenario",
+                    stage="runtime_compare",
+                    filename="scenario.json",
+                    content=b'{"kind":"runtime_scenario","name":"object-scenario"}',
+                    content_type="application/json",
+                    producer="test",
+                )
+                runtime_comparison = store.write_artifact(
+                    job.id,
+                    kind="runtime_comparison",
+                    stage="runtime_compare",
+                    filename="comparison.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_comparison",
+                            "jobId": job.id,
+                            "attempt": 0,
+                            "scenarioArtifactId": runtime_scenario.id,
+                            "status": "fail",
+                            "differences": {
+                                "comparisonScope": {
+                                    "scenarioName": "object-scenario",
+                                    "networkPolicy": "deny",
+                                    "timeoutMs": 1000,
+                                    "viewport": {"name": "mobile", "width": 390, "height": 844},
+                                },
+                                "domDifferences": [{"path": "title", "summary": "title changed"}],
+                                "networkDiff": {"changed": False, "originalCount": 1, "reconstructedCount": 1},
+                                "consoleDiff": {"changed": False, "originalCount": 0, "reconstructedCount": 0},
+                            },
+                            "traceArtifactIds": [runtime_trace.id],
+                            "screenshotArtifactIds": [],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(store.read_artifact_record(result.evidence_index_artifact).decode("utf-8"))
                 package_bytes = store.read_artifact_record(result.result_package_artifact)
+                report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
+                runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
 
                 self.assertTrue(evidence_index["attachments"][0]["included"])
+                self.assertEqual(runtime_details[0]["details"]["comparisonArtifactId"], runtime_comparison.id)
+                self.assertEqual(runtime_details[0]["details"]["domDifferences"][0]["path"], "title")
                 with zipfile.ZipFile(self._bytes_zip_path(root, package_bytes)) as archive:
                     self.assertEqual(
                         archive.read(f"evidence/runtime_trace/{runtime_trace.id}.json"),

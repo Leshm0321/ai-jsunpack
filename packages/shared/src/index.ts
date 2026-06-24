@@ -606,6 +606,13 @@ export interface RuntimeDiagnosis {
   uncertaintyReasons: string[];
 }
 
+export interface ReportSectionDetail {
+  label: string;
+  value: string;
+  status?: "pass" | "retry" | "best_effort" | "fail";
+  details?: Record<string, unknown>;
+}
+
 export interface ReportSection {
   id: string;
   jobId: string;
@@ -619,6 +626,7 @@ export interface ReportSection {
   status: "pass" | "retry" | "best_effort" | "fail";
   confidence: number;
   uncertaintyReasons: string[];
+  details: ReportSectionDetail[];
 }
 
 export interface RetentionCleanupRequest {
@@ -756,6 +764,20 @@ const evidenceRefsSchema = {
       excerpt: stringSchema
     },
     required: ["artifactId", "label"],
+    additionalProperties: false
+  }
+} as const satisfies JsonSchema;
+const reportSectionDetailsSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      label: stringSchema,
+      value: stringSchema,
+      status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
+      details: { type: "object", additionalProperties: true }
+    },
+    required: ["label", "value"],
     additionalProperties: false
   }
 } as const satisfies JsonSchema;
@@ -1909,7 +1931,8 @@ export const SHARED_JSON_SCHEMAS = {
       evidenceRefs: evidenceRefsSchema,
       status: { type: "string", enum: ["pass", "retry", "best_effort", "fail"] },
       confidence: { type: "number", minimum: 0, maximum: 1 },
-      uncertaintyReasons: stringArraySchema
+      uncertaintyReasons: stringArraySchema,
+      details: reportSectionDetailsSchema
     },
     required: [
       "id",
@@ -1923,7 +1946,8 @@ export const SHARED_JSON_SCHEMAS = {
       "evidenceRefs",
       "status",
       "confidence",
-      "uncertaintyReasons"
+      "uncertaintyReasons",
+      "details"
     ],
     additionalProperties: false
   },
@@ -2564,7 +2588,19 @@ export const EXAMPLE_REPORT_SECTION = {
   evidenceRefs: [EXAMPLE_EVIDENCE_REF],
   status: "pass",
   confidence: 0.8,
-  uncertaintyReasons: ["Fixture content is intentionally minimal."]
+  uncertaintyReasons: ["Fixture content is intentionally minimal."],
+  details: [
+    {
+      label: "Runtime compare scope",
+      value: "default-load / desktop 1280x720",
+      status: "pass",
+      details: {
+        domDifferences: 0,
+        networkChanged: false,
+        consoleChanged: false
+      }
+    }
+  ]
 } as const satisfies ReportSection;
 
 export const EXAMPLE_RETENTION_CLEANUP_REQUEST = {

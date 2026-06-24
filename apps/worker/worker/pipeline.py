@@ -208,103 +208,74 @@ class WorkerPipeline:
                 or reconstruction_result.generated_project_artifact
             )
             packaging_parent_ids = self._unique_ids([*validation_parent_ids, *build_validation_result.artifact_ids])
+            runtime_compare_config = self._runtime_compare_config(job.config)
+            runtime_compare_max_attempts = self._runtime_compare_max_attempts(job.config)
 
-            with self._artifact_directory_path(store=store, artifact=current_project_artifact) as current_project_path:
-                runtime_result = self.runtime_smoke_runner.run(
-                    job_id=job_id,
-                    input_path=current_project_path,
-                    store=store,
-                    parent_artifact_ids=packaging_parent_ids,
-                    attempt=0,
-                )
-                run.transition("runtime_smoke", runtime_result.message)
-                self._raise_if_cancelled(job_id=job_id, store=store)
-                packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_result.artifact_ids])
-                runtime_compare_result = self.runtime_compare_runner.run_compare(
-                    job_id=job_id,
-                    store=store,
-                    original_input_path=input_path,
-                    reconstructed_input_path=current_project_path,
-                    scenario_config=self._runtime_compare_config(job.config),
-                    parent_artifact_ids=packaging_parent_ids,
-                    attempt=0,
-                )
-                run.transition("runtime_compare", runtime_compare_result.message)
-                self._raise_if_cancelled(job_id=job_id, store=store)
-                packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_result.artifact_ids])
-                runtime_compare_gate_result = self.runtime_compare_review_gate.run(
-                    job_id=job_id,
-                    store=store,
-                    comparison_artifacts=runtime_compare_result.comparison_artifacts,
-                    job_config=job.config,
-                    parent_artifact_ids=runtime_compare_result.artifact_ids,
-                    attempt=0,
-                )
-                if runtime_compare_gate_result.enabled:
-                    run.transition("reviewing", runtime_compare_gate_result.message)
-                    if runtime_compare_gate_result.triggered:
-                        run.transition(
-                            "repairing",
-                            "Runtime compare review produced repair evidence for follow-up Review/Fix.",
-                        )
-                self._raise_if_cancelled(job_id=job_id, store=store)
-                packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_gate_result.artifact_ids])
-
-                if runtime_compare_gate_result.enabled and runtime_compare_gate_result.triggered:
-                    runtime_repair_result = self.runtime_compare_repair_runner.run(
+            runtime_attempt = 0
+            while True:
+                with self._artifact_directory_path(store=store, artifact=current_project_artifact) as current_project_path:
+                    runtime_result = self.runtime_smoke_runner.run(
+                        job_id=job_id,
+                        input_path=current_project_path,
+                        store=store,
+                        parent_artifact_ids=packaging_parent_ids,
+                        attempt=runtime_attempt,
+                    )
+                    run.transition("runtime_smoke", runtime_result.message)
+                    self._raise_if_cancelled(job_id=job_id, store=store)
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_result.artifact_ids])
+                    runtime_compare_result = self.runtime_compare_runner.run_compare(
                         job_id=job_id,
                         store=store,
-                        generated_project_artifact=current_project_artifact,
-                        planned_repair_artifact=runtime_compare_gate_result.repair_artifact,
+                        original_input_path=input_path,
+                        reconstructed_input_path=current_project_path,
+                        scenario_config=runtime_compare_config,
                         parent_artifact_ids=packaging_parent_ids,
-                        attempt=1,
+                        attempt=runtime_attempt,
                     )
-                    run.transition("repairing", runtime_repair_result.message)
+                    run.transition("runtime_compare", runtime_compare_result.message)
                     self._raise_if_cancelled(job_id=job_id, store=store)
-                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_repair_result.artifact_ids])
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_result.artifact_ids])
+                    runtime_compare_gate_result = self.runtime_compare_review_gate.run(
+                        job_id=job_id,
+                        store=store,
+                        comparison_artifacts=runtime_compare_result.comparison_artifacts,
+                        job_config=job.config,
+                        parent_artifact_ids=runtime_compare_result.artifact_ids,
+                        attempt=runtime_attempt,
+                    )
+                    if runtime_compare_gate_result.enabled:
+                        run.transition("reviewing", runtime_compare_gate_result.message)
+                        if runtime_compare_gate_result.triggered and runtime_attempt + 1 < runtime_compare_max_attempts:
+                            run.transition(
+                                "repairing",
+                                "Runtime compare review produced repair evidence for follow-up Review/Fix.",
+                            )
+                    self._raise_if_cancelled(job_id=job_id, store=store)
+                    packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_gate_result.artifact_ids])
 
-                    if runtime_repair_result.applied_project_artifact is not None:
-                        current_project_artifact = runtime_repair_result.applied_project_artifact
-                        with self._artifact_directory_path(store=store, artifact=current_project_artifact) as current_project_path:
-                            retry_runtime_result = self.runtime_smoke_runner.run(
-                                job_id=job_id,
-                                input_path=current_project_path,
-                                store=store,
-                                parent_artifact_ids=packaging_parent_ids,
-                                attempt=1,
-                            )
-                            run.transition("runtime_smoke", retry_runtime_result.message)
-                            self._raise_if_cancelled(job_id=job_id, store=store)
-                            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_runtime_result.artifact_ids])
-                            retry_compare_result = self.runtime_compare_runner.run_compare(
-                                job_id=job_id,
-                                store=store,
-                                original_input_path=input_path,
-                                reconstructed_input_path=current_project_path,
-                                scenario_config=self._runtime_compare_config(job.config),
-                                parent_artifact_ids=packaging_parent_ids,
-                                attempt=1,
-                            )
-                            run.transition("runtime_compare", retry_compare_result.message)
-                            self._raise_if_cancelled(job_id=job_id, store=store)
-                            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_compare_result.artifact_ids])
-                            retry_gate_result = self.runtime_compare_review_gate.run(
-                                job_id=job_id,
-                                store=store,
-                                comparison_artifacts=retry_compare_result.comparison_artifacts,
-                                job_config=job.config,
-                                parent_artifact_ids=retry_compare_result.artifact_ids,
-                                attempt=1,
-                            )
-                            if retry_gate_result.enabled:
-                                run.transition("reviewing", retry_gate_result.message)
-                                if retry_gate_result.triggered:
-                                    run.transition(
-                                        "repairing",
-                                        "Runtime compare repair retry still requires follow-up Review/Fix.",
-                                    )
-                            self._raise_if_cancelled(job_id=job_id, store=store)
-                            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *retry_gate_result.artifact_ids])
+                if not (runtime_compare_gate_result.enabled and runtime_compare_gate_result.triggered):
+                    break
+                if runtime_attempt + 1 >= runtime_compare_max_attempts:
+                    break
+
+                runtime_repair_result = self.runtime_compare_repair_runner.run(
+                    job_id=job_id,
+                    store=store,
+                    generated_project_artifact=current_project_artifact,
+                    planned_repair_artifact=runtime_compare_gate_result.repair_artifact,
+                    parent_artifact_ids=packaging_parent_ids,
+                    attempt=runtime_attempt + 1,
+                )
+                run.transition("repairing", runtime_repair_result.message)
+                self._raise_if_cancelled(job_id=job_id, store=store)
+                packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_repair_result.artifact_ids])
+
+                if runtime_repair_result.applied_project_artifact is None:
+                    break
+
+                current_project_artifact = runtime_repair_result.applied_project_artifact
+                runtime_attempt += 1
 
             self._raise_if_cancelled(job_id=job_id, store=store)
             packaging_result = self.packaging_runner.run(
@@ -349,6 +320,20 @@ class WorkerPipeline:
             return config
         runtime_scenario = job_config.get("runtimeScenario")
         return runtime_scenario if isinstance(runtime_scenario, dict) else None
+
+    def _runtime_compare_max_attempts(self, job_config: dict | None) -> int:
+        if not isinstance(job_config, dict):
+            return 2
+        runtime_compare = job_config.get("runtimeCompare")
+        if isinstance(runtime_compare, dict):
+            max_attempts_value = runtime_compare.get("maxAttempts", 2)
+        else:
+            max_attempts_value = 2
+        try:
+            max_attempts = int(max_attempts_value)
+        except (TypeError, ValueError):
+            max_attempts = 2
+        return max(1, min(max_attempts, 5))
 
     def _raise_if_cancelled(self, *, job_id: str, store) -> None:
         job = store.get_job(job_id)

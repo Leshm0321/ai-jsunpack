@@ -123,10 +123,18 @@ interface PackageContentEntry {
   source: string;
 }
 
+interface ReportSectionDetailEntry {
+  details: Record<string, unknown>;
+  label: string;
+  status?: string;
+  value: string;
+}
+
 interface ReportSectionEntry {
   anchor: string;
   artifactIds: string[];
   artifactKinds: string[];
+  details: ReportSectionDetailEntry[];
   evidenceLinks: string[];
   summary: string;
   title: string;
@@ -1569,6 +1577,20 @@ function ReportArtifactList({
                   <strong>{section.title}</strong>
                   <span>#{section.anchor}</span>
                   <small>{section.summary}</small>
+                  {section.details.length > 0 ? (
+                    <div className="report-section-detail-list">
+                      {section.details.map((detail) => (
+                        <div className="report-section-detail-row" key={`${section.anchor}-${detail.label}-${detail.value}`}>
+                          <div>
+                            <span>{detail.label}</span>
+                            <strong>{detail.value}</strong>
+                            <small>{reportSectionDetailSummary(detail)}</small>
+                          </div>
+                          {detail.status ? <StatusToken status={detail.status} /> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="evidence-link-group">
                   {section.artifactIds.slice(0, 5).map((artifactId) => {
@@ -2796,13 +2818,24 @@ function normalizePackageContent(value: PackageContentEntry): PackageContentEntr
 }
 
 function normalizeReportSection(value: ReportSectionEntry): ReportSectionEntry {
+  const rawDetails: unknown[] = Array.isArray(value.details) ? value.details : [];
   return {
     anchor: String(value.anchor ?? ""),
     artifactIds: Array.isArray(value.artifactIds) ? value.artifactIds.map(String) : [],
     artifactKinds: Array.isArray(value.artifactKinds) ? value.artifactKinds.map(String) : [],
+    details: rawDetails.filter(isRecord).map(normalizeReportSectionDetail),
     evidenceLinks: Array.isArray(value.evidenceLinks) ? value.evidenceLinks.map(String) : [],
     summary: String(value.summary ?? ""),
     title: String(value.title ?? "Report section")
+  };
+}
+
+function normalizeReportSectionDetail(value: Record<string, unknown>): ReportSectionDetailEntry {
+  return {
+    details: isRecord(value.details) ? value.details : {},
+    label: String(value.label ?? "Detail"),
+    status: typeof value.status === "string" ? value.status : undefined,
+    value: String(value.value ?? "")
   };
 }
 
@@ -2904,6 +2937,7 @@ function buildFallbackReportSections(attachments: EvidenceAttachmentEntry[], art
       anchor: "evidence-attachment-index",
       artifactIds: attachmentIds,
       artifactKinds: [],
+      details: [],
       evidenceLinks: attachmentIds.map((artifactId) => `artifact://${artifactId}`),
       summary: "Evidence files included in or omitted from the result package.",
       title: "Evidence Attachment Index"
@@ -2924,6 +2958,7 @@ function fallbackReportSection(
     anchor,
     artifactIds,
     artifactKinds: kinds,
+    details: [],
     evidenceLinks: artifactIds.map((artifactId) => `artifact://${artifactId}`),
     summary,
     title
@@ -3540,6 +3575,43 @@ function formatUnknownValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function reportSectionDetailSummary(detail: ReportSectionDetailEntry): string {
+  const payload = detail.details;
+  const parts: string[] = [];
+  if (typeof payload.attempt === "number" || typeof payload.attempt === "string") {
+    parts.push(`attempt ${payload.attempt}`);
+  }
+  if (Array.isArray(payload.domDifferences)) {
+    parts.push(`DOM ${payload.domDifferences.length}`);
+  }
+  const networkSummary = collectionDiffSummary(payload.networkDiff);
+  if (networkSummary) {
+    parts.push(`network ${networkSummary}`);
+  }
+  const consoleSummary = collectionDiffSummary(payload.consoleDiff);
+  if (consoleSummary) {
+    parts.push(`console ${consoleSummary}`);
+  }
+  if (Array.isArray(payload.evidenceLinks)) {
+    parts.push(`${payload.evidenceLinks.length} evidence`);
+  }
+  return parts.length > 0 ? parts.join(" / ") : "No structured breakdown";
+}
+
+function collectionDiffSummary(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (value.changed === false) {
+    return "unchanged";
+  }
+  const originalCount = typeof value.originalCount === "number" ? value.originalCount : null;
+  const reconstructedCount = typeof value.reconstructedCount === "number" ? value.reconstructedCount : null;
+  const groups = Array.isArray(value.groups) ? value.groups.map(String).slice(0, 3) : [];
+  const countSummary = originalCount !== null && reconstructedCount !== null ? `${originalCount}->${reconstructedCount}` : "changed";
+  return groups.length > 0 ? `${countSummary} ${groups.join(", ")}` : countSummary;
 }
 
 function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {

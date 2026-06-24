@@ -25,6 +25,7 @@ from apps.api.app.models import (
     ReviewRun,
     RuntimeDiagnosis,
     RunStatus,
+    ReportSectionDetail,
     ToolCall,
     ToolCallStatus,
     ToolRegistryEntry,
@@ -233,6 +234,7 @@ class AgentReportSectionDraft:
     status: RunStatus
     confidence: float
     uncertainty_reasons: list[str]
+    details: list[tuple[str, str]] = field(default_factory=list)
     agent_name: str = "ReportAgent"
 
 
@@ -1546,6 +1548,7 @@ class AgentRuntime:
                     status=draft.status,
                     confidence=max(0, min(1, draft.confidence)),
                     uncertainty_reasons=draft.uncertainty_reasons,
+                    details=[ReportSectionDetail(label=label, value=value) for label, value in draft.details],
                 )
                 report_section_artifacts.append(
                     store.write_artifact(

@@ -782,14 +782,22 @@ class PackagingRunner:
         return f"original-only={original_only}; reconstructed-only={reconstructed_only}; shared={shared}; groups={groups}"
 
     def _runtime_compare_evidence_links(self, record: dict[str, Any]) -> str:
+        links = self._runtime_compare_evidence_link_list(record)
+        return ", ".join(links) if links else "none"
+
+    def _runtime_compare_evidence_link_list(
+        self,
+        record: dict[str, Any],
+        *,
+        comparison_artifact_id: str | None = None,
+    ) -> list[str]:
         artifact_ids = [
-            record.get("artifactId"),
+            comparison_artifact_id or record.get("artifactId"),
             record.get("scenarioArtifactId"),
             *(record.get("traceArtifactIds") or []),
             *(record.get("screenshotArtifactIds") or []),
         ]
-        links = [f"artifact://{artifact_id}" for artifact_id in artifact_ids if artifact_id]
-        return ", ".join(links) if links else "none"
+        return [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids) if artifact_id]
 
     def _evidence_index(
         self,
@@ -809,7 +817,7 @@ class PackagingRunner:
             attachments=attachments,
             generated_project=self._latest_artifact(artifacts, "generated_project"),
         )
-        report_sections = self._report_sections(attachments=attachments, artifacts=artifacts)
+        report_sections = self._report_sections(attachments=attachments, artifacts=artifacts, job_id=job.id, store=store)
         return {
             "schemaVersion": "2026-06-14",
             "kind": "evidence_index",
@@ -1047,6 +1055,8 @@ class PackagingRunner:
         *,
         attachments: list[dict[str, Any]],
         artifacts: list[ArtifactRecord],
+        job_id: str,
+        store,
     ) -> list[dict[str, Any]]:
         artifact_ids_by_kind: dict[str, list[str]] = {}
         for artifact in artifacts:
@@ -1087,6 +1097,7 @@ class PackagingRunner:
                 summary="Scenario and viewport comparison differences with evidence deep links.",
                 artifact_kinds=("runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
+                details=self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts),
             ),
             self._report_section(
                 title="Browser Runner Operations",
@@ -1150,6 +1161,7 @@ class PackagingRunner:
         artifact_kinds: tuple[str, ...],
         artifact_ids_by_kind: dict[str, list[str]],
         evidence_artifact_ids: list[str] | None = None,
+        details: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         artifact_ids: list[str] = []
         for kind in artifact_kinds:
@@ -1163,6 +1175,79 @@ class PackagingRunner:
             "artifactKinds": list(artifact_kinds),
             "artifactIds": list(dict.fromkeys(artifact_ids)),
             "evidenceLinks": [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids)],
+            "details": details or [],
+        }
+
+    def _runtime_compare_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
+        entries = [artifact for artifact in artifacts if artifact.kind == "runtime_comparison"]
+        if not entries:
+            return []
+        latest_by_scope: dict[str, dict[str, Any]] = {}
+        for artifact in entries:
+            payload = None
+            try:
+                payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+            except Exception:
+                payload = None
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("artifactId", artifact.id)
+            differences = payload.get("differences") or {}
+            scope = differences.get("comparisonScope") or {}
+            viewport = scope.get("viewport") or {}
+            viewport_label = "default viewport"
+            if isinstance(viewport, dict):
+                viewport_name = viewport.get("name")
+                viewport_size = ""
+                if viewport.get("width") and viewport.get("height"):
+                    viewport_size = f"{viewport['width']}x{viewport['height']}"
+                viewport_label = " ".join(str(part) for part in (viewport_name, viewport_size) if part) or viewport_label
+            scope_label = f"{scope.get('scenarioName') or payload.get('scenarioArtifactId') or 'unknown'} / {viewport_label}"
+            dom_differences = differences.get("domDifferences") or []
+            network_diff = differences.get("networkDiff") or {}
+            console_diff = differences.get("consoleDiff") or {}
+            key = f"{scope.get('scenarioName') or 'unknown'}::{viewport_label}"
+            latest_by_scope[key] = {
+                "label": "Runtime compare scope",
+                "value": scope_label,
+                "status": str(payload.get("status") or "unknown"),
+                "details": {
+                    "attempt": payload.get("attempt"),
+                    "comparisonArtifactId": artifact.id,
+                    "scenarioArtifactId": payload.get("scenarioArtifactId"),
+                    "comparisonScope": {
+                        "scenarioName": scope.get("scenarioName"),
+                        "networkPolicy": scope.get("networkPolicy"),
+                        "timeoutMs": scope.get("timeoutMs"),
+                        "viewport": viewport,
+                    },
+                    "domDifferences": [self._dom_diff_summary(item) for item in dom_differences if isinstance(item, dict)],
+                    "networkDiff": self._compact_collection_diff(network_diff),
+                    "consoleDiff": self._compact_collection_diff(console_diff),
+                    "evidenceLinks": self._runtime_compare_evidence_link_list(
+                        payload,
+                        comparison_artifact_id=artifact.id,
+                    ),
+                },
+            }
+        return list(latest_by_scope.values())
+
+    def _dom_diff_summary(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "path": item.get("path"),
+            "summary": item.get("summary"),
+        }
+
+    def _compact_collection_diff(self, diff: Any) -> dict[str, Any]:
+        if not isinstance(diff, dict):
+            return {}
+        return {
+            "changed": diff.get("changed"),
+            "originalCount": diff.get("originalCount"),
+            "reconstructedCount": diff.get("reconstructedCount"),
+            "originalOnly": diff.get("originalOnly") or [],
+            "reconstructedOnly": diff.get("reconstructedOnly") or [],
+            "groups": sorted((diff.get("groups") or {}).keys()),
         }
 
     def _evidence_attachment(self, artifact: ArtifactRecord, policy: EvidenceAttachmentPolicy, store) -> dict[str, Any]:
