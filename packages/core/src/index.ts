@@ -63,7 +63,29 @@ export interface WriteProjectResult {
   manifest: GeneratedProjectManifest;
 }
 
+interface HtmlSourceRecord {
+  path: string;
+  content: string;
+}
+
+interface HtmlReferenceRecord {
+  path: string;
+  kind: HtmlReferenceKind;
+  htmlPath: string;
+  tagName: string;
+  attributeName: string;
+}
+
+type HtmlReferenceKind = "asset" | "manifest" | "script" | "style";
+
 const TEXT_EXTENSIONS = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".json", ".map"]);
+const HTML_RAW_TEXT_TAGS = new Set(["script", "style", "textarea", "title"]);
+const HTML_REFERENCE_PRIORITY: Record<HtmlReferenceKind, number> = {
+  manifest: 4,
+  style: 3,
+  script: 2,
+  asset: 1
+};
 const GENERATED_PROJECT_FILES = [
   "package.json",
   "tsconfig.json",
@@ -156,24 +178,34 @@ export async function buildInputInventory(rootDir: string): Promise<InputInvento
   const absoluteRoot = path.resolve(rootDir);
   const filePaths = await listFiles(absoluteRoot);
   const files: InputFileRecord[] = [];
+  const htmlSources: HtmlSourceRecord[] = [];
 
   for (const absolutePath of filePaths) {
     const relativePath = toPosix(path.relative(absoluteRoot, absolutePath));
     const buffer = await fs.readFile(absolutePath);
+    const kind = classifyPath(relativePath);
     files.push({
       path: relativePath,
-      kind: classifyPath(relativePath),
+      kind,
       size: buffer.byteLength,
       hash: sha256(buffer)
     });
+    if (kind === "html") {
+      htmlSources.push({
+        path: relativePath,
+        content: buffer.toString("utf8")
+      });
+    }
   }
 
-  const entries = files.filter((file) => file.kind === "html").map((file) => file.path);
-  const scripts = files.filter((file) => file.kind === "script").map((file) => file.path);
-  const styles = files.filter((file) => file.kind === "style").map((file) => file.path);
-  const assets = files.filter((file) => file.kind === "asset").map((file) => file.path);
-  const sourceMaps = files.filter((file) => file.kind === "source_map").map((file) => file.path);
-  const manifests = files.filter((file) => file.kind === "manifest").map((file) => file.path);
+  const { referenceKindsByPath, missingReferences } = collectHtmlReferenceKinds(htmlSources, new Set(files.map((file) => file.path)));
+  const normalizedFiles = files.map((file) => normalizeInventoryFileKind(file, referenceKindsByPath.get(file.path)));
+  const entries = normalizedFiles.filter((file) => file.kind === "html").map((file) => file.path);
+  const scripts = normalizedFiles.filter((file) => file.kind === "script").map((file) => file.path);
+  const styles = normalizedFiles.filter((file) => file.kind === "style").map((file) => file.path);
+  const assets = normalizedFiles.filter((file) => file.kind === "asset").map((file) => file.path);
+  const sourceMaps = normalizedFiles.filter((file) => file.kind === "source_map").map((file) => file.path);
+  const manifests = normalizedFiles.filter((file) => file.kind === "manifest").map((file) => file.path);
   const warnings: string[] = [];
 
   if (entries.length === 0) {
@@ -182,9 +214,12 @@ export async function buildInputInventory(rootDir: string): Promise<InputInvento
   if (scripts.length === 0) {
     warnings.push("No JavaScript bundle found.");
   }
+  if (missingReferences.length > 0) {
+    warnings.push(formatMissingHtmlReferenceWarning(missingReferences));
+  }
 
   return {
-    files,
+    files: normalizedFiles,
     entries,
     scripts,
     styles,
@@ -469,6 +504,318 @@ function classifyPath(filePath: string): InputFileRecord["kind"] {
   if (extension === ".json" && (normalized.includes("manifest") || normalized.endsWith("package.json"))) return "manifest";
   if (TEXT_EXTENSIONS.has(extension)) return "unknown";
   return "asset";
+}
+
+function collectHtmlReferenceKinds(
+  htmlSources: HtmlSourceRecord[],
+  knownPaths: Set<string>
+): { referenceKindsByPath: Map<string, HtmlReferenceKind>; missingReferences: string[] } {
+  const referenceKinds = new Map<string, { kind: HtmlReferenceKind; rank: number }>();
+  const missingReferences = new Set<string>();
+
+  for (const htmlSource of htmlSources) {
+    for (const reference of extractHtmlReferenceCandidates(htmlSource.content, htmlSource.path)) {
+      if (!knownPaths.has(reference.path)) {
+        missingReferences.add(`${reference.htmlPath} -> ${reference.kind}:${reference.path}`);
+        continue;
+      }
+      const current = referenceKinds.get(reference.path);
+      const rank = HTML_REFERENCE_PRIORITY[reference.kind];
+      if (!current || rank > current.rank) {
+        referenceKinds.set(reference.path, { kind: reference.kind, rank });
+      }
+    }
+  }
+
+  return {
+    referenceKindsByPath: new Map([...referenceKinds.entries()].map(([path, value]) => [path, value.kind])),
+    missingReferences: [...missingReferences].sort()
+  };
+}
+
+function extractHtmlReferenceCandidates(html: string, htmlPath: string): HtmlReferenceRecord[] {
+  const references: HtmlReferenceRecord[] = [];
+  const seen = new Set<string>();
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const openIndex = html.indexOf("<", cursor);
+    if (openIndex === -1) {
+      break;
+    }
+    if (html.startsWith("<!--", openIndex)) {
+      const commentEnd = html.indexOf("-->", openIndex + 4);
+      cursor = commentEnd === -1 ? html.length : commentEnd + 3;
+      continue;
+    }
+    if (html.startsWith("</", openIndex) || html.startsWith("<!", openIndex) || html.startsWith("<?", openIndex)) {
+      const tagEnd = findHtmlTagEnd(html, openIndex + 1);
+      cursor = tagEnd === -1 ? html.length : tagEnd + 1;
+      continue;
+    }
+
+    const tagEnd = findHtmlTagEnd(html, openIndex + 1);
+    if (tagEnd === -1) {
+      break;
+    }
+
+    const rawTag = html.slice(openIndex + 1, tagEnd).trim();
+    cursor = tagEnd + 1;
+    if (!rawTag) {
+      continue;
+    }
+
+    const spaceIndex = rawTag.search(/\s/);
+    const tagName = (spaceIndex === -1 ? rawTag : rawTag.slice(0, spaceIndex)).replace(/\/$/, "").toLowerCase();
+    if (!tagName) {
+      continue;
+    }
+
+    const attrSource = spaceIndex === -1 ? "" : rawTag.slice(spaceIndex).replace(/\/\s*$/, "");
+    const attributes = parseHtmlAttributes(attrSource);
+    collectTagReferences(tagName, attributes, htmlPath, references, seen);
+
+    if (HTML_RAW_TEXT_TAGS.has(tagName) && !rawTag.endsWith("/")) {
+      const closeIndex = html.toLowerCase().indexOf(`</${tagName}`, cursor);
+      if (closeIndex === -1) {
+        break;
+      }
+      const closeTagEnd = findHtmlTagEnd(html, closeIndex + 2);
+      cursor = closeTagEnd === -1 ? html.length : closeTagEnd + 1;
+    }
+  }
+
+  return references;
+}
+
+function collectTagReferences(
+  tagName: string,
+  attributes: Record<string, string>,
+  htmlPath: string,
+  references: HtmlReferenceRecord[],
+  seen: Set<string>
+): void {
+  if (tagName === "script") {
+    addHtmlReference(attributes.src, "script", htmlPath, tagName, "src", references, seen);
+    return;
+  }
+
+  if (tagName === "link") {
+    const relTokens = splitTokenList(attributes.rel);
+    if (relTokens.has("stylesheet")) {
+      addHtmlReference(attributes.href, "style", htmlPath, tagName, "href", references, seen);
+    }
+    if (relTokens.has("modulepreload")) {
+      addHtmlReference(attributes.href, "script", htmlPath, tagName, "href", references, seen);
+    }
+    if (relTokens.has("manifest")) {
+      addHtmlReference(attributes.href, "manifest", htmlPath, tagName, "href", references, seen);
+    }
+    if (relTokens.has("preload")) {
+      addHtmlReference(attributes.href, kindForPreloadAs(attributes.as), htmlPath, tagName, "href", references, seen);
+    }
+    if (relTokens.has("icon") || relTokens.has("apple-touch-icon") || relTokens.has("mask-icon") || relTokens.has("shortcut")) {
+      addHtmlReference(attributes.href, "asset", htmlPath, tagName, "href", references, seen);
+    }
+    return;
+  }
+
+  if (tagName === "img" || tagName === "audio" || tagName === "embed" || tagName === "track") {
+    addHtmlReference(attributes.src, "asset", htmlPath, tagName, "src", references, seen);
+    if (tagName === "img") {
+      addSrcsetReferences(attributes.srcset, "asset", htmlPath, tagName, "srcset", references, seen);
+    }
+    return;
+  }
+
+  if (tagName === "source") {
+    addHtmlReference(attributes.src, "asset", htmlPath, tagName, "src", references, seen);
+    addSrcsetReferences(attributes.srcset, "asset", htmlPath, tagName, "srcset", references, seen);
+    return;
+  }
+
+  if (tagName === "video") {
+    addHtmlReference(attributes.src, "asset", htmlPath, tagName, "src", references, seen);
+    addHtmlReference(attributes.poster, "asset", htmlPath, tagName, "poster", references, seen);
+    return;
+  }
+
+  if (tagName === "object") {
+    addHtmlReference(attributes.data, "asset", htmlPath, tagName, "data", references, seen);
+    return;
+  }
+
+  if (tagName === "input" && (attributes.type ?? "").toLowerCase() === "image") {
+    addHtmlReference(attributes.src, "asset", htmlPath, tagName, "src", references, seen);
+    return;
+  }
+
+  if (tagName === "image") {
+    addHtmlReference(attributes.href ?? attributes["xlink:href"], "asset", htmlPath, tagName, "href", references, seen);
+  }
+}
+
+function addHtmlReference(
+  rawValue: string | undefined,
+  kind: HtmlReferenceKind,
+  htmlPath: string,
+  tagName: string,
+  attributeName: string,
+  references: HtmlReferenceRecord[],
+  seen: Set<string>
+): void {
+  const resolvedPath = normalizeHtmlReferencePath(rawValue, htmlPath);
+  if (!resolvedPath) {
+    return;
+  }
+  const key = `${kind}:${resolvedPath}`;
+  if (seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  references.push({
+    path: resolvedPath,
+    kind,
+    htmlPath,
+    tagName,
+    attributeName
+  });
+}
+
+function addSrcsetReferences(
+  rawValue: string | undefined,
+  kind: HtmlReferenceKind,
+  htmlPath: string,
+  tagName: string,
+  attributeName: string,
+  references: HtmlReferenceRecord[],
+  seen: Set<string>
+): void {
+  if (!rawValue) {
+    return;
+  }
+  for (const candidate of splitSrcsetList(rawValue)) {
+    addHtmlReference(candidate, kind, htmlPath, tagName, attributeName, references, seen);
+  }
+}
+
+function splitSrcsetList(rawValue: string): string[] {
+  return rawValue
+    .split(",")
+    .map((part) => part.trim().split(/\s+/)[0] ?? "")
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+}
+
+function splitTokenList(rawValue: string | undefined): Set<string> {
+  return new Set(
+    (rawValue ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean)
+  );
+}
+
+function kindForPreloadAs(rawValue: string | undefined): HtmlReferenceKind {
+  switch ((rawValue ?? "").toLowerCase()) {
+    case "script":
+    case "worker":
+    case "serviceworker":
+    case "sharedworker":
+    case "module":
+      return "script";
+    case "style":
+      return "style";
+    case "manifest":
+      return "manifest";
+    default:
+      return "asset";
+  }
+}
+
+function normalizeHtmlReferencePath(rawValue: string | undefined, htmlPath: string): string | null {
+  if (!rawValue) {
+    return null;
+  }
+  const trimmed = rawValue.trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+
+  const sanitized = trimmed.replace(/\\/g, "/").split(/[?#]/, 1)[0];
+  if (!sanitized) {
+    return null;
+  }
+  if (sanitized.startsWith("//") || /^[A-Za-z][A-Za-z\d+\-.]*:/.test(sanitized)) {
+    return null;
+  }
+
+  const resolved = sanitized.startsWith("/")
+    ? path.posix.normalize(sanitized.slice(1))
+    : path.posix.normalize(path.posix.join(path.posix.dirname(htmlPath), sanitized));
+
+  if (!resolved || resolved === "." || resolved.startsWith("../")) {
+    return null;
+  }
+
+  return resolved.startsWith("./") ? resolved.slice(2) : resolved;
+}
+
+function findHtmlTagEnd(html: string, startIndex: number): number {
+  let quote: "'" | '"' | null = null;
+  for (let index = startIndex; index < html.length; index += 1) {
+    const char = html[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === ">") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function parseHtmlAttributes(source: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  const pattern = /([^\s=/>`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(source)) !== null) {
+    const name = match[1]?.toLowerCase();
+    if (!name || name === "/") {
+      continue;
+    }
+    attributes[name] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+
+  return attributes;
+}
+
+function formatMissingHtmlReferenceWarning(missingReferences: string[]): string {
+  const preview = missingReferences.slice(0, 5).join("; ");
+  const extra = missingReferences.length > 5 ? `; and ${missingReferences.length - 5} more` : "";
+  return `HTML references ${missingReferences.length} missing file${missingReferences.length === 1 ? "" : "s"}: ${preview}${extra}.`;
+}
+
+function normalizeInventoryFileKind(file: InputFileRecord, referenceKind?: HtmlReferenceKind): InputFileRecord {
+  if (
+    file.kind === "html" ||
+    file.kind === "script" ||
+    file.kind === "style" ||
+    file.kind === "source_map" ||
+    file.kind === "manifest"
+  ) {
+    return file;
+  }
+  return referenceKind ? { ...file, kind: referenceKind } : file;
 }
 
 function upsertSymbol(

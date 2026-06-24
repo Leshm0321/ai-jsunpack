@@ -28,6 +28,95 @@ test("analyzeInputPackage inventories dist assets and indexes bundle symbols", a
   }
 });
 
+test("analyzeInputPackage resolves local HTML entry references", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-refs-"));
+  try {
+    await mkdir(path.join(root, "nested", "assets"), { recursive: true });
+    await writeFile(
+      path.join(root, "nested", "index.html"),
+      [
+        '<link rel="modulepreload" href="/nested/assets/preload.chunk">',
+        '<link rel="stylesheet" href="./assets/app.style?v=1">',
+        '<link rel="icon" href="./assets/icon.hash">',
+        '<img src="./assets/logo.hash?rev=2" srcset="./assets/logo@2x.hash 2x, https://cdn.example/logo@3x.png 3x">',
+        '<video poster="./assets/poster.hash"><source src="./assets/movie.hash" /></video>',
+        '<script type="module" src="./assets/main.chunk"></script>',
+        '<script src="/nested/assets/main.chunk"></script>',
+        '<script src="https://cdn.example/app.js"></script>',
+        "<script>import './inline-ignored.js';</script>"
+      ].join("")
+    );
+    await writeFile(path.join(root, "nested", "assets", "main.chunk"), "function main(){return 1} export { main };");
+    await writeFile(path.join(root, "nested", "assets", "preload.chunk"), "function preload(){return 1} export { preload };");
+    await writeFile(path.join(root, "nested", "assets", "app.style"), "#app{display:block}");
+    await writeFile(path.join(root, "nested", "assets", "icon.hash"), "icon");
+    await writeFile(path.join(root, "nested", "assets", "logo.hash"), "logo");
+    await writeFile(path.join(root, "nested", "assets", "logo@2x.hash"), "logo2x");
+    await writeFile(path.join(root, "nested", "assets", "poster.hash"), "poster");
+    await writeFile(path.join(root, "nested", "assets", "movie.hash"), "movie");
+
+    const result = await analyzeInputPackage(root);
+
+    assert.deepEqual(result.inventory.entries, ["nested/index.html"]);
+    assert.deepEqual(new Set(result.inventory.scripts), new Set(["nested/assets/main.chunk", "nested/assets/preload.chunk"]));
+    assert.deepEqual(result.inventory.styles, ["nested/assets/app.style"]);
+    assert.deepEqual(
+      new Set(result.inventory.assets),
+      new Set([
+        "nested/assets/icon.hash",
+        "nested/assets/logo.hash",
+        "nested/assets/logo@2x.hash",
+        "nested/assets/movie.hash",
+        "nested/assets/poster.hash"
+      ])
+    );
+    assert.equal(result.astIndexes.length, 2);
+    assert.ok(result.astIndexes.some((index) => index.symbols.some((symbol) => symbol.name === "main")));
+    assert.ok(result.astIndexes.some((index) => index.symbols.some((symbol) => symbol.name === "preload")));
+    assert.ok(!result.inventory.scripts.some((script) => script.includes("cdn.example")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage records missing local HTML entry references", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-missing-"));
+  try {
+    await writeFile(
+      path.join(root, "index.html"),
+      '<script src="./missing.js"></script><link rel="stylesheet" href="/missing.css">'
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("HTML references 2 missing files")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("script:missing.js")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("style:missing.css")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage continues scanning after self-closing script tags", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-self-close-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(
+      path.join(root, "index.html"),
+      '<script src="./assets/app.chunk" /><link rel="stylesheet" href="./assets/app.style">'
+    );
+    await writeFile(path.join(root, "assets", "app.chunk"), "function boot(){return 1} export { boot };");
+    await writeFile(path.join(root, "assets", "app.style"), "#app{display:block}");
+
+    const result = await analyzeInputPackage(root);
+
+    assert.deepEqual(result.inventory.scripts, ["assets/app.chunk"]);
+    assert.deepEqual(result.inventory.styles, ["assets/app.style"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("analyzeInputPackage extracts zip archives into a safe inventory root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-zip-"));
   try {
