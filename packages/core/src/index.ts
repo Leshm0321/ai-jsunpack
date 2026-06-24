@@ -3,6 +3,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, inflateRawSync } from "node:zlib";
+import { TraceMap, sourceContentFor } from "@jridgewell/trace-mapping";
+import type { SourceMapInput } from "@jridgewell/trace-mapping";
 import { parse } from "@babel/parser";
 import traverseModule, { type NodePath, type TraverseOptions } from "@babel/traverse";
 import type * as t from "@babel/types";
@@ -12,6 +14,10 @@ export interface AnalyzeInputConfig {
   jobId?: string;
   rootDir?: string;
   inputSourceKind?: NormalizedInputPackage["sourceKind"];
+}
+
+export interface CoreAnalysisResult extends HeadlessAnalysisResult {
+  sourceMapAnalysis: SourceMapArtifactAnalysis;
 }
 
 export interface NormalizedInputPackage {
@@ -76,6 +82,25 @@ interface HtmlReferenceRecord {
   attributeName: string;
 }
 
+export interface SourceMapBundleAnalysis {
+  bundlePath: string;
+  sourceMapPath: string;
+  sourceMapFile: string | null;
+  sourceRoot: string | null;
+  sources: string[];
+  sourceCandidates: string[];
+  sourcesContentAvailable: string[];
+  missingSourcesContent: string[];
+  warnings: string[];
+}
+
+export interface SourceMapArtifactAnalysis {
+  bundleCount: number;
+  bundleAnalyses: SourceMapBundleAnalysis[];
+  sourceCandidates: string[];
+  warnings: string[];
+}
+
 type HtmlReferenceKind = "asset" | "manifest" | "script" | "style";
 
 const TEXT_EXTENSIONS = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".json", ".map"]);
@@ -95,8 +120,9 @@ const GENERATED_PROJECT_FILES = [
   "scripts/build.mjs",
   "scripts/typecheck.mjs"
 ];
+const LOCAL_SOURCE_SCHEMES = new Set(["webpack", "rollup", "vite", "parcel", "browserify", "ng", "esbuild", "turbopack", "snowpack"]);
 
-export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
+export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<CoreAnalysisResult> {
   const normalized = config.rootDir ? undefined : await normalizeInputPackage(inputPath);
   try {
     const rootDir = path.resolve(config.rootDir ?? normalized?.rootDir ?? inputPath);
@@ -104,6 +130,10 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
     const inventory = await buildInputInventory(rootDir);
     if (sourceKind && sourceKind !== "directory") {
       inventory.warnings.unshift(`Input ${sourceKind} archive was extracted into a verified temporary workspace.`);
+    }
+    const sourceMapAnalysis = await analyzeSourceMaps(rootDir, inventory);
+    if (sourceMapAnalysis.warnings.length > 0) {
+      inventory.warnings.push(...sourceMapAnalysis.warnings);
     }
     const astIndexes = await Promise.all(
       inventory.scripts.map(async (scriptPath) => buildAstIndexForFile(path.join(rootDir, scriptPath), rootDir))
@@ -114,6 +144,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
       inventory,
       astIndexes,
       detectedRuntime,
+      sourceMapAnalysis,
       artifacts: []
     };
   } finally {
@@ -372,7 +403,7 @@ export function detectBundleRuntime(inventory: InputInventory, indexes: AstIndex
 }
 
 export function planReconstruction(
-  analysis: HeadlessAnalysisResult,
+  analysis: CoreAnalysisResult,
   config: AnalyzeInputConfig = {}
 ): ReconstructionPlan {
   const limitations = [
@@ -469,8 +500,174 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
   }
 }
 
-export async function runHeadlessPipeline(inputPath: string, config: AnalyzeInputConfig = {}): Promise<HeadlessAnalysisResult> {
+export async function runHeadlessPipeline(inputPath: string, config: AnalyzeInputConfig = {}): Promise<CoreAnalysisResult> {
   return analyzeInputPackage(inputPath, config);
+}
+
+async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Promise<SourceMapArtifactAnalysis> {
+  const bundleAnalyses: SourceMapBundleAnalysis[] = [];
+  const sourceCandidates = new Set<string>();
+  const warnings: string[] = [];
+  const fileMap = new Map(inventory.files.map((file) => [file.path, file]));
+
+  for (const sourceMapPath of inventory.sourceMaps) {
+    const sourceMapAbsolutePath = path.join(rootDir, sourceMapPath);
+    let mapPayload: unknown;
+    try {
+      mapPayload = JSON.parse(await fs.readFile(sourceMapAbsolutePath, "utf8")) as unknown;
+    } catch (error) {
+      warnings.push(`Failed to parse source map ${sourceMapPath}: ${error instanceof Error ? error.message : "Unknown error"}`);
+      continue;
+    }
+
+    try {
+      const traceMap = new TraceMap(mapPayload as SourceMapInput, sourceMapPath);
+      const bundlePath = inferBundlePathForSourceMap(sourceMapPath, traceMap.file, fileMap);
+      const rawSources = traceMap.sources.filter((source): source is string => typeof source === "string" && source.trim().length > 0);
+      const sources = normalizeSourceMapSources(rawSources);
+      const sourceRoot = normalizeSourceMapRoot(traceMap.sourceRoot);
+      const sourceCandidatesForBundle = resolveSourceCandidates(bundlePath, sourceMapPath, sources, sourceRoot);
+      const availableSourcesContent: string[] = [];
+      const missingSourcesContent: string[] = [];
+
+      for (const source of rawSources) {
+        const content = sourceContentFor(traceMap, source);
+        const normalizedSource = normalizeSourceMapCandidate(source) ?? source;
+        if (content === null) {
+          missingSourcesContent.push(normalizedSource);
+          continue;
+        }
+        availableSourcesContent.push(normalizedSource);
+      }
+
+      for (const candidate of sourceCandidatesForBundle) {
+        sourceCandidates.add(candidate);
+      }
+
+      const bundleWarnings: string[] = [];
+      if (sourceCandidatesForBundle.length === 0) {
+        bundleWarnings.push(`Source map ${sourceMapPath} did not yield any source candidates.`);
+      }
+      if (missingSourcesContent.length > 0) {
+        bundleWarnings.push(`Source map ${sourceMapPath} is missing sourcesContent for ${missingSourcesContent.length} source${missingSourcesContent.length === 1 ? "" : "s"}.`);
+      }
+
+      bundleAnalyses.push({
+        bundlePath,
+        sourceMapPath,
+        sourceMapFile: normalizeSourceMapFile(traceMap.file),
+        sourceRoot,
+        sources,
+        sourceCandidates: sourceCandidatesForBundle,
+        sourcesContentAvailable: availableSourcesContent,
+        missingSourcesContent,
+        warnings: bundleWarnings
+      });
+
+      warnings.push(...bundleWarnings.map((warning) => `${sourceMapPath}: ${warning}`));
+    } catch (error) {
+      warnings.push(`Failed to analyze source map ${sourceMapPath}: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  }
+
+  return {
+    bundleCount: bundleAnalyses.length,
+    bundleAnalyses,
+    sourceCandidates: [...sourceCandidates].sort(),
+    warnings
+  };
+}
+
+function inferBundlePathForSourceMap(
+  sourceMapPath: string,
+  sourceMapFile: string | null | undefined,
+  fileMap: Map<string, InputFileRecord>
+): string {
+  const sourceMapDir = path.posix.dirname(sourceMapPath);
+  const base = sourceMapPath.endsWith(".map") ? sourceMapPath.slice(0, -4) : sourceMapPath;
+  const candidates = [sourceMapFile, base, base.replace(/\.min$/i, ""), base.replace(/\.bundle$/i, ""), base.replace(/\.js$/i, ".js")];
+  for (const candidate of candidates) {
+    const normalized = normalizeSourceMapCandidate(candidate);
+    if (!normalized) {
+      continue;
+    }
+    for (const resolved of new Set([normalized, path.posix.normalize(path.posix.join(sourceMapDir, normalized))])) {
+      if (fileMap.has(resolved)) {
+        return resolved;
+      }
+    }
+  }
+  return normalizeSourceMapCandidate(sourceMapFile) ?? base;
+}
+
+function resolveSourceCandidates(
+  bundlePath: string,
+  sourceMapPath: string,
+  sources: string[],
+  sourceRoot: string | null
+): string[] {
+  const bundleDir = path.posix.dirname(bundlePath);
+  const sourceMapDir = path.posix.dirname(sourceMapPath);
+  const resolved = new Set<string>();
+
+  for (const rawSource of sources) {
+    const normalizedSource = normalizeSourceMapCandidate(rawSource);
+    if (!normalizedSource) {
+      continue;
+    }
+    const candidates = new Set<string>();
+    candidates.add(normalizeSourceMapCandidate(path.posix.normalize(path.posix.join(sourceMapDir, normalizedSource))) ?? normalizedSource);
+    candidates.add(normalizeSourceMapCandidate(path.posix.normalize(path.posix.join(bundleDir, normalizedSource))) ?? normalizedSource);
+    if (sourceRoot) {
+      candidates.add(normalizeSourceMapCandidate(path.posix.normalize(path.posix.join(sourceRoot, normalizedSource))) ?? normalizedSource);
+    }
+    candidates.add(normalizedSource);
+
+    for (const candidate of candidates) {
+      if (candidate) {
+        resolved.add(candidate);
+      }
+    }
+  }
+
+  return [...resolved].sort();
+}
+
+function normalizeSourceMapSources(sources: string[]): string[] {
+  return sources
+    .map((source) => normalizeSourceMapCandidate(source))
+    .filter((source): source is string => Boolean(source));
+}
+
+function normalizeSourceMapRoot(sourceRoot: string | undefined): string | null {
+  const normalized = normalizeSourceMapCandidate(sourceRoot);
+  return normalized ?? null;
+}
+
+function normalizeSourceMapFile(file: string | null | undefined): string | null {
+  const normalized = normalizeSourceMapCandidate(file);
+  return normalized ?? null;
+}
+
+function normalizeSourceMapCandidate(candidate: string | null | undefined): string | null {
+  if (!candidate) {
+    return null;
+  }
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalizedSlashes = trimmed.replace(/\\/g, "/");
+  const schemeMatch = normalizedSlashes.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/+(.+)$/);
+  let candidatePath = normalizedSlashes;
+  if (schemeMatch) {
+    const scheme = schemeMatch[1].toLowerCase();
+    if (!LOCAL_SOURCE_SCHEMES.has(scheme)) {
+      return null;
+    }
+    candidatePath = schemeMatch[2];
+  }
+  return candidatePath.replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {

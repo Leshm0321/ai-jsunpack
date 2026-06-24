@@ -23,6 +23,66 @@ test("analyzeInputPackage inventories dist assets and indexes bundle symbols", a
     assert.equal(result.astIndexes.length, 1);
     assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "n"));
     assert.ok(result.detectedRuntime.includes("vite_or_rollup"));
+    assert.equal(result.sourceMapAnalysis.bundleCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage maps bundles to source candidates from source maps", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-sourcemap-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(path.join(root, "index.html"), '<script type="module" src="/assets/app.js"></script>');
+    await writeFile(path.join(root, "assets", "app.js"), "console.log('bundle');\n//# sourceMappingURL=app.js.map\n");
+    await writeFile(
+      path.join(root, "assets", "app.js.map"),
+      JSON.stringify({
+        version: 3,
+        file: "app.js",
+        sources: ["../src/main.ts", "webpack:///./src/util.ts"],
+        sourcesContent: ["export const main = 1;", "export const util = 1;"],
+        names: [],
+        mappings: ""
+      })
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.equal(result.sourceMapAnalysis.bundleCount, 1);
+    assert.equal(result.sourceMapAnalysis.bundleAnalyses[0].bundlePath, "assets/app.js");
+    assert.deepEqual(result.sourceMapAnalysis.bundleAnalyses[0].sourcesContentAvailable, ["../src/main.ts", "src/util.ts"]);
+    assert.ok(result.sourceMapAnalysis.sourceCandidates.includes("src/main.ts"));
+    assert.ok(result.sourceMapAnalysis.sourceCandidates.includes("src/util.ts"));
+    assert.equal(result.sourceMapAnalysis.warnings.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage records source map sourcesContent gaps", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-sourcemap-warning-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(path.join(root, "index.html"), '<script type="module" src="/assets/app.js"></script>');
+    await writeFile(path.join(root, "assets", "app.js"), "console.log('bundle');\n//# sourceMappingURL=app.js.map\n");
+    await writeFile(
+      path.join(root, "assets", "app.js.map"),
+      JSON.stringify({
+        version: 3,
+        file: "app.js",
+        sources: ["../src/main.ts", "../src/missing.ts"],
+        sourcesContent: ["export const main = 1;", null],
+        names: [],
+        mappings: ""
+      })
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.deepEqual(result.sourceMapAnalysis.bundleAnalyses[0].missingSourcesContent, ["../src/missing.ts"]);
+    assert.ok(result.sourceMapAnalysis.warnings.some((warning) => warning.includes("missing sourcesContent for 1 source")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("missing sourcesContent for 1 source")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -126,6 +186,17 @@ test("analyzeInputPackage extracts zip archives into a safe inventory root", asy
       makeZipArchive([
         { path: "index.html", content: '<div id="app"></div><script type="module" src="/assets/app.js"></script>' },
         { path: "assets/app.js", content: "function fromZip(){return 1} export { fromZip };" },
+        {
+          path: "assets/app.js.map",
+          content: JSON.stringify({
+            version: 3,
+            file: "app.js",
+            sources: ["../src/from-zip.ts"],
+            sourcesContent: ["export const fromZip = 1;"],
+            names: [],
+            mappings: ""
+          })
+        },
         { path: "assets/app.css", content: "#app{display:block}" }
       ])
     );
@@ -137,6 +208,8 @@ test("analyzeInputPackage extracts zip archives into a safe inventory root", asy
     assert.deepEqual(result.inventory.styles, ["assets/app.css"]);
     assert.ok(result.inventory.warnings.some((warning) => warning.includes("zip archive")));
     assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "fromZip"));
+    assert.equal(result.sourceMapAnalysis.bundleAnalyses[0].bundlePath, "assets/app.js");
+    assert.ok(result.sourceMapAnalysis.sourceCandidates.includes("src/from-zip.ts"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
