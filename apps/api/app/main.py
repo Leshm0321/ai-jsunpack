@@ -59,6 +59,7 @@ OPS_WEBHOOK_URL_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_URL"
 OPS_WEBHOOK_TIMEOUT_SECONDS_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS"
 OPS_HEARTBEAT_TTL_SECONDS_ENV = "AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS"
 OPS_INSTANCE_ID_ENV = "AI_JSUNPACK_INSTANCE_ID"
+PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 try:
     DEPLOYMENT_PROFILE = validate_current_environment("api")
@@ -117,6 +118,15 @@ def list_ops_heartbeats(
 def ops_metrics(access: AccessContext = Depends(require_access)) -> OpsMetricsSnapshot:
     require_ops_read_access(access)
     return build_ops_metrics_snapshot()
+
+
+@app.get("/ops/prometheus")
+def ops_prometheus(access: AccessContext = Depends(require_access)) -> Response:
+    require_ops_read_access(access)
+    return Response(
+        content=render_prometheus_metrics(build_ops_metrics_snapshot()),
+        media_type=PROMETHEUS_CONTENT_TYPE,
+    )
 
 
 @app.get("/ops/alerts", response_model=OpsAlertResponse)
@@ -579,6 +589,98 @@ def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
         alerts=alerts,
     )
 
+
+def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
+    lines: list[str] = [
+        "# HELP ai_jsunpack_ops_active_heartbeats Active ops heartbeats in the shared metadata store.",
+        "# TYPE ai_jsunpack_ops_active_heartbeats gauge",
+        f"ai_jsunpack_ops_active_heartbeats {snapshot.active_heartbeat_count}",
+        "# HELP ai_jsunpack_ops_stale_heartbeats Stale or expired ops heartbeats in the shared metadata store.",
+        "# TYPE ai_jsunpack_ops_stale_heartbeats gauge",
+        f"ai_jsunpack_ops_stale_heartbeats {snapshot.stale_heartbeat_count}",
+        "# HELP ai_jsunpack_ops_service_heartbeats Ops heartbeat records grouped by service role.",
+        "# TYPE ai_jsunpack_ops_service_heartbeats gauge",
+    ]
+    for service_role, count in sorted(snapshot.service_heartbeat_counts.items()):
+        lines.append(
+            _prometheus_sample(
+                "ai_jsunpack_ops_service_heartbeats",
+                count,
+                {"service_role": service_role},
+            )
+        )
+
+    lines.extend(
+        [
+            "# HELP ai_jsunpack_jobs_by_status Jobs grouped by current lifecycle status.",
+            "# TYPE ai_jsunpack_jobs_by_status gauge",
+        ]
+    )
+    for status, count in sorted(snapshot.job_status_counts.items()):
+        lines.append(_prometheus_sample("ai_jsunpack_jobs_by_status", count, {"status": status}))
+
+    lines.extend(
+        [
+            "# HELP ai_jsunpack_ops_alerts Active ops alerts grouped by severity, code, and service role.",
+            "# TYPE ai_jsunpack_ops_alerts gauge",
+        ]
+    )
+    alert_counts: dict[tuple[str, str, str], int] = {}
+    for alert in snapshot.alerts:
+        key = (alert.severity, alert.code, alert.service_role or "unknown")
+        alert_counts[key] = alert_counts.get(key, 0) + 1
+    for (severity, code, service_role), count in sorted(alert_counts.items()):
+        lines.append(
+            _prometheus_sample(
+                "ai_jsunpack_ops_alerts",
+                count,
+                {"severity": severity, "code": code, "service_role": service_role},
+            )
+        )
+
+    lines.extend(
+        [
+            "# HELP ai_jsunpack_ops_heartbeat_metric Numeric heartbeat metrics reported by services.",
+            "# TYPE ai_jsunpack_ops_heartbeat_metric gauge",
+        ]
+    )
+    for heartbeat in store.list_ops_heartbeats(include_stale=True, now=snapshot.checked_at):
+        for metric_name, value in sorted(heartbeat.metrics.items()):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            lines.append(
+                _prometheus_sample(
+                    "ai_jsunpack_ops_heartbeat_metric",
+                    value,
+                    {
+                        "service_role": heartbeat.service_role,
+                        "instance_id": heartbeat.instance_id,
+                        "metric": metric_name,
+                    },
+                )
+            )
+
+    return "\n".join(lines) + "\n"
+
+
+def _prometheus_sample(name: str, value: int | float, labels: dict[str, object] | None = None) -> str:
+    if not labels:
+        return f"{name} {_prometheus_number(value)}"
+    rendered_labels = ",".join(
+        f'{key}="{_prometheus_label_value(str(label_value))}"'
+        for key, label_value in sorted(labels.items())
+    )
+    return f"{name}{{{rendered_labels}}} {_prometheus_number(value)}"
+
+
+def _prometheus_label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _prometheus_number(value: int | float) -> str:
+    if isinstance(value, int):
+        return str(value)
+    return repr(float(value))
 
 def deliver_ops_alerts(checked_at: str, alerts: list[OpsAlert], metrics: dict[str, object]) -> OpsAlertDelivery:
     webhook_url = os.getenv(OPS_WEBHOOK_URL_ENV, "").strip()

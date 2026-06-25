@@ -813,6 +813,68 @@ class ApiEndpointTest(unittest.TestCase):
 
         self.assertEqual(uploaded.status_code, 200)
 
+    def test_ops_prometheus_endpoint_requires_auth_and_exports_metrics(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+
+        heartbeat = self.client.post(
+            "/ops/heartbeats",
+            json={
+                "serviceRole": "browser-runner",
+                "instanceId": "runner\\one",
+                "status": "degraded",
+                "ttlSeconds": 30,
+                "metrics": {
+                    "queuedCount": 2,
+                    "retryRate": 0.5,
+                    "backendStatus": "ok",
+                    "ready": True,
+                },
+                "alerts": [
+                    {
+                        "code": "queue\"high",
+                        "severity": "warning",
+                        "message": "Queue is high.",
+                        "field": "queuedCount",
+                        "value": 2,
+                        "threshold": 1,
+                    }
+                ],
+                "metadata": {"queue": "shared"},
+            },
+            headers=self.worker_service_headers,
+        )
+        self.assertEqual(heartbeat.status_code, 200)
+
+        denied = self.client.get("/ops/prometheus")
+        response = self.client.get("/ops/prometheus", headers=self.access_headers)
+
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/plain", response.headers["content-type"])
+        body = response.text
+        self.assertIn("# TYPE ai_jsunpack_ops_active_heartbeats gauge", body)
+        self.assertIn('ai_jsunpack_jobs_by_status{status="queued"} 1', body)
+        self.assertIn('ai_jsunpack_ops_service_heartbeats{service_role="browser-runner"} 1', body)
+        self.assertIn(
+            'ai_jsunpack_ops_alerts{code="queue\\"high",service_role="browser-runner",severity="warning"} 1',
+            body,
+        )
+        self.assertIn(
+            'ai_jsunpack_ops_heartbeat_metric{instance_id="runner\\\\one",metric="queuedCount",service_role="browser-runner"} 2',
+            body,
+        )
+        self.assertIn(
+            'ai_jsunpack_ops_heartbeat_metric{instance_id="runner\\\\one",metric="retryRate",service_role="browser-runner"} 0.5',
+            body,
+        )
+        self.assertNotIn('metric="backendStatus"', body)
+        self.assertNotIn('metric="ready"', body)
+
     def test_ops_endpoints_record_heartbeats_and_deliver_alerts(self):
         webhook_response = MagicMock()
         webhook_response.__enter__.return_value = webhook_response
