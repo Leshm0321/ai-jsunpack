@@ -26,6 +26,9 @@ from .models import (
     JobRecord,
     JobStatus,
     OpsAlert,
+    OpsAlertDelivery,
+    OpsAlertEvent,
+    OpsAlertRule,
     OpsHeartbeatRecord,
     OpsHeartbeatRequest,
     RetentionCategory,
@@ -144,6 +147,28 @@ ops_heartbeats_table = Table(
     Column("updated_at", String, nullable=False),
 )
 
+ops_alert_events_table = Table(
+    "ops_alert_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("checked_at", String, nullable=False, index=True),
+    Column("status", String, nullable=False),
+    Column("severity", String, nullable=False),
+    Column("code", String, nullable=False),
+    Column("message", String, nullable=False),
+    Column("field", String, nullable=False),
+    Column("value", JSON, nullable=True),
+    Column("threshold", JSON, nullable=True),
+    Column("service_role", String, nullable=True),
+    Column("instance_id", String, nullable=True),
+    Column("rule", JSON, nullable=True),
+    Column("alerts", JSON, nullable=False),
+    Column("metrics", JSON, nullable=False),
+    Column("delivery", JSON, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
 
 class DatabaseStore:
     def __init__(
@@ -167,6 +192,7 @@ class DatabaseStore:
         metadata.create_all(self.engine)
         self._ensure_jobs_queue_columns()
         self._ensure_ops_heartbeat_columns()
+        self._ensure_ops_alert_event_columns()
         self._ensure_artifacts_lifecycle_columns()
         self._schema_ready = True
 
@@ -461,6 +487,78 @@ class DatabaseStore:
             return records
         current_time = parse_timestamp(now or utc_now())
         return [record for record in records if parse_timestamp(record.expires_at) > current_time]
+
+    def record_ops_alert_event(self, event: OpsAlertEvent) -> OpsAlertEvent:
+        self.initialize()
+        timestamp = utc_now()
+        event_payload = event.model_dump(by_alias=True)
+        row = {
+            "id": event.id,
+            "checked_at": event.checked_at,
+            "status": event.status,
+            "severity": event.severity,
+            "code": event.code,
+            "message": event.message,
+            "field": event.field,
+            "value": event.value,
+            "threshold": event.threshold,
+            "service_role": event.service_role,
+            "instance_id": event.instance_id,
+            "rule": event.rule.model_dump(by_alias=True) if event.rule is not None else None,
+            "alerts": [alert.model_dump(by_alias=True) for alert in event.alerts],
+            "metrics": event.metrics,
+            "delivery": event.delivery.model_dump(by_alias=True),
+            "created_at": event.created_at or timestamp,
+            "updated_at": timestamp,
+        }
+        with self.engine.begin() as connection:
+            connection.execute(insert(ops_alert_events_table).values(**row))
+            stored = connection.execute(
+                select(ops_alert_events_table).where(ops_alert_events_table.c.id == event_payload["id"])
+            ).mappings().first()
+        if stored is None:
+            raise KeyError(f"Ops alert event not found after insert: {event.id}")
+        return self._ops_alert_event_from_row(stored)
+
+    def update_ops_alert_event_delivery(self, event_id: str, delivery: OpsAlertDelivery) -> OpsAlertEvent:
+        self.initialize()
+        timestamp = utc_now()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(ops_alert_events_table)
+                .where(ops_alert_events_table.c.id == event_id)
+                .values(delivery=delivery.model_dump(by_alias=True), updated_at=timestamp)
+            )
+            if result.rowcount == 0:
+                raise KeyError(f"Ops alert event not found: {event_id}")
+            row = connection.execute(
+                select(ops_alert_events_table).where(ops_alert_events_table.c.id == event_id)
+            ).mappings().first()
+        if row is None:
+            raise KeyError(f"Ops alert event not found: {event_id}")
+        return self._ops_alert_event_from_row(row)
+
+    def list_ops_alert_events(
+        self,
+        *,
+        service_role: str | None = None,
+        severity: str | None = None,
+        code: str | None = None,
+        limit: int = 50,
+    ) -> list[OpsAlertEvent]:
+        self.initialize()
+        query = select(ops_alert_events_table)
+        if service_role is not None:
+            query = query.where(ops_alert_events_table.c.service_role == service_role)
+        if severity is not None:
+            query = query.where(ops_alert_events_table.c.severity == severity)
+        if code is not None:
+            query = query.where(ops_alert_events_table.c.code == code)
+        query = query.order_by(ops_alert_events_table.c.checked_at.desc(), ops_alert_events_table.c.id.desc())
+        query = query.limit(max(1, min(limit, 500)))
+        with self.engine.begin() as connection:
+            rows = connection.execute(query).mappings().all()
+        return [self._ops_alert_event_from_row(row) for row in rows]
 
     def job_status_counts(self) -> dict[str, int]:
         self.initialize()
@@ -830,6 +928,17 @@ class DatabaseStore:
         data["alerts"] = data.get("alerts") or []
         return OpsHeartbeatRecord.model_validate(data)
 
+    def _ops_alert_event_from_row(self, row: Any) -> OpsAlertEvent:
+        data = dict(row)
+        data["alerts"] = data.get("alerts") or []
+        data["metrics"] = data.get("metrics") or {}
+        data["delivery"] = data.get("delivery") or {
+            "status": "not_configured",
+            "attempted": False,
+            "webhookUrlConfigured": False,
+        }
+        return OpsAlertEvent.model_validate(data)
+
     def _ensure_jobs_queue_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("jobs")}
         with self.engine.begin() as connection:
@@ -841,6 +950,20 @@ class DatabaseStore:
         with self.engine.begin() as connection:
             if "heartbeat_metadata" not in existing_columns:
                 connection.execute(text("ALTER TABLE ops_heartbeats ADD COLUMN heartbeat_metadata JSON"))
+
+    def _ensure_ops_alert_event_columns(self) -> None:
+        if not inspect(self.engine).has_table("ops_alert_events"):
+            return
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("ops_alert_events")}
+        alert_event_columns = {
+            "status": "VARCHAR",
+            "rule": "JSON",
+            "delivery": "JSON",
+        }
+        with self.engine.begin() as connection:
+            for column_name, column_type in alert_event_columns.items():
+                if column_name not in existing_columns:
+                    connection.execute(text(f"ALTER TABLE ops_alert_events ADD COLUMN {column_name} {column_type}"))
 
     def _ensure_artifacts_lifecycle_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("artifacts")}

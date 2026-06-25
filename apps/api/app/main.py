@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,8 @@ from .models import (
     CreateJobRequest,
     OpsAlert,
     OpsAlertDelivery,
+    OpsAlertEvent,
+    OpsAlertRule,
     OpsAlertResponse,
     OpsHeartbeatRecord,
     OpsHeartbeatRequest,
@@ -57,6 +60,7 @@ REPORT_DOWNLOAD_FILENAMES = {
 AUDIT_RECORD_CATEGORIES = ("all", "inference", "review", "tool")
 OPS_WEBHOOK_URL_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_URL"
 OPS_WEBHOOK_TIMEOUT_SECONDS_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS"
+OPS_ALERT_RULES_JSON_ENV = "AI_JSUNPACK_ALERT_RULES_JSON"
 OPS_HEARTBEAT_TTL_SECONDS_ENV = "AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS"
 OPS_INSTANCE_ID_ENV = "AI_JSUNPACK_INSTANCE_ID"
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -133,9 +137,22 @@ def ops_prometheus(access: AccessContext = Depends(require_access)) -> Response:
 def ops_alerts(access: AccessContext = Depends(require_access)) -> OpsAlertResponse:
     require_ops_read_access(access)
     snapshot = build_ops_metrics_snapshot()
-    alerts = snapshot.alerts
-    delivery = deliver_ops_alerts(snapshot.checked_at, alerts, snapshot.metrics)
-    return OpsAlertResponse(checked_at=snapshot.checked_at, alerts=alerts, delivery=delivery)
+    events = record_ops_alert_events(snapshot)
+    delivery = deliver_ops_alerts(snapshot.checked_at, snapshot.alerts, snapshot.metrics, events=events)
+    delivered_events = update_ops_alert_event_deliveries(events, delivery)
+    return OpsAlertResponse(checked_at=snapshot.checked_at, alerts=snapshot.alerts, delivery=delivery, events=delivered_events)
+
+
+@app.get("/ops/alert-events", response_model=list[OpsAlertEvent])
+def list_ops_alert_events(
+    service_role: str | None = None,
+    severity: str | None = None,
+    code: str | None = None,
+    limit: int = 50,
+    access: AccessContext = Depends(require_access),
+) -> list[OpsAlertEvent]:
+    require_ops_read_access(access)
+    return store.list_ops_alert_events(service_role=service_role, severity=severity, code=code, limit=limit)
 
 
 @app.post("/jobs", response_model=JobSummary)
@@ -577,6 +594,35 @@ def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
         "serviceHeartbeatCounts": service_heartbeat_counts,
         "deploymentProfile": DEPLOYMENT_PROFILE.status,
     }
+    browser_runner_heartbeats = [
+        heartbeat
+        for heartbeat in heartbeats
+        if heartbeat.service_role == "browser-runner" and isinstance(heartbeat.metrics, dict)
+    ]
+    latest_service_metrics: dict[str, dict[str, object]] = {}
+    for heartbeat in heartbeats:
+        if not isinstance(heartbeat.metrics, dict):
+            continue
+        current = latest_service_metrics.get(heartbeat.service_role)
+        if current is None or str(current.get("checkedAt") or "") <= heartbeat.checked_at:
+            latest_service_metrics[heartbeat.service_role] = {
+                **heartbeat.metrics,
+                "status": heartbeat.status,
+                "instanceId": heartbeat.instance_id,
+                "checkedAt": heartbeat.checked_at,
+                "expiresAt": heartbeat.expires_at,
+            }
+    for service_role, service_metrics in latest_service_metrics.items():
+        metrics[service_role] = service_metrics
+    if browser_runner_heartbeats:
+        latest_browser_runner = max(browser_runner_heartbeats, key=lambda heartbeat: heartbeat.checked_at)
+        metrics["browserRunner"] = {
+            **latest_browser_runner.metrics,
+            "status": latest_browser_runner.status,
+            "instanceId": latest_browser_runner.instance_id,
+            "checkedAt": latest_browser_runner.checked_at,
+            "expiresAt": latest_browser_runner.expires_at,
+        }
     return OpsMetricsSnapshot(
         checked_at=checked_at,
         service_role="api",
@@ -663,6 +709,226 @@ def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
     return "\n".join(lines) + "\n"
 
 
+def record_ops_alert_events(snapshot: OpsMetricsSnapshot) -> list[OpsAlertEvent]:
+    events: list[OpsAlertEvent] = []
+    for alert in snapshot.alerts:
+        events.append(new_ops_alert_event_from_alert(snapshot=snapshot, alert=alert, rule=None))
+    for rule in configured_ops_alert_rules():
+        if not rule.enabled:
+            continue
+        value = nested_metric_value(snapshot.metrics, rule.metric_path)
+        if value is None or not rule_matches(value, rule.operator, rule.threshold):
+            continue
+        alert = OpsAlert(
+            code=rule.code,
+            severity=rule.severity,
+            message=rule.message,
+            field=rule.metric_path,
+            value=value,
+            threshold=rule.threshold,
+            service_role=rule.service_role,
+            instance_id=None,
+            checked_at=snapshot.checked_at,
+        )
+        events.append(new_ops_alert_event_from_alert(snapshot=snapshot, alert=alert, rule=rule))
+    deduped = dedupe_ops_alert_events(events)
+    return [store.record_ops_alert_event(event) for event in deduped]
+
+
+def update_ops_alert_event_deliveries(events: list[OpsAlertEvent], delivery: OpsAlertDelivery) -> list[OpsAlertEvent]:
+    updated: list[OpsAlertEvent] = []
+    for event in events:
+        event_delivery = OpsAlertDelivery(
+            status=delivery.status,
+            attempted=delivery.attempted,
+            webhook_url_configured=delivery.webhook_url_configured,
+            event_id=event.id,
+            delivered_at=delivery.delivered_at,
+            error=delivery.error,
+        )
+        try:
+            updated.append(store.update_ops_alert_event_delivery(event.id, event_delivery))
+        except KeyError:
+            updated.append(event.model_copy(update={"delivery": event_delivery}))
+    return updated
+
+
+def new_ops_alert_event_from_alert(
+    *,
+    snapshot: OpsMetricsSnapshot,
+    alert: OpsAlert,
+    rule: OpsAlertRule | None,
+) -> OpsAlertEvent:
+    delivery = OpsAlertDelivery(
+        status="not_configured",
+        attempted=False,
+        webhook_url_configured=bool(os.getenv(OPS_WEBHOOK_URL_ENV, "").strip()),
+        event_id=None,
+        delivered_at=None,
+        error=None,
+    )
+    return OpsAlertEvent(
+        id=f"ops_alert_event_{uuid4().hex[:12]}",
+        checked_at=snapshot.checked_at,
+        status="active",
+        severity=alert.severity,
+        code=alert.code,
+        message=alert.message,
+        field=alert.field,
+        value=alert.value,
+        threshold=alert.threshold,
+        service_role=alert.service_role,
+        instance_id=alert.instance_id,
+        rule=rule,
+        alerts=[alert],
+        metrics=compact_alert_metrics(snapshot.metrics, alert, rule),
+        delivery=delivery,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+
+
+def dedupe_ops_alert_events(events: list[OpsAlertEvent]) -> list[OpsAlertEvent]:
+    seen: set[tuple[str, str | None, str | None, str]] = set()
+    deduped: list[OpsAlertEvent] = []
+    for event in events:
+        key = (event.code, event.service_role, event.instance_id, event.field)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return deduped
+
+
+def configured_ops_alert_rules() -> list[OpsAlertRule]:
+    rules = default_ops_alert_rules()
+    raw_rules = os.getenv(OPS_ALERT_RULES_JSON_ENV, "").strip()
+    if not raw_rules:
+        return rules
+    try:
+        payload = json.loads(raw_rules)
+    except json.JSONDecodeError:
+        return rules
+    raw_items = payload.get("rules") if isinstance(payload, dict) else payload
+    if not isinstance(raw_items, list):
+        return rules
+    for raw_rule in raw_items:
+        if not isinstance(raw_rule, dict):
+            continue
+        try:
+            rules.append(OpsAlertRule.model_validate({**raw_rule, "source": "env"}))
+        except Exception:
+            continue
+    return rules
+
+
+def default_ops_alert_rules() -> list[OpsAlertRule]:
+    return [
+        OpsAlertRule(
+            code="browser_runner_queue_backlog",
+            severity="warning",
+            metric_path="browserRunner.queuedCount",
+            operator="gte",
+            threshold=10,
+            message="Browser Runner queue backlog exceeded the default threshold.",
+            service_role="browser-runner",
+            enabled=True,
+            source="default",
+        ),
+        OpsAlertRule(
+            code="browser_runner_retry_rate_high",
+            severity="warning",
+            metric_path="browserRunner.retryRate",
+            operator="gte",
+            threshold=0.25,
+            message="Browser Runner retry rate exceeded the default threshold.",
+            service_role="browser-runner",
+            enabled=True,
+            source="default",
+        ),
+        OpsAlertRule(
+            code="browser_runner_expired_running",
+            severity="critical",
+            metric_path="browserRunner.expiredRunningCount",
+            operator="gt",
+            threshold=0,
+            message="Browser Runner has expired running jobs that need lease recovery.",
+            service_role="browser-runner",
+            enabled=True,
+            source="default",
+        ),
+        OpsAlertRule(
+            code="ops_stale_heartbeats",
+            severity="critical",
+            metric_path="staleHeartbeatCount",
+            operator="gt",
+            threshold=0,
+            message="One or more service heartbeats are stale or expired.",
+            service_role=None,
+            enabled=True,
+            source="default",
+        ),
+    ]
+
+
+def compact_alert_metrics(metrics: dict[str, object], alert: OpsAlert, rule: OpsAlertRule | None) -> dict[str, object]:
+    selected: dict[str, object] = {
+        "alertValue": alert.value,
+        "alertThreshold": alert.threshold,
+    }
+    if rule is not None:
+        selected["ruleMetricPath"] = rule.metric_path
+        selected["ruleSource"] = rule.source
+    for key in ("jobStatusCounts", "activeHeartbeatCount", "staleHeartbeatCount", "serviceHeartbeatCounts", "deploymentProfile"):
+        if key in metrics:
+            selected[key] = metrics[key]
+    browser_runner = metrics.get("browserRunner")
+    if isinstance(browser_runner, dict):
+        selected["browserRunner"] = {
+            key: browser_runner.get(key)
+            for key in (
+                "queueBackend",
+                "backendStatus",
+                "queuedCount",
+                "runningCount",
+                "retryRate",
+                "leaseRecoveryCount",
+                "expiredRunningCount",
+            )
+            if key in browser_runner
+        }
+    return selected
+
+
+def nested_metric_value(metrics: dict[str, object], path: str) -> object | None:
+    current: object = metrics
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def rule_matches(value: object, operator: str, threshold: object) -> bool:
+    if operator in {"gt", "gte", "lt", "lte"}:
+        if isinstance(value, bool) or isinstance(threshold, bool):
+            return False
+        if not isinstance(value, (int, float)) or not isinstance(threshold, (int, float)):
+            return False
+        if operator == "gt":
+            return value > threshold
+        if operator == "gte":
+            return value >= threshold
+        if operator == "lt":
+            return value < threshold
+        return value <= threshold
+    if operator == "eq":
+        return value == threshold
+    if operator == "neq":
+        return value != threshold
+    return False
+
+
 def _prometheus_sample(name: str, value: int | float, labels: dict[str, object] | None = None) -> str:
     if not labels:
         return f"{name} {_prometheus_number(value)}"
@@ -682,18 +948,27 @@ def _prometheus_number(value: int | float) -> str:
         return str(value)
     return repr(float(value))
 
-def deliver_ops_alerts(checked_at: str, alerts: list[OpsAlert], metrics: dict[str, object]) -> OpsAlertDelivery:
+def deliver_ops_alerts(
+    checked_at: str,
+    alerts: list[OpsAlert],
+    metrics: dict[str, object],
+    *,
+    events: list[OpsAlertEvent] | None = None,
+) -> OpsAlertDelivery:
     webhook_url = os.getenv(OPS_WEBHOOK_URL_ENV, "").strip()
     if not webhook_url:
         return OpsAlertDelivery(
             status="not_configured",
             attempted=False,
             webhook_url_configured=False,
+            event_id=events[0].id if events else None,
+            delivered_at=None,
             error=None,
         )
     payload = {
         "checkedAt": checked_at,
         "alerts": [alert.model_dump(by_alias=True) for alert in alerts],
+        "events": [event.model_dump(by_alias=True) for event in events or []],
         "metrics": metrics,
     }
     timeout_seconds = parse_float_env(OPS_WEBHOOK_TIMEOUT_SECONDS_ENV, 2.0)
@@ -711,12 +986,16 @@ def deliver_ops_alerts(checked_at: str, alerts: list[OpsAlert], metrics: dict[st
             status="failed",
             attempted=True,
             webhook_url_configured=True,
+            event_id=events[0].id if events else None,
+            delivered_at=None,
             error=str(error),
         )
     return OpsAlertDelivery(
         status="delivered",
         attempted=True,
         webhook_url_configured=True,
+        event_id=events[0].id if events else None,
+        delivered_at=utc_now(),
         error=None,
     )
 

@@ -173,9 +173,19 @@ class PackagingRunner:
             "reportSections": self._load_json_artifacts(job.id, artifacts, store, "report_section"),
             "buildArtifacts": self._load_json_artifacts(job.id, artifacts, store, "build_artifact"),
             "repairInstructions": self._load_json_artifacts(job.id, artifacts, store, "repair_instruction"),
+            "opsAlertEvents": self._load_ops_alert_events(store),
         }
         payload["reviewFixSummary"] = self._review_fix_summary(payload["runtimeTraces"])
         return payload
+
+    def _load_ops_alert_events(self, store) -> list[dict[str, Any]]:
+        list_events = getattr(store, "list_ops_alert_events", None)
+        if not callable(list_events):
+            return []
+        try:
+            return [event.model_dump(by_alias=True) for event in list_events(limit=50)]
+        except Exception:
+            return []
 
     def _load_tool_registry(self, job_id: str, artifacts: list[ArtifactRecord], store) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -321,6 +331,7 @@ class PackagingRunner:
         report_sections = audit_payload["reportSections"]
         build_artifacts = audit_payload["buildArtifacts"]
         review_fix_summary = audit_payload["reviewFixSummary"]
+        ops_alert_events = self._ops_alert_event_rows(audit_payload["opsAlertEvents"])
         attachments = evidence_index["attachments"]
 
         lines = [
@@ -390,6 +401,13 @@ class PackagingRunner:
                     "backendHealthStatus",
                     "alerts",
                 ),
+            ),
+            "",
+            "## Ops Alert Summary",
+            "",
+            self._status_table(
+                ops_alert_events,
+                ("checkedAt", "severity", "code", "serviceRole", "instanceId", "field", "value", "threshold", "deliveryStatus"),
             ),
             "",
             "## Runtime Compare",
@@ -467,6 +485,7 @@ class PackagingRunner:
         runtime_diagnoses = audit_payload["runtimeDiagnoses"]
         report_sections = audit_payload["reportSections"]
         review_fix_summary = audit_payload["reviewFixSummary"]
+        ops_alert_events = self._ops_alert_event_rows(audit_payload["opsAlertEvents"])
         attachments = evidence_index["attachments"]
         decision_text = decision["reason"] or "All collected build, review, and runtime validation evidence passed."
 
@@ -551,6 +570,11 @@ class PackagingRunner:
                         "backendHealthStatus",
                         "alerts",
                     ),
+                ),
+                "<h2>Ops Alert Summary</h2>",
+                self._html_table(
+                    ops_alert_events,
+                    ("checkedAt", "severity", "code", "serviceRole", "instanceId", "field", "value", "threshold", "deliveryStatus"),
                 ),
                 "<h2>Runtime Compare</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
@@ -1197,6 +1221,12 @@ class PackagingRunner:
                 source="review_fix_summary",
                 description="Unified Review/Fix convergence outcome, retry budget, and repair application summary.",
             ),
+            self._package_content(
+                path="ops-alert-events.json",
+                content_type="application/json",
+                source="ops_alert_event",
+                description="Recent Ops alert events and webhook delivery audit records visible at packaging time.",
+            ),
         ]
         if generated_project is None:
             contents.append(
@@ -1274,7 +1304,8 @@ class PackagingRunner:
         review_details = self._review_report_details(job_id=job_id, store=store, artifacts=artifacts)
         runtime_compare_details = self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts)
         review_fix_details = self._review_fix_report_details(job_id=job_id, store=store, artifacts=artifacts)
-        risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details, *review_fix_details])
+        ops_alert_details = self._ops_alert_report_details(store)
+        risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details, *review_fix_details, *ops_alert_details])
         return [
             self._report_section(
                 title="Completion Decision",
@@ -1328,6 +1359,14 @@ class PackagingRunner:
                 summary="Remote Browser Runner queue length, latency, retry, lease recovery, backend health, and alert evidence.",
                 artifact_kinds=("runtime_trace",),
                 artifact_ids_by_kind=artifact_ids_by_kind,
+            ),
+            self._report_section(
+                title="Ops Alert Summary",
+                anchor="ops-alert-summary",
+                summary="Recent configured Ops alert events, service scope, and webhook delivery audit status.",
+                artifact_kinds=("ops_alert_event",),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+                details=ops_alert_details,
             ),
             self._report_section(
                 title="Agent Runtime Audit",
@@ -1401,6 +1440,50 @@ class PackagingRunner:
             "evidenceLinks": [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids)],
             "details": details or [],
         }
+
+    def _ops_alert_event_rows(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+            rows.append(
+                {
+                    "id": event.get("id"),
+                    "checkedAt": event.get("checkedAt"),
+                    "severity": event.get("severity"),
+                    "code": event.get("code"),
+                    "serviceRole": event.get("serviceRole"),
+                    "instanceId": event.get("instanceId"),
+                    "field": event.get("field"),
+                    "value": event.get("value"),
+                    "threshold": event.get("threshold"),
+                    "deliveryStatus": delivery.get("status"),
+                    "deliveryAttempted": delivery.get("attempted"),
+                    "deliveryError": delivery.get("error"),
+                }
+            )
+        return rows
+
+    def _ops_alert_report_details(self, store) -> list[dict[str, Any]]:
+        events = self._load_ops_alert_events(store)
+        details: list[dict[str, Any]] = []
+        for row in self._ops_alert_event_rows(events):
+            severity = str(row.get("severity") or "warning")
+            status = "fail" if severity == "critical" else "best_effort"
+            details.append(
+                {
+                    "label": "Ops alert event",
+                    "value": f"{row.get('code') or 'unknown'} / {row.get('serviceRole') or 'global'}",
+                    "status": status,
+                    "details": {
+                        **row,
+                        "failureClass": "resource_limit" if status == "fail" else "unknown",
+                        "evidenceLinks": [],
+                    },
+                }
+            )
+        return details
 
     def _build_typecheck_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
         details: list[dict[str, Any]] = []
@@ -2033,6 +2116,7 @@ class PackagingRunner:
             archive.writestr("report-sections.json", self._json_text(audit_payload["reportSections"]))
             archive.writestr("repair-instructions.json", self._json_text(audit_payload["repairInstructions"]))
             archive.writestr("review-fix-summary.json", self._json_text(audit_payload["reviewFixSummary"]))
+            archive.writestr("ops-alert-events.json", self._json_text(audit_payload["opsAlertEvents"]))
             self._write_evidence_attachments(archive, artifacts, evidence_index, store)
             if generated_project is None:
                 archive.writestr(

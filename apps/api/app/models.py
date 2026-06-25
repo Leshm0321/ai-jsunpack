@@ -56,6 +56,7 @@ ArtifactKind = Literal[
     "repair_instruction",
     "runtime_diagnosis",
     "report_section",
+    "ops_alert_event",
     "result_package",
     "audit_report",
     "html_report",
@@ -117,6 +118,9 @@ BrowserRunStatus = Literal["queued", "running", "pass", "fail", "best_effort"]
 BrowserRunnerHealthStatus = Literal["ok", "degraded"]
 BrowserRunnerAlertSeverity = Literal["warning", "critical"]
 OpsAlertSeverity = Literal["warning", "critical"]
+OpsAlertRuleOperator = Literal["gt", "gte", "lt", "lte", "eq", "neq"]
+OpsAlertRuleSource = Literal["default", "env"]
+OpsAlertEventStatus = Literal["active", "resolved"]
 
 
 def to_camel(value: str) -> str:
@@ -598,13 +602,48 @@ class OpsAlertDelivery(ContractModel):
     status: Literal["not_configured", "delivered", "failed"]
     attempted: bool
     webhook_url_configured: bool
+    event_id: str | None = None
+    delivered_at: str | None = None
     error: str | None = None
+
+
+class OpsAlertRule(ContractModel):
+    code: str
+    severity: OpsAlertSeverity
+    metric_path: str
+    operator: OpsAlertRuleOperator
+    threshold: Any
+    message: str
+    service_role: str | None = None
+    enabled: bool = True
+    source: OpsAlertRuleSource = "default"
+
+
+class OpsAlertEvent(ContractModel):
+    id: str
+    checked_at: str
+    status: OpsAlertEventStatus = "active"
+    severity: OpsAlertSeverity
+    code: str
+    message: str
+    field: str
+    value: Any = None
+    threshold: Any = None
+    service_role: str | None = None
+    instance_id: str | None = None
+    rule: OpsAlertRule | None = None
+    alerts: list[OpsAlert] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    delivery: OpsAlertDelivery
+    created_at: str
+    updated_at: str
 
 
 class OpsAlertResponse(ContractModel):
     checked_at: str
     alerts: list[OpsAlert]
     delivery: OpsAlertDelivery
+    events: list[OpsAlertEvent] = Field(default_factory=list)
 
 
 class ToolCall(ContractModel):

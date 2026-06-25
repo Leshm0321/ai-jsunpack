@@ -5,12 +5,89 @@ import zipfile
 from pathlib import Path
 
 from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
-from apps.api.app.models import CreateJobRequest
+from apps.api.app.models import CreateJobRequest, OpsAlert, OpsAlertDelivery, OpsAlertEvent, OpsAlertRule
 from apps.api.app.store import artifacts_table, create_store
 from apps.worker.worker.packaging import PackagingRunner
 
 
 class PackagingRunnerTest(unittest.TestCase):
+    def test_packaging_includes_ops_alert_event_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                checked_at = "2026-06-22T08:00:00+00:00"
+                rule = OpsAlertRule(
+                    code="sandbox_runner_degraded",
+                    severity="critical",
+                    metric_path="worker.sandboxRunnerDegraded",
+                    operator="eq",
+                    threshold=True,
+                    message="Sandbox runner degraded to a weaker boundary.",
+                    service_role="worker",
+                    enabled=True,
+                    source="env",
+                )
+                alert = OpsAlert(
+                    code=rule.code,
+                    severity=rule.severity,
+                    message=rule.message,
+                    field=rule.metric_path,
+                    value=True,
+                    threshold=True,
+                    service_role="worker",
+                    instance_id="worker-a",
+                    checked_at=checked_at,
+                )
+                store.record_ops_alert_event(
+                    OpsAlertEvent(
+                        id="ops_alert_event_packaging",
+                        checked_at=checked_at,
+                        status="active",
+                        severity="critical",
+                        code=rule.code,
+                        message=rule.message,
+                        field=rule.metric_path,
+                        value=True,
+                        threshold=True,
+                        service_role="worker",
+                        instance_id="worker-a",
+                        rule=rule,
+                        alerts=[alert],
+                        metrics={"worker": {"sandboxRunnerDegraded": True}},
+                        delivery=OpsAlertDelivery(
+                            status="failed",
+                            attempted=True,
+                            webhook_url_configured=True,
+                            event_id="ops_alert_event_packaging",
+                            error="timeout",
+                        ),
+                        created_at=checked_at,
+                        updated_at=checked_at,
+                    )
+                )
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
+                evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
+                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                    ops_events = json.loads(archive.read("ops-alert-events.json").decode("utf-8"))
+                    audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+
+                self.assertIn("## Ops Alert Summary", report)
+                self.assertIn("sandbox_runner_degraded", report)
+                self.assertIn("ops-alert-summary", sections)
+                self.assertEqual(sections["ops-alert-summary"]["details"][0]["status"], "fail")
+                self.assertEqual(ops_events[0]["id"], "ops_alert_event_packaging")
+                self.assertEqual(audit_payload["opsAlertEvents"][0]["delivery"]["status"], "failed")
+            finally:
+                store.close()
+
     def test_completion_decision_uses_latest_attempt_per_validation_group(self):
         decision = PackagingRunner()._completion_decision(
             {

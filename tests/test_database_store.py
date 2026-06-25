@@ -12,7 +12,15 @@ from apps.api.app.artifact_store import (
     S3CompatibleArtifactStore,
     artifact_lifecycle_rules,
 )
-from apps.api.app.models import CreateJobRequest, OpsAlert, OpsHeartbeatRequest, RetentionCleanupRequest
+from apps.api.app.models import (
+    CreateJobRequest,
+    OpsAlert,
+    OpsAlertDelivery,
+    OpsAlertEvent,
+    OpsAlertRule,
+    OpsHeartbeatRequest,
+    RetentionCleanupRequest,
+)
 from apps.api.app.store import create_artifact_store, create_store
 
 
@@ -358,6 +366,85 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertEqual({heartbeat.service_role for heartbeat in all_heartbeats}, {"worker", "browser-runner"})
                 self.assertEqual([heartbeat.service_role for heartbeat in active_only], ["worker"])
                 self.assertEqual(active_only[0].metadata["role"], "worker")
+            finally:
+                store.close()
+
+    def test_ops_alert_events_persist_filter_and_update_delivery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                checked_at = datetime(2026, 6, 22, 8, 0, tzinfo=timezone.utc).isoformat()
+                rule = OpsAlertRule(
+                    code="browser_runner_queue_backlog",
+                    severity="warning",
+                    metric_path="browserRunner.queuedCount",
+                    operator="gte",
+                    threshold=2,
+                    message="Queue backlog exceeded threshold.",
+                    service_role="browser-runner",
+                    enabled=True,
+                    source="env",
+                )
+                alert = OpsAlert(
+                    code=rule.code,
+                    severity=rule.severity,
+                    message=rule.message,
+                    field=rule.metric_path,
+                    value=3,
+                    threshold=2,
+                    service_role="browser-runner",
+                    instance_id="runner-a",
+                    checked_at=checked_at,
+                )
+                event = store.record_ops_alert_event(
+                    OpsAlertEvent(
+                        id="ops_alert_event_test",
+                        checked_at=checked_at,
+                        status="active",
+                        severity="warning",
+                        code=rule.code,
+                        message=rule.message,
+                        field=rule.metric_path,
+                        value=3,
+                        threshold=2,
+                        service_role="browser-runner",
+                        instance_id="runner-a",
+                        rule=rule,
+                        alerts=[alert],
+                        metrics={"browserRunner": {"queuedCount": 3}},
+                        delivery=OpsAlertDelivery(
+                            status="not_configured",
+                            attempted=False,
+                            webhook_url_configured=False,
+                            event_id=None,
+                        ),
+                        created_at=checked_at,
+                        updated_at=checked_at,
+                    )
+                )
+                delivered = store.update_ops_alert_event_delivery(
+                    event.id,
+                    OpsAlertDelivery(
+                        status="delivered",
+                        attempted=True,
+                        webhook_url_configured=True,
+                        event_id=event.id,
+                        delivered_at=checked_at,
+                    ),
+                )
+                all_events = store.list_ops_alert_events()
+                filtered = store.list_ops_alert_events(service_role="browser-runner", severity="warning", code=rule.code)
+
+                self.assertEqual(event.rule.metric_path, "browserRunner.queuedCount")
+                self.assertEqual(delivered.delivery.status, "delivered")
+                self.assertEqual(delivered.delivery.event_id, "ops_alert_event_test")
+                self.assertEqual([item.id for item in all_events], ["ops_alert_event_test"])
+                self.assertEqual([item.id for item in filtered], ["ops_alert_event_test"])
+                self.assertEqual(filtered[0].alerts[0].instance_id, "runner-a")
             finally:
                 store.close()
 

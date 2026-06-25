@@ -51,6 +51,7 @@ export const ARTIFACT_KINDS = [
   "repair_instruction",
   "runtime_diagnosis",
   "report_section",
+  "ops_alert_event",
   "result_package",
   "audit_report",
   "html_report",
@@ -543,13 +544,48 @@ export interface OpsAlertDelivery {
   status: "not_configured" | "delivered" | "failed";
   attempted: boolean;
   webhookUrlConfigured: boolean;
+  eventId?: string | null;
+  deliveredAt?: string | null;
   error?: string | null;
+}
+
+export interface OpsAlertRule {
+  code: string;
+  severity: "warning" | "critical";
+  metricPath: string;
+  operator: "gt" | "gte" | "lt" | "lte" | "eq" | "neq";
+  threshold: unknown;
+  message: string;
+  serviceRole?: string | null;
+  enabled: boolean;
+  source: "default" | "env";
+}
+
+export interface OpsAlertEvent {
+  id: string;
+  checkedAt: string;
+  status: "active" | "resolved";
+  severity: "warning" | "critical";
+  code: string;
+  message: string;
+  field: string;
+  value?: unknown;
+  threshold?: unknown;
+  serviceRole?: string | null;
+  instanceId?: string | null;
+  rule?: OpsAlertRule | null;
+  alerts: OpsAlert[];
+  metrics: Record<string, unknown>;
+  delivery: OpsAlertDelivery;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface OpsAlertResponse {
   checkedAt: string;
   alerts: OpsAlert[];
   delivery: OpsAlertDelivery;
+  events: OpsAlertEvent[];
 }
 
 export interface ToolCall {
@@ -1078,9 +1114,64 @@ const opsAlertDeliverySchema = {
     status: { type: "string", enum: ["not_configured", "delivered", "failed"] },
     attempted: booleanSchema,
     webhookUrlConfigured: booleanSchema,
+    eventId: stringSchema,
+    deliveredAt: stringSchema,
     error: stringSchema
   },
   required: ["status", "attempted", "webhookUrlConfigured"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const opsAlertRuleSchema = {
+  type: "object",
+  properties: {
+    code: stringSchema,
+    severity: { type: "string", enum: ["warning", "critical"] },
+    metricPath: stringSchema,
+    operator: { type: "string", enum: ["gt", "gte", "lt", "lte", "eq", "neq"] },
+    threshold: {},
+    message: stringSchema,
+    serviceRole: stringSchema,
+    enabled: booleanSchema,
+    source: { type: "string", enum: ["default", "env"] }
+  },
+  required: ["code", "severity", "metricPath", "operator", "threshold", "message", "enabled", "source"],
+  additionalProperties: false
+} as const satisfies JsonSchema;
+const opsAlertEventSchema = {
+  type: "object",
+  properties: {
+    id: stringSchema,
+    checkedAt: stringSchema,
+    status: { type: "string", enum: ["active", "resolved"] },
+    severity: { type: "string", enum: ["warning", "critical"] },
+    code: stringSchema,
+    message: stringSchema,
+    field: stringSchema,
+    value: {},
+    threshold: {},
+    serviceRole: stringSchema,
+    instanceId: stringSchema,
+    rule: opsAlertRuleSchema,
+    alerts: { type: "array", items: opsAlertSchema },
+    metrics: opsMetricsMapSchema,
+    delivery: opsAlertDeliverySchema,
+    createdAt: stringSchema,
+    updatedAt: stringSchema
+  },
+  required: [
+    "id",
+    "checkedAt",
+    "status",
+    "severity",
+    "code",
+    "message",
+    "field",
+    "alerts",
+    "metrics",
+    "delivery",
+    "createdAt",
+    "updatedAt"
+  ],
   additionalProperties: false
 } as const satisfies JsonSchema;
 const runtimeScreenshotDiffSchema = {
@@ -1769,10 +1860,24 @@ export const SHARED_JSON_SCHEMAS = {
       status: { type: "string", enum: ["not_configured", "delivered", "failed"] },
       attempted: booleanSchema,
       webhookUrlConfigured: booleanSchema,
+      eventId: stringSchema,
+      deliveredAt: stringSchema,
       error: stringSchema
     },
     required: ["status", "attempted", "webhookUrlConfigured"],
     additionalProperties: false
+  },
+  opsAlertRule: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-alert-rule.json",
+    title: "OpsAlertRule",
+    ...opsAlertRuleSchema
+  },
+  opsAlertEvent: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://ai-jsunpack.local/schemas/ops-alert-event.json",
+    title: "OpsAlertEvent",
+    ...opsAlertEventSchema
   },
   opsAlertResponse: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -1782,9 +1887,10 @@ export const SHARED_JSON_SCHEMAS = {
     properties: {
       checkedAt: stringSchema,
       alerts: { type: "array", items: opsAlertSchema },
-      delivery: opsAlertDeliverySchema
+      delivery: opsAlertDeliverySchema,
+      events: { type: "array", items: opsAlertEventSchema }
     },
-    required: ["checkedAt", "alerts", "delivery"],
+    required: ["checkedAt", "alerts", "delivery", "events"],
     additionalProperties: false
   },
   toolCall: {
@@ -2513,13 +2619,51 @@ export const EXAMPLE_OPS_ALERT_DELIVERY = {
   status: "not_configured",
   attempted: false,
   webhookUrlConfigured: false,
+  eventId: null,
+  deliveredAt: null,
   error: null
 } as const satisfies OpsAlertDelivery;
+
+export const EXAMPLE_OPS_ALERT_RULE = {
+  code: "browser_runner_queue_backlog",
+  severity: "warning",
+  metricPath: "metrics.browserRunner.queuedCount",
+  operator: "gte",
+  threshold: 2,
+  message: "Browser Runner queue backlog exceeded the configured threshold.",
+  serviceRole: "browser-runner",
+  enabled: true,
+  source: "default"
+} as const satisfies OpsAlertRule;
+
+export const EXAMPLE_OPS_ALERT_EVENT = {
+  id: "ops_alert_event_contract_example",
+  checkedAt: exampleTimestamp,
+  status: "active",
+  severity: "warning",
+  code: EXAMPLE_OPS_ALERT_RULE.code,
+  message: EXAMPLE_OPS_ALERT_RULE.message,
+  field: EXAMPLE_OPS_ALERT_RULE.metricPath,
+  value: 2,
+  threshold: EXAMPLE_OPS_ALERT_RULE.threshold,
+  serviceRole: "browser-runner",
+  instanceId: "browser-runner-contract",
+  rule: EXAMPLE_OPS_ALERT_RULE,
+  alerts: [EXAMPLE_OPS_ALERT],
+  metrics: {
+    queuedCount: 2,
+    retryRate: 0.25
+  },
+  delivery: EXAMPLE_OPS_ALERT_DELIVERY,
+  createdAt: exampleTimestamp,
+  updatedAt: exampleTimestamp
+} as const satisfies OpsAlertEvent;
 
 export const EXAMPLE_OPS_ALERT_RESPONSE = {
   checkedAt: exampleTimestamp,
   alerts: [EXAMPLE_OPS_ALERT],
-  delivery: EXAMPLE_OPS_ALERT_DELIVERY
+  delivery: EXAMPLE_OPS_ALERT_DELIVERY,
+  events: [EXAMPLE_OPS_ALERT_EVENT]
 } as const satisfies OpsAlertResponse;
 
 export const EXAMPLE_TOOL_CALL = {
@@ -2675,6 +2819,8 @@ export const SHARED_CONTRACT_EXAMPLES = {
   opsHeartbeatRecord: EXAMPLE_OPS_HEARTBEAT_RECORD,
   opsMetricsSnapshot: EXAMPLE_OPS_METRICS_SNAPSHOT,
   opsAlertDelivery: EXAMPLE_OPS_ALERT_DELIVERY,
+  opsAlertRule: EXAMPLE_OPS_ALERT_RULE,
+  opsAlertEvent: EXAMPLE_OPS_ALERT_EVENT,
   opsAlertResponse: EXAMPLE_OPS_ALERT_RESPONSE,
   toolCall: EXAMPLE_TOOL_CALL,
   toolRegistryEntry: EXAMPLE_TOOL_REGISTRY_ENTRY,

@@ -886,6 +886,20 @@ class ApiEndpointTest(unittest.TestCase):
             {
                 "AI_JSUNPACK_ALERT_WEBHOOK_URL": "https://ops.example/webhook",
                 "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS": "1",
+                "AI_JSUNPACK_ALERT_RULES_JSON": json.dumps(
+                    [
+                        {
+                            "code": "worker_job_count_high",
+                            "severity": "critical",
+                            "metricPath": "worker.jobCount",
+                            "operator": "gte",
+                            "threshold": 1,
+                            "message": "Worker job count crossed test threshold.",
+                            "serviceRole": "worker",
+                            "enabled": True,
+                        }
+                    ]
+                ),
             },
             clear=False,
         ), patch("apps.api.app.main.urlopen", return_value=webhook_response) as mocked_urlopen:
@@ -914,20 +928,28 @@ class ApiEndpointTest(unittest.TestCase):
             metrics = self.client.get("/ops/metrics", headers=self.access_headers)
             heartbeats = self.client.get("/ops/heartbeats?service_role=worker", headers=self.access_headers)
             alerts = self.client.get("/ops/alerts", headers=self.access_headers)
+            alert_events = self.client.get("/ops/alert-events?service_role=worker", headers=self.access_headers)
 
         self.assertEqual(heartbeat.status_code, 200)
         self.assertEqual(metrics.status_code, 200)
         self.assertEqual(heartbeats.status_code, 200)
         self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(alert_events.status_code, 200)
         self.assertEqual(heartbeat.json()["serviceRole"], "worker")
         self.assertGreaterEqual(metrics.json()["activeHeartbeatCount"], 2)
         self.assertEqual(metrics.json()["serviceHeartbeatCounts"]["worker"], 1)
         self.assertIn("api", metrics.json()["serviceHeartbeatCounts"])
         self.assertEqual(heartbeats.json()[0]["status"], "degraded")
         self.assertEqual(alerts.json()["delivery"]["status"], "delivered")
+        self.assertGreaterEqual(len(alerts.json()["events"]), 2)
+        self.assertIn("worker_job_count_high", {event["code"] for event in alerts.json()["events"]})
+        self.assertEqual(alert_events.json()[0]["delivery"]["status"], "delivered")
         self.assertTrue(alerts.json()["delivery"]["attempted"])
         self.assertTrue(alerts.json()["delivery"]["webhookUrlConfigured"])
         self.assertTrue(mocked_urlopen.called)
+        sent_payload = json.loads(mocked_urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertIn("events", sent_payload)
+        self.assertGreaterEqual(len(sent_payload["events"]), 2)
 
 
 if __name__ == "__main__":

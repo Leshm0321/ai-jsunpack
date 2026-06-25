@@ -81,6 +81,8 @@ class SharedContractAlignmentTest(unittest.TestCase):
             "opsHeartbeatRecord": models.OpsHeartbeatRecord,
             "opsMetricsSnapshot": models.OpsMetricsSnapshot,
             "opsAlertDelivery": models.OpsAlertDelivery,
+            "opsAlertRule": models.OpsAlertRule,
+            "opsAlertEvent": models.OpsAlertEvent,
             "opsAlertResponse": models.OpsAlertResponse,
             "toolCall": models.ToolCall,
             "toolRegistryEntry": models.ToolRegistryEntry,
