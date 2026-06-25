@@ -698,7 +698,7 @@ export interface RetentionCleanupResult {
 }
 
 export interface RepairAction {
-  action: "add_package_script" | "mirror_original_static_entry";
+  action: "add_package_script" | "replace_package_script" | "mirror_original_static_entry";
   path: string;
   value: string;
   reason: string;
@@ -822,7 +822,7 @@ const repairActionsSchema = {
   items: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add_package_script", "mirror_original_static_entry"] },
+      action: { type: "string", enum: ["add_package_script", "replace_package_script", "mirror_original_static_entry"] },
       path: stringSchema,
       value: stringSchema,
       reason: stringSchema

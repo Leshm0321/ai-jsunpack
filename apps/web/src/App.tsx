@@ -3647,6 +3647,17 @@ function reportSectionDetailSummary(detail: ReportSectionDetailEntry): string {
   appendPayloadPart(parts, "type", payload.reviewType ?? payload.phase);
   appendPayloadPart(parts, "attempt", payload.attempt);
   appendPayloadPart(parts, "failure", payload.failureClass && payload.failureClass !== "none" ? payload.failureClass : null);
+  appendPayloadPart(parts, "stage", payload.targetStage);
+  if (isRecord(payload.policy)) {
+    appendPayloadPart(parts, "policy", reviewFixPolicySummary(payload.policy));
+  }
+  if (Array.isArray(payload.automaticActions)) {
+    parts.push(`auto ${payload.automaticActions.length ? payload.automaticActions.map(String).join(", ") : "none"}`);
+  }
+  if (Array.isArray(payload.auditOnlyActions) && payload.auditOnlyActions.length > 0) {
+    parts.push(`manual ${payload.auditOnlyActions.length}`);
+  }
+  appendPayloadPart(parts, "next", payload.nextStep);
   appendPayloadPart(parts, "command", payload.commandSource);
   appendPayloadPart(parts, "script", payload.scriptName);
   if (typeof payload.diagnosticCount === "number") {
@@ -3675,6 +3686,12 @@ function reportSectionDetailSummary(detail: ReportSectionDetailEntry): string {
     parts.push(`${payload.evidenceLinks.length} evidence`);
   }
   return parts.length > 0 ? parts.join(" / ") : "No structured breakdown";
+}
+
+function reviewFixPolicySummary(policy: Record<string, unknown>): string {
+  const lowRisk = policy.allowLowRiskRepairs;
+  const actions = Array.isArray(policy.allowedRepairActions) ? policy.allowedRepairActions.map(String) : [];
+  return `lowRiskAuto=${formatUnknownValue(lowRisk)} actions=${actions.length ? actions.join(",") : "default"}`;
 }
 
 function appendPayloadPart(parts: string[], label: string, value: unknown): void {

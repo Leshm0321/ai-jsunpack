@@ -307,6 +307,41 @@ class PackagingRunnerTest(unittest.TestCase):
                             "finalOutcome": "budget_exhausted_best_effort",
                             "status": "best_effort",
                             "failureClass": "runtime_error",
+                            "policy": {
+                                "source": "job.config.reviewFix",
+                                "allowLowRiskRepairs": True,
+                                "allowedRepairActions": [
+                                    "add_package_script",
+                                    "replace_package_script",
+                                    "mirror_original_static_entry",
+                                ],
+                                "buildValidation": {
+                                    "maxAttempts": 2,
+                                    "allowLowRiskRepairs": True,
+                                    "allowedRepairActions": ["add_package_script", "replace_package_script"],
+                                },
+                                "runtimeCompare": {
+                                    "maxAttempts": 3,
+                                    "allowLowRiskRepairs": True,
+                                    "allowedRepairActions": ["mirror_original_static_entry"],
+                                    "reviewGate": {},
+                                },
+                                "auditOnlyRiskLevels": ["medium", "high"],
+                                "consumptionPolicy": "Only low-risk supported repair actions are applied automatically.",
+                            },
+                            "failureActionMap": [
+                                {
+                                    "failureClass": "runtime_error",
+                                    "targetStage": "runtime_compare",
+                                    "automaticActions": ["mirror_original_static_entry"],
+                                    "auditOnlyActions": ["review DOM, network, console, and screenshot diffs"],
+                                    "status": "active",
+                                    "evidenceArtifactIds": [retry_summary_trace.id],
+                                }
+                            ],
+                            "nextSteps": [
+                                "Runtime compare retry budget was exhausted; inspect the last scenario/viewport diff."
+                            ],
                             "buildTypecheck": {
                                 "maxAttempt": 0,
                                 "latestStatusByReviewType": {"build": "fail"},
@@ -602,6 +637,21 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(review_fix_detail["status"], "best_effort")
                 self.assertEqual(review_fix_detail["details"]["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertEqual(review_fix_detail["details"]["runtimeCompare"]["attemptsUsed"], 3)
+                self.assertTrue(review_fix_detail["details"]["policy"]["allowLowRiskRepairs"])
+                self.assertEqual(
+                    review_fix_detail["details"]["activeFailureActionMap"][0]["automaticActions"],
+                    ["mirror_original_static_entry"],
+                )
+                self.assertIn("Runtime compare retry budget was exhausted", review_fix_detail["details"]["nextSteps"][0])
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix policy" for item in review_fix_section["details"])
+                )
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix failure action map" for item in review_fix_section["details"])
+                )
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix next step" for item in review_fix_section["details"])
+                )
                 self.assertTrue(
                     any(item["label"] == "Review/Fix convergence summary" for item in risk_section["details"])
                 )
@@ -617,11 +667,15 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn("report-sections.json", names)
                 self.assertIn("review-fix-summary.json", names)
                 self.assertEqual(packaged_summary["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertTrue(packaged_summary["policy"]["allowLowRiskRepairs"])
+                self.assertIn("Runtime compare retry budget was exhausted", packaged_summary["nextSteps"][0])
                 self.assertNotIn(f"evidence/build_log/{build_log.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_screenshot/{runtime_screenshot.id}.png", names)
                 report_text = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
                 self.assertIn("## Policy Summary", report_text)
                 self.assertIn("Cloud context allowed", report_text)
+                self.assertIn("Failure/action mapping", report_text)
+                self.assertIn("Runtime compare retry budget was exhausted", report_text)
             finally:
                 store.close()
 

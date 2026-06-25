@@ -565,6 +565,17 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(review_fix_summary["runtimeCompare"]["attemptsUsed"], 2)
                 self.assertEqual(review_fix_summary["runtimeCompare"]["appliedRepairCount"], 1)
                 self.assertFalse(review_fix_summary["runtimeCompare"]["budgetExhausted"])
+                self.assertTrue(review_fix_summary["policy"]["allowLowRiskRepairs"])
+                self.assertIn("mirror_original_static_entry", review_fix_summary["policy"]["allowedRepairActions"])
+                runtime_mapping = next(
+                    item for item in review_fix_summary["failureActionMap"] if item["failureClass"] == "runtime_error"
+                )
+                self.assertEqual(runtime_mapping["status"], "active")
+                self.assertIn("mirror_original_static_entry", runtime_mapping["automaticActions"])
+                self.assertEqual(
+                    review_fix_summary["nextSteps"],
+                    ["No user action is required; retain the review-fix summary with the result package for audit."],
+                )
                 self.assertIn(audit_report.id, result_package.parent_artifact_ids)
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
                     repaired_index = archive.read("generated_project/index.html").decode("utf-8")
@@ -652,6 +663,14 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(audit_payload["reviewFixSummary"]["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertEqual(review_fix_summary["runtimeCompare"]["attemptsUsed"], 3)
                 self.assertTrue(review_fix_summary["runtimeCompare"]["budgetExhausted"])
+                self.assertTrue(
+                    any("Runtime compare retry budget was exhausted" in step for step in review_fix_summary["nextSteps"])
+                )
+                runtime_mapping = next(
+                    item for item in review_fix_summary["failureActionMap"] if item["failureClass"] == "runtime_error"
+                )
+                self.assertEqual(runtime_mapping["status"], "active")
+                self.assertIn("mirror_original_static_entry", runtime_mapping["automaticActions"])
                 self.assertEqual([payload["attempt"] for payload in matrix_summaries], [0, 1, 2])
                 report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
@@ -666,7 +685,18 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(matrix_detail["details"]["retryBudget"]["attemptsUsed"], 3)
                 self.assertEqual(review_fix_detail["status"], "best_effort")
                 self.assertEqual(review_fix_detail["details"]["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertTrue(review_fix_detail["details"]["policy"]["allowLowRiskRepairs"])
+                self.assertTrue(review_fix_detail["details"]["activeFailureActionMap"])
+                self.assertTrue(
+                    any("Runtime compare retry budget was exhausted" in step for step in review_fix_detail["details"]["nextSteps"])
+                )
                 self.assertEqual(len(scope_detail["details"]["attemptHistory"]), 3)
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix next step" for item in review_fix_details)
+                )
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix failure action map" for item in review_fix_details)
+                )
                 self.assertTrue(
                     any(
                         observation["group"] == "reviewRuns" and observation["failureClass"] == "runtime_error"

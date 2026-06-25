@@ -294,6 +294,7 @@ class WorkerPipeline:
                     store=store,
                     generated_project_artifact=current_project_artifact,
                     planned_repair_artifact=runtime_compare_gate_result.repair_artifact,
+                    job_config=job.config,
                     parent_artifact_ids=packaging_parent_ids,
                     attempt=runtime_attempt + 1,
                 )
@@ -340,6 +341,7 @@ class WorkerPipeline:
                 runtime_compare_stop_reason=runtime_compare_stop_reason,
                 runtime_compare_max_attempts=runtime_compare_max_attempts,
                 current_project_artifact_id=current_project_artifact.id if current_project_artifact is not None else None,
+                job_config=job.config,
                 parent_artifact_ids=packaging_parent_ids,
             )
             packaging_parent_ids = self._unique_ids([*packaging_parent_ids, convergence_summary_artifact.id])
@@ -427,6 +429,7 @@ class WorkerPipeline:
         runtime_compare_stop_reason: str,
         runtime_compare_max_attempts: int,
         current_project_artifact_id: str | None,
+        job_config: dict | None,
         parent_artifact_ids: list[str],
     ):
         build_summary = self._build_validation_convergence_summary(build_validation_result)
@@ -438,6 +441,14 @@ class WorkerPipeline:
             retry_summary_artifact_id=runtime_retry_summary_artifact_id,
         )
         final_outcome = self._review_fix_final_outcome(build_summary=build_summary, runtime_summary=runtime_summary)
+        policy = self._review_fix_policy(job_config=job_config, runtime_compare_max_attempts=runtime_compare_max_attempts)
+        failure_mapping = self._review_fix_failure_mapping(build_summary=build_summary, runtime_summary=runtime_summary)
+        next_steps = self._review_fix_next_steps(
+            final_outcome=final_outcome,
+            build_summary=build_summary,
+            runtime_summary=runtime_summary,
+            failure_mapping=failure_mapping,
+        )
         evidence_links = self._unique_ids(
             [
                 *build_summary["evidenceArtifactIds"],
@@ -455,6 +466,9 @@ class WorkerPipeline:
             "finalOutcome": final_outcome,
             "status": "pass" if final_outcome in {"passed_without_repair", "repaired_passed"} else "best_effort",
             "failureClass": "none" if final_outcome in {"passed_without_repair", "repaired_passed"} else "runtime_error",
+            "policy": policy,
+            "failureActionMap": failure_mapping,
+            "nextSteps": next_steps,
             "buildTypecheck": build_summary,
             "runtimeCompare": runtime_summary,
             "agentReview": {
@@ -486,6 +500,7 @@ class WorkerPipeline:
             artifact.id for artifact in repair_artifacts if artifact.kind == "repair_instruction"
         ]
         statuses = [stage.review_run.status for stage in stage_results]
+        failed_stages = [stage for stage in stage_results if stage.review_run.status in {"fail", "retry", "best_effort"}]
         return {
             "maxAttempt": max(stage.review_run.attempt for stage in stage_results),
             "latestStatusByReviewType": {
@@ -493,6 +508,14 @@ class WorkerPipeline:
             },
             "allPassed": all(status == "pass" for status in statuses),
             "needsAttention": any(status in {"retry", "best_effort", "fail"} for status in statuses),
+            "failedReviewTypes": [stage.review_run.review_type for stage in failed_stages],
+            "failureClasses": sorted(
+                {
+                    stage.review_run.failure_class
+                    for stage in failed_stages
+                    if stage.review_run.failure_class != "none"
+                }
+            ),
             "repairInstructionIds": repair_instruction_ids,
             "repairInstructionCount": len(repair_instruction_ids),
             "appliedProjectArtifactIds": applied_project_ids,
@@ -529,6 +552,7 @@ class WorkerPipeline:
             "plannedRepairCount": len(planned_repairs),
             "appliedRepairCount": len(applied_repairs),
             "triggeredReviewCount": len(triggered),
+            "failureClasses": ["runtime_error"] if triggered else [],
             "attempts": attempts,
             "evidenceArtifactIds": self._unique_ids(
                 [
@@ -570,9 +594,163 @@ class WorkerPipeline:
             build_summary["repairInstructionCount"] == 0
             and runtime_summary["plannedRepairCount"] == 0
             and runtime_summary["finalReviewStatus"] == "pass"
+            and build_summary["allPassed"]
         ):
             return "passed_without_repair"
         return "best_effort_with_limitations"
+
+    def _review_fix_policy(self, *, job_config: dict | None, runtime_compare_max_attempts: int) -> dict:
+        review_fix = job_config.get("reviewFix") if isinstance(job_config, dict) else None
+        review_fix = review_fix if isinstance(review_fix, dict) else {}
+        build_validation = job_config.get("buildValidation") if isinstance(job_config, dict) else None
+        build_validation = build_validation if isinstance(build_validation, dict) else {}
+        runtime_compare = job_config.get("runtimeCompare") if isinstance(job_config, dict) else None
+        runtime_compare = runtime_compare if isinstance(runtime_compare, dict) else {}
+        build_review_fix = review_fix.get("buildValidation") if isinstance(review_fix.get("buildValidation"), dict) else {}
+        runtime_review_fix = review_fix.get("runtimeCompare") if isinstance(review_fix.get("runtimeCompare"), dict) else {}
+        allowed_actions = self._review_fix_allowed_actions(review_fix, build_review_fix, runtime_review_fix, build_validation)
+        allow_low_risk = self._bool_config(
+            review_fix.get("allowLowRiskRepairs"),
+            default=True,
+        )
+        return {
+            "source": "job.config.reviewFix",
+            "allowLowRiskRepairs": allow_low_risk,
+            "allowedRepairActions": allowed_actions,
+            "buildValidation": {
+                "maxAttempts": self._int_config(
+                    build_validation.get("maxAttempts", build_review_fix.get("maxAttempts", review_fix.get("maxAttempts"))),
+                    default=2,
+                    minimum=1,
+                    maximum=5,
+                ),
+                "allowLowRiskRepairs": self._bool_config(
+                    build_validation.get(
+                        "allowLowRiskRepairs",
+                        build_review_fix.get("allowLowRiskRepairs", allow_low_risk),
+                    ),
+                    default=True,
+                ),
+                "allowedRepairActions": self._review_fix_allowed_actions(
+                    review_fix,
+                    build_review_fix,
+                    {},
+                    build_validation,
+                ),
+            },
+            "runtimeCompare": {
+                "maxAttempts": runtime_compare_max_attempts,
+                "allowLowRiskRepairs": self._bool_config(
+                    runtime_review_fix.get("allowLowRiskRepairs", allow_low_risk),
+                    default=True,
+                ),
+                "allowedRepairActions": self._review_fix_allowed_actions(review_fix, {}, runtime_review_fix, {}),
+                "reviewGate": runtime_compare.get("reviewGate") if isinstance(runtime_compare.get("reviewGate"), dict) else {},
+            },
+            "auditOnlyRiskLevels": ["medium", "high"],
+            "consumptionPolicy": "Only low-risk supported repair actions are applied automatically; medium and high risk actions remain audit-only next-step guidance.",
+        }
+
+    def _review_fix_allowed_actions(self, *configs: dict) -> list[str]:
+        for config in configs:
+            value = config.get("allowedRepairActions") if isinstance(config, dict) else None
+            if isinstance(value, list):
+                actions = [
+                    item
+                    for item in value
+                    if item in {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+                ]
+                return list(dict.fromkeys(actions))
+        return ["add_package_script", "replace_package_script", "mirror_original_static_entry"]
+
+    def _review_fix_failure_mapping(self, *, build_summary: dict, runtime_summary: dict) -> list[dict]:
+        mappings = [
+            {
+                "failureClass": "build_error",
+                "targetStage": "building",
+                "automaticActions": ["add_package_script", "replace_package_script"],
+                "auditOnlyActions": ["inspect build log, generated package.json, and deterministic build shim output"],
+                "status": "active" if "build_error" in build_summary.get("failureClasses", []) else "available",
+                "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
+            },
+            {
+                "failureClass": "type_error",
+                "targetStage": "typechecking",
+                "automaticActions": ["add_package_script", "replace_package_script"],
+                "auditOnlyActions": ["inspect TypeScript diagnostics and generated typecheck shim output"],
+                "status": "active" if "type_error" in build_summary.get("failureClasses", []) else "available",
+                "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
+            },
+            {
+                "failureClass": "dependency_missing",
+                "targetStage": "building",
+                "automaticActions": [],
+                "auditOnlyActions": ["enable buildValidation.installDependencies only in an approved isolated runner"],
+                "status": "active" if "dependency_missing" in build_summary.get("failureClasses", []) else "available",
+                "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
+            },
+            {
+                "failureClass": "runtime_error",
+                "targetStage": "runtime_compare",
+                "automaticActions": ["mirror_original_static_entry"],
+                "auditOnlyActions": ["review DOM, network, console, and screenshot diffs by scenario/viewport"],
+                "status": "active" if runtime_summary.get("triggeredReviewCount", 0) else "available",
+                "evidenceArtifactIds": runtime_summary.get("evidenceArtifactIds", []),
+            },
+            {
+                "failureClass": "invalid_input",
+                "targetStage": "runtime_smoke",
+                "automaticActions": [],
+                "auditOnlyActions": ["provide an HTML entry or configure a runtime scenario entry"],
+                "status": "available",
+                "evidenceArtifactIds": [],
+            },
+        ]
+        return mappings
+
+    def _review_fix_next_steps(
+        self,
+        *,
+        final_outcome: str,
+        build_summary: dict,
+        runtime_summary: dict,
+        failure_mapping: list[dict],
+    ) -> list[str]:
+        if final_outcome in {"passed_without_repair", "repaired_passed"}:
+            return ["No user action is required; retain the review-fix summary with the result package for audit."]
+        steps: list[str] = []
+        if runtime_summary.get("budgetExhausted"):
+            steps.append(
+                "Runtime compare retry budget was exhausted; inspect the last scenario/viewport diff and raise runtimeCompare.maxAttempts only after confirming the repair is converging."
+            )
+        if runtime_summary.get("stoppedReason") == "repair_not_applied":
+            steps.append(
+                "No low-risk runtime repair was applied; review planned repair instructions and keep medium/high risk changes manual."
+            )
+        if build_summary.get("needsAttention"):
+            steps.append(
+                "Build/typecheck still needs attention; inspect build_artifact diagnostics and repair instructions before rerun."
+            )
+        active_mappings = [item for item in failure_mapping if item.get("status") == "active"]
+        for mapping in active_mappings[:3]:
+            automatic_actions = mapping.get("automaticActions") if isinstance(mapping.get("automaticActions"), list) else []
+            audit_actions = mapping.get("auditOnlyActions") if isinstance(mapping.get("auditOnlyActions"), list) else []
+            steps.append(
+                f"{mapping.get('failureClass')} at {mapping.get('targetStage')}: automatic={', '.join(automatic_actions) or 'none'}; next={'; '.join(audit_actions) or 'review evidence'}."
+            )
+        if not steps:
+            steps.append("Review best-effort limitations in the evidence index before treating the result as complete.")
+        return steps
+
+    def _bool_config(self, value, *, default: bool) -> bool:
+        return value if isinstance(value, bool) else default
+
+    def _int_config(self, value, *, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
 
     def _runtime_compare_config(self, job_config: dict | None) -> dict | None:
         if not isinstance(job_config, dict):
@@ -590,10 +768,16 @@ class WorkerPipeline:
         if not isinstance(job_config, dict):
             return 2
         runtime_compare = job_config.get("runtimeCompare")
+        review_fix = job_config.get("reviewFix")
+        review_fix = review_fix if isinstance(review_fix, dict) else {}
+        review_fix_runtime = review_fix.get("runtimeCompare") if isinstance(review_fix.get("runtimeCompare"), dict) else {}
         if isinstance(runtime_compare, dict):
-            max_attempts_value = runtime_compare.get("maxAttempts", 2)
+            max_attempts_value = runtime_compare.get(
+                "maxAttempts",
+                review_fix_runtime.get("maxAttempts", review_fix.get("maxAttempts", 2)),
+            )
         else:
-            max_attempts_value = 2
+            max_attempts_value = review_fix_runtime.get("maxAttempts", review_fix.get("maxAttempts", 2))
         try:
             max_attempts = int(max_attempts_value)
         except (TypeError, ValueError):

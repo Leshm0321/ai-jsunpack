@@ -704,10 +704,20 @@ class PackagingRunner:
     def _review_fix_markdown(self, summary: dict[str, Any]) -> str:
         runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
         build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
+        next_steps = self._string_list(summary.get("nextSteps"))
+        policy = summary.get("policy") if isinstance(summary.get("policy"), dict) else {}
+        failure_action_map = summary.get("failureActionMap") if isinstance(summary.get("failureActionMap"), list) else []
         rows = [
             {"area": "Final outcome", "value": summary.get("finalOutcome")},
             {"area": "Status", "value": summary.get("status")},
             {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {
+                "area": "Policy",
+                "value": (
+                    f"lowRiskAuto={policy.get('allowLowRiskRepairs')}; "
+                    f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                ),
+            },
             {
                 "area": "Build/typecheck repairs",
                 "value": (
@@ -731,6 +741,14 @@ class PackagingRunner:
                     f"applied={runtime_compare.get('appliedRepairCount')}; "
                     f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
                 ),
+            },
+            {
+                "area": "Failure/action mapping",
+                "value": self._failure_action_map_summary(failure_action_map),
+            },
+            {
+                "area": "Next steps",
+                "value": " | ".join(next_steps) if next_steps else "No follow-up action required.",
             },
         ]
         return self._status_table(rows, ("area", "value"))
@@ -738,10 +756,20 @@ class PackagingRunner:
     def _review_fix_html(self, summary: dict[str, Any]) -> str:
         runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
         build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
+        next_steps = self._string_list(summary.get("nextSteps"))
+        policy = summary.get("policy") if isinstance(summary.get("policy"), dict) else {}
+        failure_action_map = summary.get("failureActionMap") if isinstance(summary.get("failureActionMap"), list) else []
         rows = [
             {"area": "Final outcome", "value": summary.get("finalOutcome")},
             {"area": "Status", "value": summary.get("status")},
             {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {
+                "area": "Policy",
+                "value": (
+                    f"lowRiskAuto={policy.get('allowLowRiskRepairs')}; "
+                    f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                ),
+            },
             {
                 "area": "Build/typecheck repairs",
                 "value": (
@@ -766,8 +794,27 @@ class PackagingRunner:
                     f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
                 ),
             },
+            {
+                "area": "Failure/action mapping",
+                "value": self._failure_action_map_summary(failure_action_map),
+            },
+            {
+                "area": "Next steps",
+                "value": " | ".join(next_steps) if next_steps else "No follow-up action required.",
+            },
         ]
         return self._html_table(rows, ("area", "value"))
+
+    def _failure_action_map_summary(self, records: list[Any]) -> str:
+        active = [record for record in records if isinstance(record, dict) and record.get("status") == "active"]
+        scoped = active or [record for record in records if isinstance(record, dict)]
+        parts = []
+        for record in scoped[:4]:
+            automatic_actions = self._string_list(record.get("automaticActions"))
+            parts.append(
+                f"{record.get('failureClass') or 'unknown'}->{', '.join(automatic_actions) or 'audit-only'}"
+            )
+        return "; ".join(parts) or "none"
 
     def _runtime_compare_diff_markdown(self, records: list[dict[str, Any]]) -> str:
         comparison_records = self._runtime_compare_comparison_records(records)
@@ -1583,6 +1630,9 @@ class PackagingRunner:
             payload.setdefault("artifactId", artifact.id)
             runtime_compare = payload.get("runtimeCompare") if isinstance(payload.get("runtimeCompare"), dict) else {}
             build_typecheck = payload.get("buildTypecheck") if isinstance(payload.get("buildTypecheck"), dict) else {}
+            policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+            failure_action_map = payload.get("failureActionMap") if isinstance(payload.get("failureActionMap"), list) else []
+            next_steps = self._string_list(payload.get("nextSteps"))
             evidence_ids = self._string_list(payload.get("evidenceArtifactIds"))
             evidence_links = payload.get("evidenceLinks") if isinstance(payload.get("evidenceLinks"), list) else []
             if not evidence_links:
@@ -1597,6 +1647,12 @@ class PackagingRunner:
                         "finalOutcome": payload.get("finalOutcome"),
                         "decision": self._review_fix_decision(payload),
                         "failureClass": str(payload.get("failureClass") or "unknown"),
+                        "policy": policy,
+                        "failureActionMap": failure_action_map,
+                        "activeFailureActionMap": [
+                            item for item in failure_action_map if isinstance(item, dict) and item.get("status") == "active"
+                        ],
+                        "nextSteps": next_steps,
                         "buildTypecheck": {
                             "allPassed": build_typecheck.get("allPassed"),
                             "needsAttention": build_typecheck.get("needsAttention"),
@@ -1619,6 +1675,70 @@ class PackagingRunner:
                     },
                 }
             )
+            if policy:
+                details.append(
+                    {
+                        "label": "Review/Fix policy",
+                        "value": (
+                            f"lowRiskAuto={policy.get('allowLowRiskRepairs')} / "
+                            f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                        ),
+                        "status": self._report_detail_status(payload.get("status")),
+                        "details": {
+                            "artifactId": artifact.id,
+                            "failureClass": str(payload.get("failureClass") or "unknown"),
+                            "policy": policy,
+                            "evidenceLinks": [str(item) for item in evidence_links],
+                        },
+                    }
+                )
+            for mapping in failure_action_map:
+                if not isinstance(mapping, dict):
+                    continue
+                status = (
+                    "best_effort"
+                    if mapping.get("status") == "active" and self._report_detail_status(payload.get("status")) != "pass"
+                    else "pass"
+                )
+                automatic_actions = self._string_list(mapping.get("automaticActions"))
+                audit_actions = self._string_list(mapping.get("auditOnlyActions"))
+                details.append(
+                    {
+                        "label": "Review/Fix failure action map",
+                        "value": (
+                            f"{mapping.get('failureClass') or 'unknown'} -> "
+                            f"{', '.join(automatic_actions) or 'audit-only'}"
+                        ),
+                        "status": status,
+                        "details": {
+                            "artifactId": artifact.id,
+                            "failureClass": str(mapping.get("failureClass") or "unknown"),
+                            "targetStage": mapping.get("targetStage"),
+                            "automaticActions": automatic_actions,
+                            "auditOnlyActions": audit_actions,
+                            "mappingStatus": mapping.get("status"),
+                            "evidenceLinks": self._artifact_evidence_links(
+                                artifact.id,
+                                *self._string_list(mapping.get("evidenceArtifactIds")),
+                            ),
+                        },
+                    }
+                )
+            for index, step in enumerate(next_steps, start=1):
+                details.append(
+                    {
+                        "label": "Review/Fix next step",
+                        "value": step,
+                        "status": self._report_detail_status(payload.get("status")),
+                        "details": {
+                            "artifactId": artifact.id,
+                            "stepIndex": index,
+                            "failureClass": str(payload.get("failureClass") or "unknown"),
+                            "nextStep": step,
+                            "evidenceLinks": [str(item) for item in evidence_links],
+                        },
+                    }
+                )
         return details
 
     def _risk_report_details(self, details: list[dict[str, Any]]) -> list[dict[str, Any]]:

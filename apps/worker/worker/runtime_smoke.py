@@ -1253,6 +1253,7 @@ class RuntimeCompareRepairRunner:
         store,
         generated_project_artifact: ArtifactRecord | None,
         planned_repair_artifact: ArtifactRecord | None,
+        job_config: dict[str, Any] | None = None,
         parent_artifact_ids: list[str] | None = None,
         attempt: int = 1,
     ) -> RuntimeCompareRepairResult:
@@ -1268,6 +1269,26 @@ class RuntimeCompareRepairRunner:
         planned = self._load_repair_instruction(job_id=job_id, store=store, artifact=planned_repair_artifact)
         evidence_refs = planned.evidence_refs
         input_artifact_ids = list(dict.fromkeys([planned_repair_artifact.id, *planned.input_artifact_ids]))
+        policy = self._policy(job_config)
+
+        if not policy["allowLowRiskRepairs"] or not self._repair_action_allowed("mirror_original_static_entry", policy):
+            repair_artifact = self._write_repair_instruction(
+                job_id=job_id,
+                store=store,
+                attempt=attempt,
+                parent_artifact_ids=parents,
+                input_artifact_ids=input_artifact_ids,
+                evidence_refs=evidence_refs,
+                actions=[],
+                status="skipped",
+                risk_level="medium",
+                decision="Runtime compare repair skipped because reviewFix policy disabled the low-risk static mirror action.",
+            )
+            return RuntimeCompareRepairResult(
+                repair_artifact=repair_artifact,
+                applied_project_artifact=None,
+                message="Runtime compare repair skipped by Review/Fix policy.",
+            )
 
         if generated_project_artifact is None:
             repair_artifact = self._write_repair_instruction(
@@ -1360,6 +1381,37 @@ class RuntimeCompareRepairRunner:
     def _load_repair_instruction(self, *, job_id: str, store, artifact: ArtifactRecord) -> RepairInstruction:
         payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
         return RepairInstruction.model_validate(payload)
+
+    def _policy(self, job_config: dict[str, Any] | None) -> dict[str, Any]:
+        review_fix = job_config.get("reviewFix") if isinstance(job_config, dict) else None
+        review_fix = review_fix if isinstance(review_fix, dict) else {}
+        runtime_policy = review_fix.get("runtimeCompare") if isinstance(review_fix.get("runtimeCompare"), dict) else {}
+        return {
+            "allowLowRiskRepairs": self._bool_config(
+                runtime_policy.get("allowLowRiskRepairs", review_fix.get("allowLowRiskRepairs")),
+                default=True,
+            ),
+            "allowedRepairActions": self._allowed_repair_actions_config(
+                runtime_policy.get("allowedRepairActions", review_fix.get("allowedRepairActions"))
+            ),
+        }
+
+    def _repair_action_allowed(self, action: str, policy: dict[str, Any]) -> bool:
+        allowed_actions = policy.get("allowedRepairActions")
+        return not isinstance(allowed_actions, tuple) or action in allowed_actions
+
+    def _bool_config(self, value: Any, *, default: bool) -> bool:
+        return value if isinstance(value, bool) else default
+
+    def _allowed_repair_actions_config(self, value: Any) -> tuple[str, ...] | None:
+        if value is None or not isinstance(value, list):
+            return None
+        allowed = [
+            item
+            for item in value
+            if item in {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+        ]
+        return tuple(dict.fromkeys(allowed))
 
     def _apply_runtime_actions(self, *, project_root: Path) -> tuple[list[RepairAction], str]:
         source_root, limitation = self._source_root(project_root)

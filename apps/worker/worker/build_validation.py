@@ -100,6 +100,8 @@ class BuildValidationError(RuntimeError):
 class BuildValidationConfig:
     max_attempts: int = 2
     install_dependencies: bool = False
+    allow_low_risk_repairs: bool = True
+    allowed_repair_actions: tuple[str, ...] | None = None
     sandbox_runner: SandboxRunnerKind = "local"
     container_image: str = DEFAULT_CONTAINER_IMAGE
     container_runtime_command: tuple[str, ...] | None = None
@@ -329,13 +331,14 @@ class BuildValidationRunner:
                     observation for observation in (build_observation, typecheck_observation) if observation.failed
                 ]
                 repair_outcome: RepairOutcome | None = None
-                if failed_observations and attempt + 1 < config.max_attempts:
+                if failed_observations and config.allow_low_risk_repairs and attempt + 1 < config.max_attempts:
                     repair_outcome = self._write_repair_instruction(
                         job_id=job_id,
                         store=store,
                         project_root=project_root,
                         attempt=attempt,
                         failed_observations=failed_observations,
+                        allowed_repair_actions=config.allowed_repair_actions,
                         parent_artifact_ids=attempt_parent_ids,
                     )
                     repair_artifacts.append(repair_outcome.repair_artifact)
@@ -678,10 +681,15 @@ class BuildValidationRunner:
         project_root: Path,
         attempt: int,
         failed_observations: list[StageObservation],
+        allowed_repair_actions: tuple[str, ...] | None,
         parent_artifact_ids: list[str],
     ) -> RepairOutcome:
         store.update_status(job_id, "repairing")
-        actions = self._repair_actions(project_root=project_root, failed_observations=failed_observations)
+        actions = self._repair_actions(
+            project_root=project_root,
+            failed_observations=failed_observations,
+            allowed_repair_actions=allowed_repair_actions,
+        )
         status = "applied" if actions else "skipped"
         target_stage = failed_observations[0].stage
         failure_class = failed_observations[0].failure_class
@@ -735,6 +743,7 @@ class BuildValidationRunner:
         *,
         project_root: Path,
         failed_observations: list[StageObservation],
+        allowed_repair_actions: tuple[str, ...] | None = None,
     ) -> list[RepairAction]:
         package_json = self._read_package_json(project_root)
         if package_json is None:
@@ -743,8 +752,14 @@ class BuildValidationRunner:
         if not isinstance(scripts, dict):
             scripts = {}
         actions: list[RepairAction] = []
-        failed_review_types = {observation.review_type for observation in failed_observations}
-        if "build" in failed_review_types and "build" not in scripts and (project_root / "scripts" / "build.mjs").exists():
+        failed_by_review_type = {observation.review_type: observation for observation in failed_observations}
+        allowed = set(allowed_repair_actions) if allowed_repair_actions is not None else None
+        if (
+            "build" in failed_by_review_type
+            and self._repair_action_allowed("add_package_script", allowed)
+            and "build" not in scripts
+            and (project_root / "scripts" / "build.mjs").exists()
+        ):
             actions.append(
                 RepairAction(
                     action="add_package_script",
@@ -754,7 +769,8 @@ class BuildValidationRunner:
                 )
             )
         if (
-            "typecheck" in failed_review_types
+            "typecheck" in failed_by_review_type
+            and self._repair_action_allowed("add_package_script", allowed)
             and "typecheck" not in scripts
             and "check" not in scripts
             and (project_root / "scripts" / "typecheck.mjs").exists()
@@ -767,7 +783,46 @@ class BuildValidationRunner:
                     reason="A generated typecheck shim exists and package.json does not define scripts.typecheck or scripts.check.",
                 )
             )
+        if (
+            "build" in failed_by_review_type
+            and self._repair_action_allowed("replace_package_script", allowed)
+            and isinstance(scripts.get("build"), str)
+            and scripts.get("build") != "node scripts/build.mjs"
+            and (project_root / "scripts" / "build.mjs").exists()
+        ):
+            actions.append(
+                RepairAction(
+                    action="replace_package_script",
+                    path="package.json:scripts.build",
+                    value="node scripts/build.mjs",
+                    reason=(
+                        "scripts.build failed during validation while a generated build shim exists; "
+                        "replace the generated-project script with the deterministic shim for retry."
+                    ),
+                )
+            )
+        if (
+            "typecheck" in failed_by_review_type
+            and self._repair_action_allowed("replace_package_script", allowed)
+            and isinstance(scripts.get("typecheck"), str)
+            and scripts.get("typecheck") != "node scripts/typecheck.mjs"
+            and (project_root / "scripts" / "typecheck.mjs").exists()
+        ):
+            actions.append(
+                RepairAction(
+                    action="replace_package_script",
+                    path="package.json:scripts.typecheck",
+                    value="node scripts/typecheck.mjs",
+                    reason=(
+                        "scripts.typecheck failed during validation while a generated typecheck shim exists; "
+                        "replace the generated-project script with the deterministic shim for retry."
+                    ),
+                )
+            )
         return actions
+
+    def _repair_action_allowed(self, action: str, allowed: set[str] | None) -> bool:
+        return allowed is None or action in allowed
 
     def _apply_repair_actions(self, *, project_root: Path, actions: list[RepairAction]) -> None:
         package_path = project_root / "package.json"
@@ -776,7 +831,7 @@ class BuildValidationRunner:
         if not isinstance(scripts, dict):
             scripts = {}
         for action in actions:
-            if action.action == "add_package_script":
+            if action.action in {"add_package_script", "replace_package_script"}:
                 script_name = action.path.rsplit(".", 1)[-1]
                 scripts[script_name] = action.value
         package_json["scripts"] = scripts
@@ -834,14 +889,28 @@ class BuildValidationRunner:
     def _config(self, *, job_id: str, store) -> BuildValidationConfig:
         job = store.get_job(job_id)
         raw_config = job.config if job is not None else {}
+        review_fix = raw_config.get("reviewFix") if isinstance(raw_config, dict) else None
+        review_fix = review_fix if isinstance(review_fix, dict) else {}
         scoped = raw_config.get("buildValidation") if isinstance(raw_config, dict) else None
         config = scoped if isinstance(scoped, dict) else raw_config if isinstance(raw_config, dict) else {}
-        max_attempts_value = config.get("maxAttempts", 2)
+        build_review_fix = review_fix.get("buildValidation") if isinstance(review_fix.get("buildValidation"), dict) else {}
+        max_attempts_value = config.get("maxAttempts", build_review_fix.get("maxAttempts", review_fix.get("maxAttempts", 2)))
         try:
             max_attempts = int(max_attempts_value)
         except (TypeError, ValueError):
             max_attempts = 2
         max_attempts = max(1, min(max_attempts, 5))
+        allowed_actions = self._allowed_repair_actions_config(
+            config.get("allowedRepairActions")
+            if "allowedRepairActions" in config
+            else build_review_fix.get("allowedRepairActions", review_fix.get("allowedRepairActions"))
+        )
+        allow_low_risk_repairs = self._bool_config(
+            config.get("allowLowRiskRepairs")
+            if "allowLowRiskRepairs" in config
+            else build_review_fix.get("allowLowRiskRepairs", review_fix.get("allowLowRiskRepairs")),
+            default=True,
+        )
         sandbox_runner = self._sandbox_runner_name(config.get("sandboxRunner") or os.getenv("AI_JSUNPACK_SANDBOX_RUNNER"))
         container_image = self._string_config(
             config.get("containerImage") or os.getenv("AI_JSUNPACK_SANDBOX_IMAGE"),
@@ -855,6 +924,8 @@ class BuildValidationRunner:
         return BuildValidationConfig(
             max_attempts=max_attempts,
             install_dependencies=bool(config.get("installDependencies", False)),
+            allow_low_risk_repairs=allow_low_risk_repairs,
+            allowed_repair_actions=allowed_actions,
             sandbox_runner=sandbox_runner,
             container_image=container_image,
             container_runtime_command=self._container_runtime_command_config(config.get("containerRuntimeCommand")),
@@ -869,6 +940,21 @@ class BuildValidationRunner:
                 config.get("sandboxRuntimeVersion") or os.getenv("AI_JSUNPACK_SANDBOX_RUNTIME_VERSION")
             ),
         )
+
+    def _bool_config(self, value: Any, *, default: bool) -> bool:
+        return value if isinstance(value, bool) else default
+
+    def _allowed_repair_actions_config(self, value: Any) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return None
+        allowed = [
+            item
+            for item in value
+            if item in {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+        ]
+        return tuple(dict.fromkeys(allowed))
 
     def _sandbox_runner_for_config(
         self,

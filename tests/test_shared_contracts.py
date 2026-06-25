@@ -130,6 +130,23 @@ class SharedContractAlignmentTest(unittest.TestCase):
         self.assertEqual(validated.actions[0].action, "mirror_original_static_entry")
         self.assertIn("mirror_original_static_entry", action_schema["properties"]["action"]["enum"])
 
+    def test_repair_action_contract_accepts_package_script_replacement(self):
+        example = dict(self.contract["examples"]["repairInstruction"])
+        example["actions"] = [
+            {
+                "action": "replace_package_script",
+                "path": "package.json:scripts.build",
+                "value": "node scripts/build.mjs",
+                "reason": "Replace a failed generated-project script with the deterministic validation shim.",
+            }
+        ]
+
+        validated = models.RepairInstruction.model_validate(example)
+        action_schema = self.contract["schemas"]["repairInstruction"]["properties"]["actions"]["items"]
+
+        self.assertEqual(validated.actions[0].action, "replace_package_script")
+        self.assertIn("replace_package_script", action_schema["properties"]["action"]["enum"])
+
 
 if __name__ == "__main__":
     unittest.main()

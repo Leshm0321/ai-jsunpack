@@ -479,6 +479,55 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(build_attempt_zero_review["repairInstructionIds"], [repair_artifacts[0].id])
         self.assertEqual(build_attempt_zero_artifact["repairInstructionIds"], [repair_artifacts[0].id])
 
+    def test_failed_package_script_is_replaced_with_generated_shim_for_retry(self):
+        if shutil.which("npm") is None or shutil.which("node") is None:
+            raise unittest.SkipTest("npm and node are required for package script repair validation")
+
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={
+                    "reviewFix": {
+                        "allowedRepairActions": ["replace_package_script"],
+                    },
+                    "buildValidation": {
+                        "maxAttempts": 2,
+                    },
+                },
+            )
+        )
+        project_root = self.root / "generated-replace-script"
+        (project_root / "scripts").mkdir(parents=True)
+        (project_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "scripts": {
+                        "build": "node -e \"process.exit(7)\"",
+                        "typecheck": "node scripts/typecheck.mjs",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (project_root / "scripts" / "build.mjs").write_text("console.log('shim build ok')", encoding="utf-8")
+        (project_root / "scripts" / "typecheck.mjs").write_text("console.log('shim typecheck ok')", encoding="utf-8")
+
+        result = BuildValidationRunner().run(job_id=job.id, store=self.store, project_path=project_root)
+
+        repair_artifact = self.store.list_artifacts(job.id, kind="repair_instruction")[0]
+        generated_project_artifact = self.store.list_artifacts(job.id, kind="generated_project")[0]
+        repair_payload = json.loads(Path(repair_artifact.storage_uri).read_text(encoding="utf-8"))
+        repaired_package = json.loads(
+            (Path(generated_project_artifact.storage_uri) / "package.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(result.build.review_run.status, "pass")
+        self.assertEqual(result.build.review_run.attempt, 1)
+        self.assertEqual(repair_payload["status"], "applied")
+        self.assertEqual(repair_payload["actions"][0]["action"], "replace_package_script")
+        self.assertEqual(repaired_package["scripts"]["build"], "node scripts/build.mjs")
+
 
 if __name__ == "__main__":
     unittest.main()
