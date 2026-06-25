@@ -1400,6 +1400,7 @@ function ReportArtifactList({
     payload: EvidenceIndexPayload | null;
     status: "idle" | "loading" | "ready" | "error";
   }>({ artifactId: null, error: null, payload: null, status: "idle" });
+  const [reportDetailQuery, setReportDetailQuery] = useState("");
 
   useEffect(() => {
     if (!currentJob || !evidenceIndexArtifact) {
@@ -1451,6 +1452,8 @@ function ReportArtifactList({
     evidenceIndex.payload?.failureSummary.length ? evidenceIndex.payload.failureSummary : buildFailureSummary(evidence, currentJob);
   const indexedPackageContents = packageContents.length > 0 ? packageContents : buildFallbackPackageContents(attachments);
   const indexedReportSections = reportSections.length > 0 ? reportSections : buildFallbackReportSections(attachments, artifacts);
+  const filteredReportSections = filterReportSections(indexedReportSections, reportDetailQuery);
+  const reportDetailFilterActive = reportDetailQuery.trim().length > 0;
   const riskCount = failureSummary.length || reviewAttention;
 
   return (
@@ -1566,54 +1569,80 @@ function ReportArtifactList({
       <section className="report-detail-block" aria-label="Report evidence map">
         <div className="section-heading">
           <h3>Report evidence map</h3>
-          <span>{evidenceIndex.status === "ready" ? indexedReportSections.length : evidenceIndex.status}</span>
+          <span>
+            {evidenceIndex.status === "ready"
+              ? reportDetailFilterActive
+                ? `${filteredReportSections.length}/${indexedReportSections.length}`
+                : indexedReportSections.length
+              : evidenceIndex.status}
+          </span>
         </div>
         {evidenceIndex.status === "ready" && indexedReportSections.length > 0 ? (
-          <div className="report-section-list">
-            {indexedReportSections.map((section) => (
-              <div className="report-section-row" key={section.anchor}>
-                <ListTree size={17} aria-hidden="true" />
-                <div>
-                  <strong>{section.title}</strong>
-                  <span>#{section.anchor}</span>
-                  <small>{section.summary}</small>
-                  {section.details.length > 0 ? (
-                    <div className="report-section-detail-list">
-                      {section.details.map((detail) => (
-                        <div className="report-section-detail-row" key={`${section.anchor}-${detail.label}-${detail.value}`}>
-                          <div>
-                            <span>{detail.label}</span>
-                            <strong>{detail.value}</strong>
-                            <small>{reportSectionDetailSummary(detail)}</small>
-                          </div>
-                          {detail.status ? <StatusToken status={detail.status} /> : null}
+          <>
+            <div className="report-detail-filter">
+              <Filter size={16} aria-hidden="true" />
+              <span className="visually-hidden">Filter report details</span>
+              <input
+                aria-label="Filter report details"
+                placeholder="Filter details, status, artifacts"
+                type="search"
+                value={reportDetailQuery}
+                onChange={(event) => setReportDetailQuery(event.target.value)}
+              />
+              {reportDetailFilterActive ? (
+                <button className="secondary-action compact" type="button" onClick={() => setReportDetailQuery("")}>Clear</button>
+              ) : null}
+            </div>
+            {filteredReportSections.length > 0 ? (
+              <div className="report-section-list">
+                {filteredReportSections.map((section) => (
+                  <div className="report-section-row" key={section.anchor}>
+                    <ListTree size={17} aria-hidden="true" />
+                    <div>
+                      <strong>{section.title}</strong>
+                      <span>#{section.anchor}</span>
+                      <small>{section.summary}</small>
+                      {section.details.length > 0 ? (
+                        <div className="report-section-detail-list">
+                          {section.details.map((detail) => (
+                            <div className="report-section-detail-row" key={`${section.anchor}-${detail.label}-${detail.value}`}>
+                              <div>
+                                <span>{detail.label}</span>
+                                <strong>{detail.value}</strong>
+                                <small>{reportSectionDetailSummary(detail)}</small>
+                              </div>
+                              {detail.status ? <StatusToken status={detail.status} /> : null}
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      ) : null}
                     </div>
-                  ) : null}
-                </div>
-                <div className="evidence-link-group">
-                  {section.artifactIds.slice(0, 5).map((artifactId) => {
-                    const linkedArtifact = artifactsById.get(artifactId);
-                    return (
-                      <button
-                        className="evidence-ref-chip"
-                        disabled={!linkedArtifact}
-                        key={artifactId}
-                        type="button"
-                        onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
-                      >
-                        <Link2 size={14} aria-hidden="true" />
-                        {linkedArtifact?.kind ?? "artifact"}
-                        <small>{artifactId}</small>
-                      </button>
-                    );
-                  })}
-                  {section.artifactIds.length > 5 ? <span className="report-overflow-note">{section.artifactIds.length - 5} more</span> : null}
-                </div>
+                    <div className="evidence-link-group">
+                      {section.artifactIds.slice(0, 5).map((artifactId) => {
+                        const linkedArtifact = artifactsById.get(artifactId);
+                        return (
+                          <button
+                            className="evidence-ref-chip"
+                            disabled={!linkedArtifact}
+                            key={artifactId}
+                            type="button"
+                            onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
+                          >
+                            <Link2 size={14} aria-hidden="true" />
+                            {linkedArtifact?.kind ?? "artifact"}
+                            <small>{artifactId}</small>
+                          </button>
+                        );
+                      })}
+                      {section.artifactIds.length > 5 ? <span className="report-overflow-note">{section.artifactIds.length - 5} more</span> : null}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            ) : (
+              <EmptyState title="No matching report details" detail="Adjust the report evidence map filter to show packaged section details." />
+            )}
+          </>
         ) : null}
         {evidenceIndex.status === "ready" && indexedReportSections.length === 0 ? (
           <EmptyState title="No report map" detail="Older evidence indexes do not expose report section mappings." />
@@ -3577,11 +3606,58 @@ function formatUnknownValue(value: unknown): string {
   }
 }
 
+function filterReportSections(sections: ReportSectionEntry[], query: string): ReportSectionEntry[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return sections;
+  }
+  return sections.flatMap((section) => {
+    const sectionMatches = reportSectionSearchText(section).includes(normalizedQuery);
+    const matchingDetails = section.details.filter((detail) => reportSectionDetailSearchText(detail).includes(normalizedQuery));
+    if (sectionMatches) {
+      return [{ ...section, details: matchingDetails.length > 0 ? matchingDetails : section.details }];
+    }
+    if (matchingDetails.length > 0) {
+      return [{ ...section, details: matchingDetails }];
+    }
+    return [];
+  });
+}
+
+function reportSectionSearchText(section: ReportSectionEntry): string {
+  return [
+    section.anchor,
+    section.summary,
+    section.title,
+    ...section.artifactIds,
+    ...section.artifactKinds,
+    ...section.evidenceLinks
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function reportSectionDetailSearchText(detail: ReportSectionDetailEntry): string {
+  return [detail.label, detail.value, detail.status ?? "", reportSectionDetailSummary(detail), safeJsonText(detail.details)].join(" ").toLowerCase();
+}
+
 function reportSectionDetailSummary(detail: ReportSectionDetailEntry): string {
   const payload = detail.details;
   const parts: string[] = [];
-  if (typeof payload.attempt === "number" || typeof payload.attempt === "string") {
-    parts.push(`attempt ${payload.attempt}`);
+  appendPayloadPart(parts, "type", payload.reviewType ?? payload.phase);
+  appendPayloadPart(parts, "attempt", payload.attempt);
+  appendPayloadPart(parts, "failure", payload.failureClass && payload.failureClass !== "none" ? payload.failureClass : null);
+  appendPayloadPart(parts, "command", payload.commandSource);
+  appendPayloadPart(parts, "script", payload.scriptName);
+  if (typeof payload.diagnosticCount === "number") {
+    parts.push(`${payload.diagnosticCount} diagnostics`);
+  }
+  if (isRecord(payload.resourcePolicy)) {
+    const runner = [payload.resourcePolicy.runnerKind, payload.resourcePolicy.enforcement].filter(Boolean).join("/");
+    appendPayloadPart(parts, "runner", runner || null);
+  }
+  if (Array.isArray(payload.repairInstructionIds) && payload.repairInstructionIds.length > 0) {
+    parts.push(`${payload.repairInstructionIds.length} repairs`);
   }
   if (Array.isArray(payload.domDifferences)) {
     parts.push(`DOM ${payload.domDifferences.length}`);
@@ -3594,10 +3670,26 @@ function reportSectionDetailSummary(detail: ReportSectionDetailEntry): string {
   if (consoleSummary) {
     parts.push(`console ${consoleSummary}`);
   }
+  appendPayloadPart(parts, "decision", payload.decision);
   if (Array.isArray(payload.evidenceLinks)) {
     parts.push(`${payload.evidenceLinks.length} evidence`);
   }
   return parts.length > 0 ? parts.join(" / ") : "No structured breakdown";
+}
+
+function appendPayloadPart(parts: string[], label: string, value: unknown): void {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  parts.push(`${label} ${formatUnknownValue(value)}`);
+}
+
+function safeJsonText(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
 }
 
 function collectionDiffSummary(value: unknown): string | null {

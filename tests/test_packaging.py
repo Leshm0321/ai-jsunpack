@@ -84,6 +84,73 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                build_artifact = store.write_artifact(
+                    job.id,
+                    kind="build_artifact",
+                    stage="building",
+                    filename="build-artifact.json",
+                    content=json.dumps(
+                        {
+                            "kind": "build_artifact",
+                            "id": "build_artifact_test",
+                            "jobId": job.id,
+                            "stage": "building",
+                            "reviewType": "build",
+                            "phase": "build",
+                            "attempt": 1,
+                            "status": "fail",
+                            "decision": "npm build failed",
+                            "command": ["npm", "run", "build"],
+                            "commandSource": "package_script",
+                            "scriptName": "build",
+                            "packageManager": "npm",
+                            "exitCode": 1,
+                            "durationMs": 123,
+                            "failureClass": "build_error",
+                            "timedOut": False,
+                            "outputTruncated": False,
+                            "workingDirectory": "generated_project",
+                            "networkPolicy": "deny",
+                            "resourcePolicy": {
+                                "processLimit": 64,
+                                "cpuTimeLimitMs": 120000,
+                                "memoryLimitBytes": 536870912,
+                                "enforcement": "local_best_effort",
+                                "runnerKind": "local",
+                                "runtimeName": "node",
+                                "runtimeVersion": "24-test",
+                                "hostPlatform": "win32",
+                                "capabilities": [
+                                    {
+                                        "name": "network",
+                                        "status": "best_effort",
+                                        "detail": "deny policy recorded for local runner",
+                                    }
+                                ],
+                                "limitations": ["local runner records resource policy without OS enforcement"],
+                            },
+                            "diagnostics": [
+                                {
+                                    "source": "typescript",
+                                    "tool": "tsc",
+                                    "category": "error",
+                                    "code": "TS1005",
+                                    "message": "Expected semicolon.",
+                                    "filePath": "src/main.ts",
+                                    "line": 1,
+                                    "column": 12,
+                                    "contextLines": [],
+                                    "relatedInformation": [],
+                                }
+                            ],
+                            "logsArtifactId": build_log.id,
+                            "repairInstructionIds": ["repair_test"],
+                            "limitations": ["test limitation"],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
                 runtime_trace = store.write_artifact(
                     job.id,
                     kind="runtime_trace",
@@ -184,9 +251,15 @@ class PackagingRunnerTest(unittest.TestCase):
                             "status": "fail",
                             "decision": "runtime compare needs repair",
                             "failureClass": "runtime_error",
-                            "evidenceRefs": [],
-                            "repairInstructionIds": [],
-                            "logsArtifactId": None,
+                            "evidenceRefs": [
+                                {
+                                    "artifactId": runtime_comparison.id,
+                                    "label": "Runtime comparison evidence",
+                                    "locator": "artifact:runtime_comparison",
+                                }
+                            ],
+                            "repairInstructionIds": ["repair_test"],
+                            "logsArtifactId": build_log.id,
                         }
                     ).encode("utf-8"),
                     content_type="application/json",
@@ -251,7 +324,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(evidence_index["omittedCount"], 4)
                 package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
-                self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "runtime_error")
+                self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "build_error")
                 self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["ownerId"], "local-user")
                 self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["projectId"], "default")
                 self.assertEqual(evidence_index["policySummary"]["modelPolicy"]["cloudMode"], "local_only")
@@ -278,6 +351,32 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"artifact://{memory_record.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{tool_registry.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
+                build_section = report_sections["build-and-typecheck"]
+                self.assertTrue(build_section["details"])
+                build_detail = build_section["details"][0]
+                self.assertEqual(build_detail["label"], "Build validation")
+                self.assertEqual(build_detail["status"], "fail")
+                self.assertEqual(build_detail["details"]["artifactId"], build_artifact.id)
+                self.assertEqual(build_detail["details"]["reviewType"], "build")
+                self.assertEqual(build_detail["details"]["diagnosticCount"], 1)
+                self.assertEqual(build_detail["details"]["diagnostics"][0]["code"], "TS1005")
+                self.assertEqual(build_detail["details"]["logsArtifactId"], build_log.id)
+                self.assertEqual(build_detail["details"]["resourcePolicy"]["enforcement"], "local_best_effort")
+                self.assertIn(f"artifact://{build_artifact.id}", build_detail["details"]["evidenceLinks"])
+                self.assertIn(f"artifact://{build_log.id}", build_detail["details"]["evidenceLinks"])
+                review_section = report_sections["review-evidence"]
+                self.assertTrue(review_section["details"])
+                review_detail = review_section["details"][0]
+                self.assertEqual(review_detail["label"], "Review run")
+                self.assertEqual(review_detail["status"], "fail")
+                self.assertEqual(review_detail["details"]["reviewType"], "runtime_compare")
+                self.assertEqual(review_detail["details"]["evidenceRefCount"], 1)
+                self.assertEqual(review_detail["details"]["logsArtifactId"], build_log.id)
+                self.assertIn(f"artifact://{runtime_comparison.id}", review_detail["details"]["evidenceLinks"])
+                risk_section = report_sections["risk-and-failure-groups"]
+                self.assertGreaterEqual(len(risk_section["details"]), 2)
+                self.assertTrue(any(item["details"]["failureClass"] == "build_error" for item in risk_section["details"]))
+                self.assertTrue(any(item["details"]["failureClass"] == "runtime_error" for item in risk_section["details"]))
                 runtime_compare_section = report_sections["runtime-compare-difference-summary"]
                 self.assertTrue(runtime_compare_section["details"])
                 runtime_compare_detail = runtime_compare_section["details"][0]

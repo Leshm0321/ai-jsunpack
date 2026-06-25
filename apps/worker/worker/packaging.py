@@ -1062,6 +1062,9 @@ class PackagingRunner:
         for artifact in artifacts:
             artifact_ids_by_kind.setdefault(artifact.kind, []).append(artifact.id)
         attachment_ids = [str(item["artifactId"]) for item in attachments if item["included"]]
+        build_details = self._build_typecheck_report_details(job_id=job_id, store=store, artifacts=artifacts)
+        review_details = self._review_report_details(job_id=job_id, store=store, artifacts=artifacts)
+        risk_details = self._risk_report_details([*build_details, *review_details])
         return [
             self._report_section(
                 title="Completion Decision",
@@ -1076,6 +1079,7 @@ class PackagingRunner:
                 summary="Failing or best-effort build, runtime, and review observations.",
                 artifact_kinds=("build_artifact", "runtime_validation", "review_run"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
+                details=risk_details,
             ),
             self._report_section(
                 title="Build And Typecheck",
@@ -1083,6 +1087,7 @@ class PackagingRunner:
                 summary="Sandboxed build and typecheck results.",
                 artifact_kinds=("build_artifact", "build_log"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
+                details=build_details,
             ),
             self._report_section(
                 title="Runtime Evidence",
@@ -1127,6 +1132,7 @@ class PackagingRunner:
                 summary="Review, repair gate, and best-effort decision evidence.",
                 artifact_kinds=("review_run", "repair_instruction"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
+                details=review_details,
             ),
             self._report_section(
                 title="Artifact Manifest",
@@ -1178,6 +1184,207 @@ class PackagingRunner:
             "details": details or [],
         }
 
+    def _build_typecheck_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            if artifact.kind != "build_artifact":
+                continue
+            payload = self._read_report_payload(job_id=job_id, store=store, artifact=artifact, kind="build_artifact")
+            status = self._report_detail_status(payload.get("status"))
+            review_type = str(payload.get("reviewType") or payload.get("phase") or artifact.stage)
+            attempt = self._record_attempt(payload)
+            diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+            logs_artifact_id = self._optional_string(payload.get("logsArtifactId"))
+            repair_instruction_ids = self._string_list(payload.get("repairInstructionIds"))
+            evidence_links = self._artifact_evidence_links(
+                artifact.id,
+                logs_artifact_id,
+                *repair_instruction_ids,
+            )
+            details.append(
+                {
+                    "label": "Build validation",
+                    "value": f"{review_type} attempt {attempt}",
+                    "status": status,
+                    "details": {
+                        "artifactId": artifact.id,
+                        "reviewType": review_type,
+                        "phase": payload.get("phase"),
+                        "attempt": attempt,
+                        "failureClass": str(payload.get("failureClass") or "unknown"),
+                        "decision": str(payload.get("decision") or "Build validation did not include a decision."),
+                        "command": self._string_list(payload.get("command")),
+                        "commandSource": payload.get("commandSource"),
+                        "scriptName": payload.get("scriptName"),
+                        "packageManager": payload.get("packageManager"),
+                        "exitCode": payload.get("exitCode"),
+                        "durationMs": payload.get("durationMs"),
+                        "diagnosticCount": len(diagnostics),
+                        "diagnostics": self._compact_diagnostics(diagnostics),
+                        "logsArtifactId": logs_artifact_id,
+                        "repairInstructionIds": repair_instruction_ids,
+                        "networkPolicy": payload.get("networkPolicy"),
+                        "resourcePolicy": self._compact_resource_policy(payload.get("resourcePolicy")),
+                        "limitations": self._string_list(payload.get("limitations")),
+                        "evidenceLinks": evidence_links,
+                    },
+                }
+            )
+        return details
+
+    def _review_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            if artifact.kind != "review_run":
+                continue
+            payload = self._read_report_payload(job_id=job_id, store=store, artifact=artifact, kind="review_run")
+            status = self._report_detail_status(payload.get("status"))
+            review_type = str(payload.get("reviewType") or artifact.stage)
+            attempt = self._record_attempt(payload)
+            logs_artifact_id = self._optional_string(payload.get("logsArtifactId"))
+            repair_instruction_ids = self._string_list(payload.get("repairInstructionIds"))
+            evidence_refs = payload.get("evidenceRefs") if isinstance(payload.get("evidenceRefs"), list) else []
+            evidence_links = self._artifact_evidence_links(
+                artifact.id,
+                logs_artifact_id,
+                *repair_instruction_ids,
+                *self._evidence_ref_artifact_ids(evidence_refs),
+            )
+            details.append(
+                {
+                    "label": "Review run",
+                    "value": f"{review_type} attempt {attempt}",
+                    "status": status,
+                    "details": {
+                        "artifactId": artifact.id,
+                        "reviewType": review_type,
+                        "attempt": attempt,
+                        "failureClass": str(payload.get("failureClass") or "unknown"),
+                        "decision": str(payload.get("decision") or "Review did not include a decision."),
+                        "logsArtifactId": logs_artifact_id,
+                        "repairInstructionIds": repair_instruction_ids,
+                        "evidenceRefs": self._compact_evidence_refs(evidence_refs),
+                        "evidenceRefCount": len(evidence_refs),
+                        "evidenceLinks": evidence_links,
+                    },
+                }
+            )
+        return details
+
+    def _risk_report_details(self, details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [detail for detail in details if self._report_detail_needs_attention(detail)]
+
+    def _report_detail_needs_attention(self, detail: dict[str, Any]) -> bool:
+        status = str(detail.get("status") or "")
+        detail_payload = detail.get("details") if isinstance(detail.get("details"), dict) else {}
+        failure_class = str(detail_payload.get("failureClass") or "unknown")
+        return failure_class != "none" or status in {"best_effort", "fail", "retry"}
+
+    def _read_report_payload(self, *, job_id: str, store, artifact: ArtifactRecord, kind: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
+        except Exception as error:
+            return {
+                "artifactId": artifact.id,
+                "kind": kind,
+                "status": "best_effort",
+                "failureClass": "unknown",
+                "decision": f"{kind} artifact could not be read: {error}",
+            }
+        if not isinstance(payload, dict):
+            return {
+                "artifactId": artifact.id,
+                "kind": kind,
+                "status": "best_effort",
+                "failureClass": "unknown",
+                "decision": f"{kind} artifact did not contain a JSON object.",
+            }
+        payload.setdefault("artifactId", artifact.id)
+        return payload
+
+    def _report_detail_status(self, value: Any) -> str:
+        status = str(value or "best_effort")
+        if status in {"pass", "retry", "best_effort", "fail"}:
+            return status
+        return "best_effort"
+
+    def _optional_string(self, value: Any) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    def _string_list(self, value: Any) -> list[str]:
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    def _artifact_evidence_links(self, *artifact_ids: str | None) -> list[str]:
+        return [f"artifact://{artifact_id}" for artifact_id in dict.fromkeys(artifact_ids) if artifact_id]
+
+    def _evidence_ref_artifact_ids(self, evidence_refs: list[Any]) -> list[str]:
+        artifact_ids: list[str] = []
+        for item in evidence_refs:
+            if isinstance(item, dict) and isinstance(item.get("artifactId"), str):
+                artifact_ids.append(item["artifactId"])
+        return artifact_ids
+
+    def _compact_evidence_refs(self, evidence_refs: list[Any]) -> list[dict[str, Any]]:
+        compact: list[dict[str, Any]] = []
+        for item in evidence_refs[:8]:
+            if not isinstance(item, dict):
+                continue
+            compact.append(
+                {
+                    "artifactId": item.get("artifactId"),
+                    "label": item.get("label"),
+                    "locator": item.get("locator"),
+                }
+            )
+        return compact
+
+    def _compact_diagnostics(self, diagnostics: list[Any]) -> list[dict[str, Any]]:
+        compact: list[dict[str, Any]] = []
+        for item in diagnostics[:8]:
+            if not isinstance(item, dict):
+                continue
+            compact.append(
+                {
+                    "source": item.get("source"),
+                    "tool": item.get("tool"),
+                    "category": item.get("category"),
+                    "code": item.get("code"),
+                    "message": self._truncate_text(item.get("message"), max_length=180),
+                    "filePath": item.get("filePath"),
+                    "line": item.get("line"),
+                    "column": item.get("column"),
+                    "relatedInformationCount": len(item.get("relatedInformation") or []),
+                }
+            )
+        return compact
+
+    def _compact_resource_policy(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        capabilities = value.get("capabilities") if isinstance(value.get("capabilities"), list) else []
+        return {
+            "enforcement": value.get("enforcement"),
+            "runnerKind": value.get("runnerKind"),
+            "runtimeName": value.get("runtimeName"),
+            "runtimeVersion": value.get("runtimeVersion"),
+            "hostPlatform": value.get("hostPlatform"),
+            "capabilities": [
+                {
+                    "name": item.get("name"),
+                    "status": item.get("status"),
+                    "detail": self._truncate_text(item.get("detail"), max_length=180),
+                }
+                for item in capabilities[:8]
+                if isinstance(item, dict)
+            ],
+            "limitations": self._string_list(value.get("limitations")),
+        }
+
+    def _truncate_text(self, value: Any, *, max_length: int) -> str | None:
+        if value is None:
+            return None
+        text = str(value)
+        return text if len(text) <= max_length else f"{text[: max_length - 3]}..."
     def _runtime_compare_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
         entries = [artifact for artifact in artifacts if artifact.kind == "runtime_comparison"]
         if not entries:

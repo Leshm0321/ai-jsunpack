@@ -1066,6 +1066,34 @@ button.graph-node:focus-visible {
   border-top: 1px solid rgba(203, 213, 225, 0.8);
 }
 
+.report-detail-filter {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid rgba(3, 105, 161, 0.18);
+  border-radius: 8px;
+  color: var(--primary);
+  background: #f8fafc;
+}
+
+.report-detail-filter input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+}
+
+.report-detail-filter input::placeholder {
+  color: var(--muted);
+}
+
 .report-row {
   display: flex;
   align-items: center;
