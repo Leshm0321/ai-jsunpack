@@ -21,7 +21,9 @@ Run the local production smoke/soak acceptance check before release handoff:
   --output tmp\deployment-smoke.json
 ```
 
-The default path uses temporary SQLite, a temporary Artifact Store, API TestClient, a controlled Worker pipeline, synthetic Browser Runner soak, simulated webhook delivery, and retention cleanup checks. It exits non-zero when any critical check fails. For production-like capacity runs, pass a shared metadata DB and retain artifacts:
+The default path uses temporary SQLite, a temporary Artifact Store, API TestClient, a controlled Worker pipeline, synthetic Browser Runner soak, simulated webhook delivery, and retention cleanup checks. It exits non-zero when any critical check fails and writes an `archive_manifest` section into the JSON report with result package hashes, report kinds, Prometheus scrape evidence, alert delivery status, retention evidence, and Browser Runner soak assessment.
+
+For an archive-ready topology rehearsal, pass a shared metadata DB and retain artifacts:
 
 ```powershell
 .venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
@@ -32,6 +34,8 @@ The default path uses temporary SQLite, a temporary Artifact Store, API TestClie
   --soak-runs 200 `
   --output tmp\deployment-smoke-postgres.json
 ```
+
+The persisted report is the release handoff artifact. Keep it with the retained Artifact Store directory or object-store export so reviewers can verify `archive_manifest.archiveReady`, `archive_manifest.artifactKinds`, `archive_manifest.retainedEvidence.resultPackageSha256`, webhook delivery, Prometheus coverage, retention cleanup evidence, and Browser Runner capacity assessment together.
 
 ## Sandbox and Browser Isolation Profiles
 

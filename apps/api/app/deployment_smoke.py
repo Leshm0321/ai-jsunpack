@@ -301,6 +301,35 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                             "backendAssessment": soak_result.get("backendAssessment"),
                         },
                     )
+                    archive_manifest = _build_archive_manifest(
+                        config=config,
+                        workspace=workspace,
+                        job_id=job_id,
+                        artifacts=artifacts,
+                        checks=checks,
+                        health=health,
+                        latest_runtime=latest_runtime,
+                        reports=reports,
+                        result_package=package_download,
+                        metrics=metrics,
+                        prometheus=prometheus,
+                        alerts=alerts,
+                        alert_events=alert_events,
+                        retention_dry_run=retention_dry_run,
+                        retention_execute=retention_execute,
+                        soak_result=soak_result,
+                    )
+                    _add_check(
+                        checks,
+                        "archive_manifest_complete",
+                        _archive_manifest_complete(archive_manifest),
+                        evidence={
+                            "topologyMode": archive_manifest["topologyMode"],
+                            "archiveReady": archive_manifest["archiveReady"],
+                            "artifactCount": archive_manifest["artifactCount"],
+                            "retainedEvidence": archive_manifest["retainedEvidence"],
+                        },
+                    )
                     report = _final_report(
                         config,
                         checks,
@@ -320,6 +349,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                         retention_dry_run=retention_dry_run,
                         retention_execute=retention_execute,
                         soak_result=soak_result,
+                        archive_manifest=archive_manifest,
                     )
                     _write_report(config, report)
                     return report
@@ -577,6 +607,84 @@ def _final_report(
         "limitations": limitations,
         **sections,
     }
+
+
+def _build_archive_manifest(
+    *,
+    config: DeploymentSmokeConfig,
+    workspace: Path,
+    job_id: str,
+    artifacts,
+    checks: list[dict[str, Any]],
+    health,
+    latest_runtime,
+    reports,
+    result_package,
+    metrics,
+    prometheus,
+    alerts,
+    alert_events,
+    retention_dry_run,
+    retention_execute,
+    soak_result,
+) -> dict[str, Any]:
+    artifact_items = list(artifacts)
+    artifact_kinds = sorted({artifact.kind for artifact in artifact_items})
+    checks_by_name = {check["name"]: check for check in checks}
+    topology_mode = _topology_mode(config)
+    archive_ready = bool(config.output_path and config.artifact_root)
+    return {
+        "kind": "deployment_smoke_archive_manifest",
+        "schemaVersion": "1",
+        "jobId": job_id,
+        "topologyMode": topology_mode,
+        "archiveReady": archive_ready,
+        "workspace": str(workspace),
+        "outputPath": config.output_path,
+        "artifactRoot": config.artifact_root,
+        "databaseUrlConfigured": bool(config.database_url),
+        "artifactCount": len(artifact_items),
+        "artifactKinds": artifact_kinds,
+        "retainedArtifactKinds": artifact_kinds,
+        "retainedEvidence": {
+            "resultPackageBytes": result_package["bytes"] if "bytes" in result_package else None,
+            "resultPackageSha256": result_package.get("sha256"),
+            "resultPackageStatusCode": result_package.get("statusCode"),
+            "runtimeStatus": latest_runtime.get("json", {}).get("status") if isinstance(latest_runtime, dict) else None,
+            "reportKinds": [item["kind"] for item in reports.get("json", [])] if isinstance(reports, dict) else [],
+            "healthStatus": health.get("json", {}).get("status") if isinstance(health, dict) else None,
+            "metricsStatus": metrics.get("json", {}).get("status") if isinstance(metrics, dict) else None,
+            "prometheusScraped": "ai_jsunpack_ops_active_heartbeats" in prometheus.get("text", "") if isinstance(prometheus, dict) else False,
+            "alertDeliveryStatus": alerts.get("json", {}).get("delivery", {}).get("status") if isinstance(alerts, dict) else None,
+            "alertEventCount": len(alert_events.get("json", [])) if isinstance(alert_events, dict) else None,
+            "retentionDryRunCandidates": retention_dry_run.get("json", {}).get("candidateCount") if isinstance(retention_dry_run, dict) else None,
+            "retentionDeletedCount": retention_execute.get("json", {}).get("deletedCount") if isinstance(retention_execute, dict) else None,
+            "browserRunnerSoakRecommendation": soak_result.get("backendAssessment", {}).get("recommendation") if isinstance(soak_result, dict) else None,
+        },
+        "checkStatuses": {name: item["status"] for name, item in checks_by_name.items()},
+    }
+
+
+def _archive_manifest_complete(manifest: dict[str, Any]) -> bool:
+    retained = manifest.get("retainedEvidence", {})
+    required_kinds = {"audit_report", "evidence_index", "html_report", "result_package"}
+    return (
+        manifest.get("artifactCount", 0) > 0
+        and required_kinds.issubset(set(manifest.get("artifactKinds", [])))
+        and retained.get("resultPackageBytes", 0) > 0
+        and bool(retained.get("resultPackageSha256"))
+        and retained.get("alertDeliveryStatus") == "delivered"
+        and retained.get("browserRunnerSoakRecommendation") == "continue_shared_db_backend"
+        and retained.get("prometheusScraped") is True
+    )
+
+
+def _topology_mode(config: DeploymentSmokeConfig) -> str:
+    if config.artifact_root and config.database_url and not config.database_url.startswith("sqlite"):
+        return "production_like"
+    if config.artifact_root:
+        return "retained_local"
+    return "ephemeral_local"
 
 
 def _exception_report(config: DeploymentSmokeConfig, error: Exception) -> dict[str, Any]:

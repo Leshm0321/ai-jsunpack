@@ -74,10 +74,23 @@ class DeploymentSmokeTest(unittest.TestCase):
                 "retention_cleanup_execute",
                 "retention_deleted_artifact_hidden",
                 "browser_runner_soak_baseline",
+                "archive_manifest_complete",
             ):
                 self.assertEqual(checks[name]["status"], "pass", name)
 
             self.assertGreater(persisted["result_package"]["bytes"], 0)
+            archive_manifest = persisted["archive_manifest"]
+            self.assertEqual(archive_manifest["kind"], "deployment_smoke_archive_manifest")
+            self.assertEqual(archive_manifest["topologyMode"], "ephemeral_local")
+            self.assertFalse(archive_manifest["archiveReady"])
+            self.assertGreater(archive_manifest["artifactCount"], 0)
+            self.assertIn("result_package", archive_manifest["artifactKinds"])
+            self.assertEqual(
+                archive_manifest["retainedEvidence"]["resultPackageSha256"],
+                persisted["result_package"]["sha256"],
+            )
+            self.assertEqual(archive_manifest["retainedEvidence"]["alertDeliveryStatus"], "delivered")
+            self.assertTrue(archive_manifest["retainedEvidence"]["prometheusScraped"])
             self.assertEqual(persisted["alerts"]["json"]["delivery"]["status"], "delivered")
             self.assertGreater(persisted["retention_dry_run"]["json"]["candidateCount"], 0)
             self.assertEqual(
@@ -89,6 +102,34 @@ class DeploymentSmokeTest(unittest.TestCase):
                 "continue_shared_db_backend",
             )
             self.assertFalse(persisted["soak_result"]["backendAssessment"]["messageQueueMigrationRequired"])
+
+    def test_deployment_smoke_marks_retained_archive_ready_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "deployment-smoke.json"
+            artifact_root = root / "artifacts"
+            database_url = f"sqlite:///{(root / 'metadata.db').as_posix()}"
+
+            report = run_deployment_smoke(
+                DeploymentSmokeConfig(
+                    database_url=database_url,
+                    artifact_root=str(artifact_root),
+                    output_path=str(output_path),
+                    soak_instances=1,
+                    soak_workers_per_instance=1,
+                    soak_runs=1,
+                    soak_capture_delay_ms=0,
+                )
+            )
+
+            archive_manifest = report["archive_manifest"]
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(archive_manifest["topologyMode"], "retained_local")
+            self.assertTrue(archive_manifest["archiveReady"])
+            self.assertEqual(archive_manifest["outputPath"], str(output_path))
+            self.assertEqual(archive_manifest["artifactRoot"], str(artifact_root))
+            self.assertTrue(output_path.exists())
+            self.assertTrue(any(artifact_root.rglob("*")))
 
     def test_cli_returns_nonzero_and_writes_failure_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
