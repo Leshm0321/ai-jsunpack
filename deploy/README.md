@@ -14,6 +14,25 @@ The compose file is a deployment contract and local starting point. Replace plac
 
 When `AI_JSUNPACK_SERVICE_ROLE=api` is set, the API process validates its environment during import/startup and fails fast if Worker/browser execution configuration is present. Without an explicit service role, local development stays permissive and `/health` reports a warning profile instead of failing.
 
+Run the local production smoke/soak acceptance check before release handoff:
+
+```powershell
+.venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
+  --output tmp\deployment-smoke.json
+```
+
+The default path uses temporary SQLite, a temporary Artifact Store, API TestClient, a controlled Worker pipeline, synthetic Browser Runner soak, simulated webhook delivery, and retention cleanup checks. It exits non-zero when any critical check fails. For production-like capacity runs, pass a shared metadata DB and retain artifacts:
+
+```powershell
+.venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
+  --database-url "postgresql+psycopg://user:pass@db:5432/ai_jsunpack" `
+  --artifact-root tmp\deployment-smoke-artifacts `
+  --soak-instances 4 `
+  --soak-workers-per-instance 2 `
+  --soak-runs 200 `
+  --output tmp\deployment-smoke-postgres.json
+```
+
 ## Sandbox and Browser Isolation Profiles
 
 `build_artifact.resourcePolicy` is the audit contract for execution isolation. It records `enforcement`, `runnerKind`, runtime metadata, capability status, and known limitations for every build/typecheck validation.

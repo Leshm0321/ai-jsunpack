@@ -141,6 +141,36 @@ Prometheus scrape 必须携带拥有 ops read 权限的 Bearer token。告警规
 5. 发布镜像并按环境注入 secret。
 6. 部署后检查 `/ops/metrics`、`/ops/prometheus` 和 alert event。
 
+## 自动化验收
+
+仓库提供一个本地可复跑的生产验收编排入口，默认使用临时 SQLite、临时 Artifact Store、API TestClient、受控 Worker pipeline 和模拟 webhook，不依赖 Docker、MinIO、外网或真实 PostgreSQL：
+
+```powershell
+.venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
+  --output tmp\deployment-smoke.json
+```
+
+该报告会归档以下检查结果：
+
+- API health、Job 创建、source input 上传、latest runtime validation、报告列表和结果包下载。
+- Worker pipeline 到 packaging 的最小端到端证据链。
+- API/Worker/Browser Runner heartbeat、`/ops/metrics`、`/ops/prometheus`、`/ops/alerts` 和 `/ops/alert-events`。
+- 模拟 webhook 投递记录，不访问真实网络。
+- `logs`/`screenshots` retention cleanup dry-run 与执行结果。
+- Browser Runner 多实例 soak/capacity baseline 和 lease recovery probe。
+
+命令成功时报告 `status=pass` 且进程返回 0；任一关键检查失败时报告 `status=fail` 且进程返回非 0。生产演练可以指定共享 DB 和持久 Artifact 目录：
+
+```powershell
+.venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
+  --database-url "postgresql+psycopg://user:pass@db:5432/ai_jsunpack" `
+  --artifact-root tmp\deployment-smoke-artifacts `
+  --soak-instances 4 `
+  --soak-workers-per-instance 2 `
+  --soak-runs 200 `
+  --output tmp\deployment-smoke-postgres.json
+```
+
 ## 生产上线检查
 
 - 所有服务使用非占位 secret 和最小权限凭证。
