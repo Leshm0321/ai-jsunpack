@@ -342,27 +342,35 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("# AI JS Unpack Audit Report", audit_report)
                 self.assertIn("completed_best_effort", audit_report)
                 self.assertIn("## Evidence Attachment Index", audit_report)
+                self.assertIn("## Review/Fix Convergence", audit_report)
                 self.assertIn("## Runtime Compare Difference Summary", audit_report)
                 self.assertIn("## Agent Runtime Audit", audit_report)
                 html_report = Path(artifact_by_kind["html_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("<!doctype html>", html_report)
                 self.assertIn("Evidence Attachment Index", html_report)
+                self.assertIn("Review/Fix Convergence", html_report)
                 self.assertIn("Runtime Compare Difference Summary", html_report)
                 self.assertIn("Agent Runtime Audit", html_report)
                 evidence_index_payload = json.loads(
                     Path(artifact_by_kind["evidence_index"].storage_uri).read_text(encoding="utf-8")
                 )
                 self.assertEqual(evidence_index_payload["kind"], "evidence_index")
-                self.assertEqual(evidence_index_payload["includedCount"], 11)
+                self.assertEqual(evidence_index_payload["includedCount"], 12)
                 package_paths = {item["packagePath"] for item in evidence_index_payload["attachments"] if item["included"]}
                 self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", package_paths)
                 self.assertIn(f"evidence/build_log/{typecheck_log_artifact.id}.json", package_paths)
                 self.assertIn(f"evidence/runtime_trace/{runtime_compare_trace_artifact.id}.json", package_paths)
+                self.assertTrue(
+                    any(path and path.startswith("evidence/runtime_trace/") for path in package_paths)
+                )
                 self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", package_paths)
                 self.assertIn(f"evidence/runtime_scenario/{artifact_by_kind['runtime_scenario'].id}.json", package_paths)
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", package_paths)
+                report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
+                self.assertIn("review-fix-convergence", report_sections)
                 with zipfile.ZipFile(artifact_by_kind["result_package"].storage_uri) as archive:
                     names = set(archive.namelist())
+                    review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 self.assertIn("audit-report.md", names)
                 self.assertIn("audit-report.html", names)
                 self.assertIn("audit.json", names)
@@ -378,6 +386,8 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("memory-records.json", names)
                 self.assertIn("runtime-diagnoses.json", names)
                 self.assertIn("report-sections.json", names)
+                self.assertIn("review-fix-summary.json", names)
+                self.assertEqual(review_fix_summary["target"], "review_fix_convergence_summary")
                 self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", names)
                 self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", names)
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", names)
@@ -508,6 +518,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 result_package = next(artifact for artifact in artifacts if artifact.kind == "result_package")
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+                    review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
 
                 self.assertEqual(sum(1 for event in run.events if event.status == "runtime_smoke"), 2)
                 self.assertEqual(sum(1 for event in run.events if event.status == "runtime_compare"), 2)
@@ -548,6 +559,12 @@ class WorkerPipelineTest(unittest.TestCase):
                         for observation in audit_payload["completionDecision"]["observations"]
                     )
                 )
+                self.assertEqual(review_fix_summary["target"], "review_fix_convergence_summary")
+                self.assertEqual(review_fix_summary["finalOutcome"], "repaired_passed")
+                self.assertEqual(audit_payload["reviewFixSummary"]["finalOutcome"], "repaired_passed")
+                self.assertEqual(review_fix_summary["runtimeCompare"]["attemptsUsed"], 2)
+                self.assertEqual(review_fix_summary["runtimeCompare"]["appliedRepairCount"], 1)
+                self.assertFalse(review_fix_summary["runtimeCompare"]["budgetExhausted"])
                 self.assertIn(audit_report.id, result_package.parent_artifact_ids)
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
                     repaired_index = archive.read("generated_project/index.html").decode("utf-8")
@@ -605,6 +622,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 evidence_index = next(artifact for artifact in artifacts if artifact.kind == "evidence_index")
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+                    review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 evidence_index_payload = json.loads(Path(evidence_index.storage_uri).read_text(encoding="utf-8"))
 
                 self.assertEqual(sum(1 for event in run.events if event.status == "runtime_smoke"), 3)
@@ -626,14 +644,28 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(retry_summary["attemptsUsed"], 3)
                 self.assertTrue(retry_summary["budgetExhausted"])
                 self.assertEqual(retry_summary["stoppedReason"], "retry_budget_exhausted")
+                convergence_summary = next(
+                    payload for payload in runtime_traces if payload.get("target") == "review_fix_convergence_summary"
+                )
+                self.assertEqual(convergence_summary["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertEqual(review_fix_summary["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertEqual(audit_payload["reviewFixSummary"]["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertEqual(review_fix_summary["runtimeCompare"]["attemptsUsed"], 3)
+                self.assertTrue(review_fix_summary["runtimeCompare"]["budgetExhausted"])
                 self.assertEqual([payload["attempt"] for payload in matrix_summaries], [0, 1, 2])
                 report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
+                review_fix_details = report_sections["review-fix-convergence"]["details"]
                 matrix_detail = next(item for item in runtime_details if item["label"] == "Runtime compare matrix summary")
                 scope_detail = next(item for item in runtime_details if item["label"] == "Runtime compare scope")
+                review_fix_detail = next(
+                    item for item in review_fix_details if item["label"] == "Review/Fix convergence summary"
+                )
                 self.assertEqual(matrix_detail["status"], "fail")
                 self.assertTrue(matrix_detail["details"]["retryBudget"]["budgetExhausted"])
                 self.assertEqual(matrix_detail["details"]["retryBudget"]["attemptsUsed"], 3)
+                self.assertEqual(review_fix_detail["status"], "best_effort")
+                self.assertEqual(review_fix_detail["details"]["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertEqual(len(scope_detail["details"]["attemptHistory"]), 3)
                 self.assertTrue(
                     any(
@@ -644,6 +676,12 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(
                     any(
                         item["label"] == "Runtime compare matrix summary" and item["status"] == "fail"
+                        for item in report_sections["risk-and-failure-groups"]["details"]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        item["label"] == "Review/Fix convergence summary" and item["status"] == "best_effort"
                         for item in report_sections["risk-and-failure-groups"]["details"]
                     )
                 )

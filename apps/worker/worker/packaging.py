@@ -155,7 +155,7 @@ class PackagingRunner:
         )
 
     def _audit_payload(self, *, job: JobRecord, artifacts: list[ArtifactRecord], store) -> dict[str, Any]:
-        return {
+        payload = {
             "schemaVersion": "2026-06-14",
             "kind": "audit_report",
             "job": job.model_dump(by_alias=True),
@@ -174,6 +174,8 @@ class PackagingRunner:
             "buildArtifacts": self._load_json_artifacts(job.id, artifacts, store, "build_artifact"),
             "repairInstructions": self._load_json_artifacts(job.id, artifacts, store, "repair_instruction"),
         }
+        payload["reviewFixSummary"] = self._review_fix_summary(payload["runtimeTraces"])
+        return payload
 
     def _load_tool_registry(self, job_id: str, artifacts: list[ArtifactRecord], store) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -226,6 +228,22 @@ class PackagingRunner:
                 key_name="reviewType",
             ),
         }
+        review_fix_summary = audit_payload.get("reviewFixSummary")
+        if (
+            isinstance(review_fix_summary, dict)
+            and review_fix_summary.get("target") == "review_fix_convergence_summary"
+            and review_fix_summary.get("available", True)
+        ):
+            status = review_fix_summary.get("status")
+            if status in {"fail", "retry", "best_effort"}:
+                observations.append(
+                    {
+                        "group": "reviewFixSummary",
+                        "status": str(status),
+                        "failureClass": str(review_fix_summary.get("failureClass") or "unknown"),
+                        "decision": self._review_fix_decision(review_fix_summary),
+                    }
+                )
         for group, records in decision_records.items():
             for record in records:
                 status = record.get("status")
@@ -302,6 +320,7 @@ class PackagingRunner:
         runtime_diagnoses = audit_payload["runtimeDiagnoses"]
         report_sections = audit_payload["reportSections"]
         build_artifacts = audit_payload["buildArtifacts"]
+        review_fix_summary = audit_payload["reviewFixSummary"]
         attachments = evidence_index["attachments"]
 
         lines = [
@@ -323,6 +342,10 @@ class PackagingRunner:
             "## Completion Decision",
             "",
             decision["reason"] or "All collected build, review, and runtime validation evidence passed.",
+            "",
+            "## Review/Fix Convergence",
+            "",
+            self._review_fix_markdown(review_fix_summary),
             "",
             "## Policy Summary",
             "",
@@ -443,6 +466,7 @@ class PackagingRunner:
         memory_records = audit_payload["memoryRecords"]
         runtime_diagnoses = audit_payload["runtimeDiagnoses"]
         report_sections = audit_payload["reportSections"]
+        review_fix_summary = audit_payload["reviewFixSummary"]
         attachments = evidence_index["attachments"]
         decision_text = decision["reason"] or "All collected build, review, and runtime validation evidence passed."
 
@@ -482,6 +506,8 @@ class PackagingRunner:
                 "</section>",
                 "<h2>Completion Decision</h2>",
                 f'<div class="notice">{escape(decision_text)}</div>',
+                "<h2>Review/Fix Convergence</h2>",
+                self._review_fix_html(review_fix_summary),
                 "<h2>Policy Summary</h2>",
                 self._html_table(
                     [policy_summary["modelPolicy"]],
@@ -614,6 +640,110 @@ class PackagingRunner:
         if not summaries:
             return None
         return max(summaries, key=lambda record: int(record.get("attemptsUsed") or 0))
+
+    def _review_fix_summary(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        summaries = [record for record in records if record.get("target") == "review_fix_convergence_summary"]
+        if not summaries:
+            return {
+                "target": "review_fix_convergence_summary",
+                "status": "best_effort",
+                "failureClass": "unknown",
+                "finalOutcome": "best_effort_with_limitations",
+                "available": False,
+                "decision": "Review/Fix convergence summary evidence was not available at packaging time.",
+                "evidenceArtifactIds": [],
+                "evidenceLinks": [],
+            }
+        summary = summaries[-1]
+        summary.setdefault("available", True)
+        return summary
+
+    def _review_fix_decision(self, summary: dict[str, Any]) -> str:
+        final_outcome = str(summary.get("finalOutcome") or "best_effort_with_limitations")
+        runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
+        build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
+        if final_outcome == "repaired_passed":
+            return "Review/Fix applied deterministic repair evidence and final validation passed."
+        if final_outcome == "passed_without_repair":
+            return "Build/typecheck and runtime compare passed without deterministic repair."
+        if final_outcome == "budget_exhausted_best_effort":
+            return (
+                "Review/Fix stopped after using "
+                f"{runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')} runtime compare attempts."
+            )
+        if final_outcome == "no_deterministic_repair":
+            return "Review/Fix found no applicable low-risk deterministic repair for the remaining failure."
+        if build_typecheck.get("needsAttention") or runtime_compare.get("finalReviewStatus") in {"fail", "best_effort", "retry"}:
+            return "Review/Fix completed with remaining best-effort limitations."
+        return str(summary.get("decision") or "Review/Fix convergence completed.")
+
+    def _review_fix_markdown(self, summary: dict[str, Any]) -> str:
+        runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
+        build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
+        rows = [
+            {"area": "Final outcome", "value": summary.get("finalOutcome")},
+            {"area": "Status", "value": summary.get("status")},
+            {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {
+                "area": "Build/typecheck repairs",
+                "value": (
+                    f"instructions={build_typecheck.get('repairInstructionCount')}; "
+                    f"applied={build_typecheck.get('appliedRepairCount')}; "
+                    f"allPassed={build_typecheck.get('allPassed')}"
+                ),
+            },
+            {
+                "area": "Runtime compare budget",
+                "value": (
+                    f"attempts={runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')}; "
+                    f"stoppedReason={runtime_compare.get('stoppedReason')}; "
+                    f"finalReviewStatus={runtime_compare.get('finalReviewStatus')}"
+                ),
+            },
+            {
+                "area": "Runtime repairs",
+                "value": (
+                    f"planned={runtime_compare.get('plannedRepairCount')}; "
+                    f"applied={runtime_compare.get('appliedRepairCount')}; "
+                    f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
+                ),
+            },
+        ]
+        return self._status_table(rows, ("area", "value"))
+
+    def _review_fix_html(self, summary: dict[str, Any]) -> str:
+        runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
+        build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
+        rows = [
+            {"area": "Final outcome", "value": summary.get("finalOutcome")},
+            {"area": "Status", "value": summary.get("status")},
+            {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {
+                "area": "Build/typecheck repairs",
+                "value": (
+                    f"instructions={build_typecheck.get('repairInstructionCount')}; "
+                    f"applied={build_typecheck.get('appliedRepairCount')}; "
+                    f"allPassed={build_typecheck.get('allPassed')}"
+                ),
+            },
+            {
+                "area": "Runtime compare budget",
+                "value": (
+                    f"attempts={runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')}; "
+                    f"stoppedReason={runtime_compare.get('stoppedReason')}; "
+                    f"finalReviewStatus={runtime_compare.get('finalReviewStatus')}"
+                ),
+            },
+            {
+                "area": "Runtime repairs",
+                "value": (
+                    f"planned={runtime_compare.get('plannedRepairCount')}; "
+                    f"applied={runtime_compare.get('appliedRepairCount')}; "
+                    f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
+                ),
+            },
+        ]
+        return self._html_table(rows, ("area", "value"))
 
     def _runtime_compare_diff_markdown(self, records: list[dict[str, Any]]) -> str:
         comparison_records = self._runtime_compare_comparison_records(records)
@@ -1061,6 +1191,12 @@ class PackagingRunner:
                 source="repair_instruction",
                 description="Structured repair instructions and applied repair evidence.",
             ),
+            self._package_content(
+                path="review-fix-summary.json",
+                content_type="application/json",
+                source="review_fix_summary",
+                description="Unified Review/Fix convergence outcome, retry budget, and repair application summary.",
+            ),
         ]
         if generated_project is None:
             contents.append(
@@ -1137,7 +1273,8 @@ class PackagingRunner:
         build_details = self._build_typecheck_report_details(job_id=job_id, store=store, artifacts=artifacts)
         review_details = self._review_report_details(job_id=job_id, store=store, artifacts=artifacts)
         runtime_compare_details = self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts)
-        risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details])
+        review_fix_details = self._review_fix_report_details(job_id=job_id, store=store, artifacts=artifacts)
+        risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details, *review_fix_details])
         return [
             self._report_section(
                 title="Completion Decision",
@@ -1150,9 +1287,17 @@ class PackagingRunner:
                 title="Risk And Failure Groups",
                 anchor="risk-and-failure-groups",
                 summary="Failing or best-effort build, runtime, and review observations.",
-                artifact_kinds=("build_artifact", "runtime_validation", "review_run"),
+                artifact_kinds=("build_artifact", "runtime_validation", "review_run", "runtime_trace"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=risk_details,
+            ),
+            self._report_section(
+                title="Review/Fix Convergence",
+                anchor="review-fix-convergence",
+                summary="Unified build, runtime compare, Agent review, repair application, and stop reason summary.",
+                artifact_kinds=("build_artifact", "review_run", "repair_instruction", "runtime_trace", "generated_project"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+                details=review_fix_details,
             ),
             self._report_section(
                 title="Build And Typecheck",
@@ -1339,6 +1484,55 @@ class PackagingRunner:
                         "evidenceRefs": self._compact_evidence_refs(evidence_refs),
                         "evidenceRefCount": len(evidence_refs),
                         "evidenceLinks": evidence_links,
+                    },
+                }
+            )
+        return details
+
+    def _review_fix_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            if artifact.kind != "runtime_trace":
+                continue
+            payload = self._read_report_payload(job_id=job_id, store=store, artifact=artifact, kind="runtime_trace")
+            if payload.get("target") != "review_fix_convergence_summary":
+                continue
+            payload.setdefault("artifactId", artifact.id)
+            runtime_compare = payload.get("runtimeCompare") if isinstance(payload.get("runtimeCompare"), dict) else {}
+            build_typecheck = payload.get("buildTypecheck") if isinstance(payload.get("buildTypecheck"), dict) else {}
+            evidence_ids = self._string_list(payload.get("evidenceArtifactIds"))
+            evidence_links = payload.get("evidenceLinks") if isinstance(payload.get("evidenceLinks"), list) else []
+            if not evidence_links:
+                evidence_links = self._artifact_evidence_links(artifact.id, *evidence_ids)
+            details.append(
+                {
+                    "label": "Review/Fix convergence summary",
+                    "value": str(payload.get("finalOutcome") or "best_effort_with_limitations"),
+                    "status": self._report_detail_status(payload.get("status")),
+                    "details": {
+                        "artifactId": artifact.id,
+                        "finalOutcome": payload.get("finalOutcome"),
+                        "decision": self._review_fix_decision(payload),
+                        "failureClass": str(payload.get("failureClass") or "unknown"),
+                        "buildTypecheck": {
+                            "allPassed": build_typecheck.get("allPassed"),
+                            "needsAttention": build_typecheck.get("needsAttention"),
+                            "repairInstructionCount": build_typecheck.get("repairInstructionCount"),
+                            "appliedRepairCount": build_typecheck.get("appliedRepairCount"),
+                            "latestStatusByReviewType": build_typecheck.get("latestStatusByReviewType"),
+                        },
+                        "runtimeCompare": {
+                            "maxAttempts": runtime_compare.get("maxAttempts"),
+                            "attemptsUsed": runtime_compare.get("attemptsUsed"),
+                            "budgetExhausted": runtime_compare.get("budgetExhausted"),
+                            "stoppedReason": runtime_compare.get("stoppedReason"),
+                            "finalReviewStatus": runtime_compare.get("finalReviewStatus"),
+                            "plannedRepairCount": runtime_compare.get("plannedRepairCount"),
+                            "appliedRepairCount": runtime_compare.get("appliedRepairCount"),
+                            "finalProjectArtifactId": runtime_compare.get("finalProjectArtifactId"),
+                        },
+                        "agentReview": payload.get("agentReview") if isinstance(payload.get("agentReview"), dict) else {},
+                        "evidenceLinks": [str(item) for item in evidence_links],
                     },
                 }
             )
@@ -1838,6 +2032,7 @@ class PackagingRunner:
             archive.writestr("runtime-diagnoses.json", self._json_text(audit_payload["runtimeDiagnoses"]))
             archive.writestr("report-sections.json", self._json_text(audit_payload["reportSections"]))
             archive.writestr("repair-instructions.json", self._json_text(audit_payload["repairInstructions"]))
+            archive.writestr("review-fix-summary.json", self._json_text(audit_payload["reviewFixSummary"]))
             self._write_evidence_attachments(archive, artifacts, evidence_index, store)
             if generated_project is None:
                 archive.writestr(

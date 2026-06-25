@@ -329,6 +329,20 @@ class WorkerPipeline:
                 parent_artifact_ids=packaging_parent_ids,
             )
             packaging_parent_ids = self._unique_ids([*packaging_parent_ids, retry_summary_artifact.id])
+            convergence_summary_artifact = self._write_review_fix_convergence_summary(
+                job_id=job_id,
+                store=store,
+                build_validation_result=build_validation_result,
+                agent_review_artifact_id=agent_result.review_artifact.id,
+                agent_repair_artifact_ids=[artifact.id for artifact in agent_result.repair_instruction_artifacts],
+                runtime_retry_summary_artifact_id=retry_summary_artifact.id,
+                runtime_compare_attempts=runtime_compare_attempts,
+                runtime_compare_stop_reason=runtime_compare_stop_reason,
+                runtime_compare_max_attempts=runtime_compare_max_attempts,
+                current_project_artifact_id=current_project_artifact.id if current_project_artifact is not None else None,
+                parent_artifact_ids=packaging_parent_ids,
+            )
+            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, convergence_summary_artifact.id])
             self._raise_if_cancelled(job_id=job_id, store=store)
             packaging_result = self.packaging_runner.run(
                 job_id=job_id,
@@ -399,6 +413,166 @@ class WorkerPipeline:
             producer="worker.pipeline",
             parent_artifact_ids=parent_artifact_ids,
         )
+
+    def _write_review_fix_convergence_summary(
+        self,
+        *,
+        job_id: str,
+        store,
+        build_validation_result,
+        agent_review_artifact_id: str,
+        agent_repair_artifact_ids: list[str],
+        runtime_retry_summary_artifact_id: str,
+        runtime_compare_attempts: list[dict],
+        runtime_compare_stop_reason: str,
+        runtime_compare_max_attempts: int,
+        current_project_artifact_id: str | None,
+        parent_artifact_ids: list[str],
+    ):
+        build_summary = self._build_validation_convergence_summary(build_validation_result)
+        runtime_summary = self._runtime_compare_convergence_summary(
+            max_attempts=runtime_compare_max_attempts,
+            attempts=runtime_compare_attempts,
+            stop_reason=runtime_compare_stop_reason,
+            current_project_artifact_id=current_project_artifact_id,
+            retry_summary_artifact_id=runtime_retry_summary_artifact_id,
+        )
+        final_outcome = self._review_fix_final_outcome(build_summary=build_summary, runtime_summary=runtime_summary)
+        evidence_links = self._unique_ids(
+            [
+                *build_summary["evidenceArtifactIds"],
+                agent_review_artifact_id,
+                *agent_repair_artifact_ids,
+                runtime_retry_summary_artifact_id,
+                *runtime_summary["evidenceArtifactIds"],
+                current_project_artifact_id,
+            ]
+        )
+        payload = {
+            "kind": "runtime_trace",
+            "jobId": job_id,
+            "target": "review_fix_convergence_summary",
+            "finalOutcome": final_outcome,
+            "status": "pass" if final_outcome in {"passed_without_repair", "repaired_passed"} else "best_effort",
+            "failureClass": "none" if final_outcome in {"passed_without_repair", "repaired_passed"} else "runtime_error",
+            "buildTypecheck": build_summary,
+            "runtimeCompare": runtime_summary,
+            "agentReview": {
+                "reviewArtifactId": agent_review_artifact_id,
+                "repairInstructionIds": agent_repair_artifact_ids,
+                "repairInstructionCount": len(agent_repair_artifact_ids),
+            },
+            "evidenceArtifactIds": evidence_links,
+            "evidenceLinks": [f"artifact://{artifact_id}" for artifact_id in evidence_links],
+        }
+        return store.write_artifact(
+            job_id,
+            kind="runtime_trace",
+            stage="reviewing",
+            filename="review-fix-convergence-summary.json",
+            content=self._json_bytes(payload),
+            content_type="application/json",
+            producer="worker.pipeline",
+            parent_artifact_ids=parent_artifact_ids,
+        )
+
+    def _build_validation_convergence_summary(self, build_validation_result) -> dict:
+        stage_results = [build_validation_result.build, build_validation_result.typecheck]
+        repair_artifacts = build_validation_result.repair_artifacts
+        applied_project_ids = [
+            artifact.id for artifact in repair_artifacts if artifact.kind == "generated_project"
+        ]
+        repair_instruction_ids = [
+            artifact.id for artifact in repair_artifacts if artifact.kind == "repair_instruction"
+        ]
+        statuses = [stage.review_run.status for stage in stage_results]
+        return {
+            "maxAttempt": max(stage.review_run.attempt for stage in stage_results),
+            "latestStatusByReviewType": {
+                stage.review_run.review_type: stage.review_run.status for stage in stage_results
+            },
+            "allPassed": all(status == "pass" for status in statuses),
+            "needsAttention": any(status in {"retry", "best_effort", "fail"} for status in statuses),
+            "repairInstructionIds": repair_instruction_ids,
+            "repairInstructionCount": len(repair_instruction_ids),
+            "appliedProjectArtifactIds": applied_project_ids,
+            "appliedRepairCount": len(applied_project_ids),
+            "evidenceArtifactIds": self._unique_ids(
+                [
+                    *build_validation_result.artifact_ids,
+                ]
+            ),
+        }
+
+    def _runtime_compare_convergence_summary(
+        self,
+        *,
+        max_attempts: int,
+        attempts: list[dict],
+        stop_reason: str,
+        current_project_artifact_id: str | None,
+        retry_summary_artifact_id: str,
+    ) -> dict:
+        triggered = [attempt for attempt in attempts if attempt.get("reviewGateTriggered")]
+        applied_repairs = [attempt for attempt in attempts if attempt.get("appliedProjectArtifactId")]
+        planned_repairs = [attempt for attempt in attempts if attempt.get("plannedRepairArtifactId")]
+        final_review_status = "fail" if attempts and attempts[-1].get("reviewGateTriggered") else "pass"
+        if attempts and not attempts[-1].get("reviewGateEnabled"):
+            final_review_status = "best_effort"
+        return {
+            "maxAttempts": max_attempts,
+            "attemptsUsed": len(attempts),
+            "budgetExhausted": stop_reason == "retry_budget_exhausted",
+            "stoppedReason": stop_reason,
+            "finalReviewStatus": final_review_status,
+            "finalProjectArtifactId": current_project_artifact_id,
+            "plannedRepairCount": len(planned_repairs),
+            "appliedRepairCount": len(applied_repairs),
+            "triggeredReviewCount": len(triggered),
+            "attempts": attempts,
+            "evidenceArtifactIds": self._unique_ids(
+                [
+                    retry_summary_artifact_id,
+                    *[
+                        artifact_id
+                        for attempt in attempts
+                        for artifact_id in (
+                            *attempt.get("comparisonArtifactIds", []),
+                            *attempt.get("validationArtifactIds", []),
+                            *attempt.get("traceArtifactIds", []),
+                            *attempt.get("scenarioArtifactIds", []),
+                            *attempt.get("screenshotArtifactIds", []),
+                            attempt.get("reviewArtifactId"),
+                            attempt.get("plannedRepairArtifactId"),
+                            attempt.get("repairArtifactId"),
+                            attempt.get("appliedProjectArtifactId"),
+                        )
+                        if artifact_id
+                    ],
+                ]
+            ),
+        }
+
+    def _review_fix_final_outcome(self, *, build_summary: dict, runtime_summary: dict) -> str:
+        if runtime_summary["budgetExhausted"]:
+            return "budget_exhausted_best_effort"
+        if runtime_summary["stoppedReason"] == "repair_not_applied":
+            return "no_deterministic_repair"
+        if runtime_summary["appliedRepairCount"] > 0 and runtime_summary["finalReviewStatus"] == "pass":
+            return "repaired_passed"
+        if (
+            build_summary["appliedRepairCount"] > 0
+            and build_summary["allPassed"]
+            and runtime_summary["finalReviewStatus"] == "pass"
+        ):
+            return "repaired_passed"
+        if (
+            build_summary["repairInstructionCount"] == 0
+            and runtime_summary["plannedRepairCount"] == 0
+            and runtime_summary["finalReviewStatus"] == "pass"
+        ):
+            return "passed_without_repair"
+        return "best_effort_with_limitations"
 
     def _runtime_compare_config(self, job_config: dict | None) -> dict | None:
         if not isinstance(job_config, dict):

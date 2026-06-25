@@ -217,6 +217,55 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                convergence_summary_trace = store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="reviewing",
+                    filename="review-fix-convergence-summary.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_trace",
+                            "jobId": job.id,
+                            "target": "review_fix_convergence_summary",
+                            "finalOutcome": "budget_exhausted_best_effort",
+                            "status": "best_effort",
+                            "failureClass": "runtime_error",
+                            "buildTypecheck": {
+                                "maxAttempt": 0,
+                                "latestStatusByReviewType": {"build": "fail"},
+                                "allPassed": False,
+                                "needsAttention": True,
+                                "repairInstructionIds": ["repair_test"],
+                                "repairInstructionCount": 1,
+                                "appliedProjectArtifactIds": [],
+                                "appliedRepairCount": 0,
+                                "evidenceArtifactIds": [],
+                            },
+                            "runtimeCompare": {
+                                "maxAttempts": 3,
+                                "attemptsUsed": 3,
+                                "budgetExhausted": True,
+                                "stoppedReason": "retry_budget_exhausted",
+                                "finalReviewStatus": "fail",
+                                "finalProjectArtifactId": "generated_project_attempt_2",
+                                "plannedRepairCount": 2,
+                                "appliedRepairCount": 2,
+                                "triggeredReviewCount": 3,
+                                "attempts": [],
+                                "evidenceArtifactIds": [retry_summary_trace.id],
+                            },
+                            "agentReview": {
+                                "reviewArtifactId": "review_test",
+                                "repairInstructionIds": ["repair_test"],
+                                "repairInstructionCount": 1,
+                            },
+                            "evidenceArtifactIds": [retry_summary_trace.id],
+                            "evidenceLinks": [f"artifact://{retry_summary_trace.id}"],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
                 runtime_screenshot = store.write_artifact(
                     job.id,
                     kind="runtime_screenshot",
@@ -377,11 +426,18 @@ class PackagingRunnerTest(unittest.TestCase):
                 audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
                 attachments = {item["artifactId"]: item for item in evidence_index["attachments"]}
 
-                self.assertEqual(evidence_index["includedCount"], 3)
+                self.assertEqual(evidence_index["includedCount"], 4)
                 self.assertEqual(evidence_index["omittedCount"], 4)
                 package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
-                self.assertEqual(evidence_index["failureSummary"][0]["failureClass"], "build_error")
+                self.assertIn(
+                    "build_error",
+                    {item["failureClass"] for item in evidence_index["failureSummary"]},
+                )
+                self.assertIn(
+                    "runtime_error",
+                    {item["failureClass"] for item in evidence_index["failureSummary"]},
+                )
                 self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["ownerId"], "local-user")
                 self.assertEqual(evidence_index["policySummary"]["accessBoundary"]["projectId"], "default")
                 self.assertEqual(evidence_index["policySummary"]["modelPolicy"]["cloudMode"], "local_only")
@@ -398,7 +454,9 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn("evidence-index.json", package_contents)
                 self.assertIn("generated_project/README.md", package_contents)
                 self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", package_contents)
+                self.assertIn(f"evidence/runtime_trace/{convergence_summary_trace.id}.json", package_contents)
                 self.assertTrue(package_contents[f"evidence/runtime_trace/{runtime_trace.id}.json"]["included"])
+                self.assertTrue(package_contents[f"evidence/runtime_trace/{convergence_summary_trace.id}.json"]["included"])
                 self.assertFalse(package_contents[f"evidence/build_log/{build_log.id}"]["included"])
                 self.assertEqual(package_contents[f"evidence/runtime_trace/{runtime_trace.id}.json"]["artifactId"], runtime_trace.id)
                 self.assertIn("risk-and-failure-groups", report_sections)
@@ -410,6 +468,8 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
                 self.assertIn(f"artifact://{matrix_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
                 self.assertIn(f"artifact://{retry_summary_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
+                self.assertEqual(audit_payload["reviewFixSummary"]["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertIn("review-fix-summary.json", package_contents)
                 build_section = report_sections["build-and-typecheck"]
                 self.assertTrue(build_section["details"])
                 build_detail = build_section["details"][0]
@@ -458,14 +518,28 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertTrue(
                     any(item["label"] == "Runtime compare matrix summary" for item in risk_section["details"])
                 )
+                review_fix_section = report_sections["review-fix-convergence"]
+                self.assertIn(f"artifact://{convergence_summary_trace.id}", review_fix_section["evidenceLinks"])
+                review_fix_detail = review_fix_section["details"][0]
+                self.assertEqual(review_fix_detail["label"], "Review/Fix convergence summary")
+                self.assertEqual(review_fix_detail["status"], "best_effort")
+                self.assertEqual(review_fix_detail["details"]["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertEqual(review_fix_detail["details"]["runtimeCompare"]["attemptsUsed"], 3)
+                self.assertTrue(
+                    any(item["label"] == "Review/Fix convergence summary" for item in risk_section["details"])
+                )
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
+                    packaged_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", names)
+                self.assertIn(f"evidence/runtime_trace/{convergence_summary_trace.id}.json", names)
                 self.assertIn("tool-registry.json", names)
                 self.assertIn("memory-records.json", names)
                 self.assertIn("runtime-diagnoses.json", names)
                 self.assertIn("report-sections.json", names)
+                self.assertIn("review-fix-summary.json", names)
+                self.assertEqual(packaged_summary["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertNotIn(f"evidence/build_log/{build_log.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_screenshot/{runtime_screenshot.id}.png", names)
                 report_text = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
