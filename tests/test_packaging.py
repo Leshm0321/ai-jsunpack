@@ -160,6 +160,63 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                matrix_trace = store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="runtime_compare",
+                    filename="runtime-compare-matrix-attempt-2.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_trace",
+                            "jobId": job.id,
+                            "target": "runtime_compare_matrix",
+                            "attempt": 2,
+                            "pruned": False,
+                            "requestedRunCount": 1,
+                            "selectedRunCount": 1,
+                            "omittedRunCount": 0,
+                            "maxMatrixRuns": 24,
+                            "matrixSelection": "balanced",
+                            "selectedRuns": [
+                                {
+                                    "requestedIndex": 0,
+                                    "scenarioId": "scenario_test",
+                                    "scenarioName": "default-load",
+                                    "viewport": {"name": "desktop", "width": 1280, "height": 720},
+                                }
+                            ],
+                            "omittedRuns": [],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
+                retry_summary_trace = store.write_artifact(
+                    job.id,
+                    kind="runtime_trace",
+                    stage="runtime_compare",
+                    filename="runtime-compare-retry-summary.json",
+                    content=json.dumps(
+                        {
+                            "kind": "runtime_trace",
+                            "jobId": job.id,
+                            "target": "runtime_compare_retry_summary",
+                            "maxAttempts": 3,
+                            "attemptsUsed": 3,
+                            "budgetExhausted": True,
+                            "stoppedReason": "retry_budget_exhausted",
+                            "finalProjectArtifactId": "generated_project_attempt_2",
+                            "finalReviewStatus": "fail",
+                            "attempts": [
+                                {"attempt": 0, "reviewGateTriggered": True, "comparisonArtifactIds": ["comparison_0"]},
+                                {"attempt": 1, "reviewGateTriggered": True, "comparisonArtifactIds": ["comparison_1"]},
+                                {"attempt": 2, "reviewGateTriggered": True, "comparisonArtifactIds": []},
+                            ],
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
                 runtime_screenshot = store.write_artifact(
                     job.id,
                     kind="runtime_screenshot",
@@ -320,7 +377,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
                 attachments = {item["artifactId"]: item for item in evidence_index["attachments"]}
 
-                self.assertEqual(evidence_index["includedCount"], 1)
+                self.assertEqual(evidence_index["includedCount"], 3)
                 self.assertEqual(evidence_index["omittedCount"], 4)
                 package_contents = {item["path"]: item for item in evidence_index["packageContents"]}
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
@@ -351,6 +408,8 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"artifact://{memory_record.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{tool_registry.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
+                self.assertIn(f"artifact://{matrix_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
+                self.assertIn(f"artifact://{retry_summary_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
                 build_section = report_sections["build-and-typecheck"]
                 self.assertTrue(build_section["details"])
                 build_detail = build_section["details"][0]
@@ -379,7 +438,14 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertTrue(any(item["details"]["failureClass"] == "runtime_error" for item in risk_section["details"]))
                 runtime_compare_section = report_sections["runtime-compare-difference-summary"]
                 self.assertTrue(runtime_compare_section["details"])
-                runtime_compare_detail = runtime_compare_section["details"][0]
+                matrix_detail = runtime_compare_section["details"][0]
+                runtime_compare_detail = runtime_compare_section["details"][1]
+                self.assertEqual(matrix_detail["label"], "Runtime compare matrix summary")
+                self.assertEqual(matrix_detail["status"], "fail")
+                self.assertEqual(matrix_detail["details"]["matrix"]["selectedRunCount"], 1)
+                self.assertTrue(matrix_detail["details"]["retryBudget"]["budgetExhausted"])
+                self.assertEqual(matrix_detail["details"]["retryBudget"]["attemptsUsed"], 3)
+                self.assertIn(f"artifact://{retry_summary_trace.id}", matrix_detail["details"]["evidenceLinks"])
                 self.assertEqual(runtime_compare_detail["label"], "Runtime compare scope")
                 self.assertEqual(runtime_compare_detail["status"], "fail")
                 self.assertIn("default-load", runtime_compare_detail["value"])
@@ -387,7 +453,11 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(runtime_compare_detail["details"]["domDifferences"][0]["path"], "html/body[1]/div[1]")
                 self.assertEqual(runtime_compare_detail["details"]["networkDiff"]["groups"], ["api"])
                 self.assertEqual(runtime_compare_detail["details"]["consoleDiff"]["groups"], ["warn"])
+                self.assertEqual(runtime_compare_detail["details"]["attemptHistory"][0]["attempt"], 2)
                 self.assertIn(f"artifact://{runtime_comparison.id}", runtime_compare_detail["details"]["evidenceLinks"])
+                self.assertTrue(
+                    any(item["label"] == "Runtime compare matrix summary" for item in risk_section["details"])
+                )
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
@@ -697,8 +767,9 @@ class PackagingRunnerTest(unittest.TestCase):
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
 
                 self.assertTrue(evidence_index["attachments"][0]["included"])
-                self.assertEqual(runtime_details[0]["details"]["comparisonArtifactId"], runtime_comparison.id)
-                self.assertEqual(runtime_details[0]["details"]["domDifferences"][0]["path"], "title")
+                runtime_scope_detail = next(item for item in runtime_details if item["label"] == "Runtime compare scope")
+                self.assertEqual(runtime_scope_detail["details"]["comparisonArtifactId"], runtime_comparison.id)
+                self.assertEqual(runtime_scope_detail["details"]["domDifferences"][0]["path"], "title")
                 with zipfile.ZipFile(self._bytes_zip_path(root, package_bytes)) as archive:
                     self.assertEqual(
                         archive.read(f"evidence/runtime_trace/{runtime_trace.id}.json"),

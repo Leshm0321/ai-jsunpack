@@ -212,6 +212,8 @@ class WorkerPipeline:
             runtime_compare_max_attempts = self._runtime_compare_max_attempts(job.config)
 
             runtime_attempt = 0
+            runtime_compare_attempts: list[dict] = []
+            runtime_compare_stop_reason = "unknown"
             while True:
                 with self._artifact_directory_path(store=store, artifact=current_project_artifact) as current_project_path:
                     runtime_result = self.runtime_smoke_runner.run(
@@ -236,6 +238,15 @@ class WorkerPipeline:
                     run.transition("runtime_compare", runtime_compare_result.message)
                     self._raise_if_cancelled(job_id=job_id, store=store)
                     packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_result.artifact_ids])
+                    attempt_summary = {
+                        "attempt": runtime_attempt,
+                        "comparisonArtifactIds": [artifact.id for artifact in runtime_compare_result.comparison_artifacts],
+                        "validationArtifactIds": [artifact.id for artifact in runtime_compare_result.report_artifacts],
+                        "traceArtifactIds": [artifact.id for artifact in runtime_compare_result.trace_artifacts],
+                        "scenarioArtifactIds": [artifact.id for artifact in runtime_compare_result.scenario_artifacts],
+                        "screenshotArtifactIds": [artifact.id for artifact in runtime_compare_result.screenshot_artifacts],
+                        "compareMessage": runtime_compare_result.message,
+                    }
                     runtime_compare_gate_result = self.runtime_compare_review_gate.run(
                         job_id=job_id,
                         store=store,
@@ -251,12 +262,31 @@ class WorkerPipeline:
                                 "repairing",
                                 "Runtime compare review produced repair evidence for follow-up Review/Fix.",
                             )
+                    attempt_summary.update(
+                        {
+                            "reviewGateEnabled": runtime_compare_gate_result.enabled,
+                            "reviewGateTriggered": runtime_compare_gate_result.triggered,
+                            "reviewArtifactId": runtime_compare_gate_result.review_artifact.id
+                            if runtime_compare_gate_result.review_artifact is not None
+                            else None,
+                            "plannedRepairArtifactId": runtime_compare_gate_result.repair_artifact.id
+                            if runtime_compare_gate_result.repair_artifact is not None
+                            else None,
+                            "reviewMessage": runtime_compare_gate_result.message,
+                            "repairArtifactId": None,
+                            "appliedProjectArtifactId": None,
+                            "repairMessage": None,
+                        }
+                    )
+                    runtime_compare_attempts.append(attempt_summary)
                     self._raise_if_cancelled(job_id=job_id, store=store)
                     packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_compare_gate_result.artifact_ids])
 
                 if not (runtime_compare_gate_result.enabled and runtime_compare_gate_result.triggered):
+                    runtime_compare_stop_reason = "review_gate_passed_or_disabled"
                     break
                 if runtime_attempt + 1 >= runtime_compare_max_attempts:
+                    runtime_compare_stop_reason = "retry_budget_exhausted"
                     break
 
                 runtime_repair_result = self.runtime_compare_repair_runner.run(
@@ -270,13 +300,35 @@ class WorkerPipeline:
                 run.transition("repairing", runtime_repair_result.message)
                 self._raise_if_cancelled(job_id=job_id, store=store)
                 packaging_parent_ids = self._unique_ids([*packaging_parent_ids, *runtime_repair_result.artifact_ids])
+                runtime_compare_attempts[-1].update(
+                    {
+                        "repairArtifactId": runtime_repair_result.repair_artifact.id
+                        if runtime_repair_result.repair_artifact is not None
+                        else None,
+                        "appliedProjectArtifactId": runtime_repair_result.applied_project_artifact.id
+                        if runtime_repair_result.applied_project_artifact is not None
+                        else None,
+                        "repairMessage": runtime_repair_result.message,
+                    }
+                )
 
                 if runtime_repair_result.applied_project_artifact is None:
+                    runtime_compare_stop_reason = "repair_not_applied"
                     break
 
                 current_project_artifact = runtime_repair_result.applied_project_artifact
                 runtime_attempt += 1
 
+            retry_summary_artifact = self._write_runtime_compare_retry_summary(
+                job_id=job_id,
+                store=store,
+                max_attempts=runtime_compare_max_attempts,
+                attempts=runtime_compare_attempts,
+                stop_reason=runtime_compare_stop_reason,
+                current_project_artifact_id=current_project_artifact.id if current_project_artifact is not None else None,
+                parent_artifact_ids=packaging_parent_ids,
+            )
+            packaging_parent_ids = self._unique_ids([*packaging_parent_ids, retry_summary_artifact.id])
             self._raise_if_cancelled(job_id=job_id, store=store)
             packaging_result = self.packaging_runner.run(
                 job_id=job_id,
@@ -308,6 +360,45 @@ class WorkerPipeline:
         except PackagingError as error:
             store.update_status(job_id, "failed", failure_reason=str(error), failure_class="unknown")
             run.transition("failed", str(error))
+
+    def _write_runtime_compare_retry_summary(
+        self,
+        *,
+        job_id: str,
+        store,
+        max_attempts: int,
+        attempts: list[dict],
+        stop_reason: str,
+        current_project_artifact_id: str | None,
+        parent_artifact_ids: list[str],
+    ):
+        statuses = [
+            "fail" if attempt.get("reviewGateTriggered") else "pass"
+            for attempt in attempts
+            if attempt.get("reviewGateEnabled")
+        ]
+        payload = {
+            "kind": "runtime_trace",
+            "jobId": job_id,
+            "target": "runtime_compare_retry_summary",
+            "maxAttempts": max_attempts,
+            "attemptsUsed": len(attempts),
+            "budgetExhausted": stop_reason == "retry_budget_exhausted",
+            "stoppedReason": stop_reason,
+            "finalProjectArtifactId": current_project_artifact_id,
+            "finalReviewStatus": statuses[-1] if statuses else "best_effort",
+            "attempts": attempts,
+        }
+        return store.write_artifact(
+            job_id,
+            kind="runtime_trace",
+            stage="runtime_compare",
+            filename="runtime-compare-retry-summary.json",
+            content=self._json_bytes(payload),
+            content_type="application/json",
+            producer="worker.pipeline",
+            parent_artifact_ids=parent_artifact_ids,
+        )
 
     def _runtime_compare_config(self, job_config: dict | None) -> dict | None:
         if not isinstance(job_config, dict):

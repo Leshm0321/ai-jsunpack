@@ -375,7 +375,7 @@ class PackagingRunner:
             "",
             "## Runtime Compare Difference Summary",
             "",
-            self._runtime_compare_diff_markdown(runtime_comparisons),
+            self._runtime_compare_diff_markdown([*runtime_comparisons, *audit_payload["runtimeTraces"]]),
             "",
             "## Agent Runtime Audit",
             "",
@@ -529,7 +529,7 @@ class PackagingRunner:
                 "<h2>Runtime Compare</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
                 "<h2>Runtime Compare Difference Summary</h2>",
-                self._runtime_compare_diff_html(runtime_comparisons),
+                self._runtime_compare_diff_html([*runtime_comparisons, *audit_payload["runtimeTraces"]]),
                 "<h2>Agent Runtime Audit</h2>",
                 self._html_table(tool_registry, ("toolName", "toolVersion", "category", "caller")),
                 self._html_table(memory_records, ("memoryType", "scope", "sensitivityClass", "retentionClass", "content")),
@@ -602,14 +602,63 @@ class PackagingRunner:
             text = f"{text[:237]}..."
         return escape(text)
 
+    def _runtime_compare_comparison_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [record for record in records if isinstance(record.get("differences"), dict)]
+
+    def _runtime_compare_matrix_summaries(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        summaries = [record for record in records if record.get("target") == "runtime_compare_matrix"]
+        return sorted(summaries, key=self._record_attempt)
+
+    def _runtime_compare_retry_summary(self, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        summaries = [record for record in records if record.get("target") == "runtime_compare_retry_summary"]
+        if not summaries:
+            return None
+        return max(summaries, key=lambda record: int(record.get("attemptsUsed") or 0))
+
     def _runtime_compare_diff_markdown(self, records: list[dict[str, Any]]) -> str:
-        if not records:
+        comparison_records = self._runtime_compare_comparison_records(records)
+        matrix_summaries = self._runtime_compare_matrix_summaries(records)
+        retry_summary = self._runtime_compare_retry_summary(records)
+        if not comparison_records and not matrix_summaries and not retry_summary:
             return "No runtime comparison difference records."
-        rows = [
-            "| Comparison | Status | Scope | Screenshot | DOM | Network | Console | Evidence |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
-        ]
-        for record in records:
+        rows = []
+        if matrix_summaries or retry_summary:
+            rows.extend(
+                [
+                    "| Summary | Value |",
+                    "| --- | --- |",
+                    *[
+                        "| Matrix attempt "
+                        + self._cell(summary.get("attempt"))
+                        + " | "
+                        + self._cell(
+                            f"selected={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}; "
+                            f"omitted={summary.get('omittedRunCount')}; maxMatrixRuns={summary.get('maxMatrixRuns')}; "
+                            f"selection={summary.get('matrixSelection')}"
+                        )
+                        + " |"
+                        for summary in matrix_summaries
+                    ],
+                ]
+            )
+            if retry_summary:
+                rows.append(
+                    "| Retry budget | "
+                    + self._cell(
+                        f"attempts={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}; "
+                        f"budgetExhausted={retry_summary.get('budgetExhausted')}; "
+                        f"stoppedReason={retry_summary.get('stoppedReason')}"
+                    )
+                    + " |"
+                )
+            rows.append("")
+        rows.extend(
+            [
+                "| Comparison | Status | Scope | Screenshot | DOM | Network | Console | Evidence |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for record in comparison_records:
             differences = record.get("differences") or {}
             rows.append(
                 "| "
@@ -630,12 +679,35 @@ class PackagingRunner:
         return "\n".join(rows)
 
     def _runtime_compare_diff_html(self, records: list[dict[str, Any]]) -> str:
-        if not records:
+        comparison_records = self._runtime_compare_comparison_records(records)
+        matrix_summaries = self._runtime_compare_matrix_summaries(records)
+        retry_summary = self._runtime_compare_retry_summary(records)
+        if not comparison_records and not matrix_summaries and not retry_summary:
             return '<div class="notice">No runtime comparison difference records.</div>'
+        summary_html = ""
+        if matrix_summaries or retry_summary:
+            summary_rows = []
+            for summary in matrix_summaries:
+                value = (
+                    f"selected={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}; "
+                    f"omitted={summary.get('omittedRunCount')}; maxMatrixRuns={summary.get('maxMatrixRuns')}; "
+                    f"selection={summary.get('matrixSelection')}"
+                )
+                summary_rows.append(
+                    f"<tr><td>Matrix attempt {self._html_cell(summary.get('attempt'))}</td><td>{self._html_cell(value)}</td></tr>"
+                )
+            if retry_summary:
+                value = (
+                    f"attempts={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}; "
+                    f"budgetExhausted={retry_summary.get('budgetExhausted')}; "
+                    f"stoppedReason={retry_summary.get('stoppedReason')}"
+                )
+                summary_rows.append(f"<tr><td>Retry budget</td><td>{self._html_cell(value)}</td></tr>")
+            summary_html = "<table><tr><th>Summary</th><th>Value</th></tr>" + "".join(summary_rows) + "</table>"
         rows = [
             "<tr><th>Comparison</th><th>Status</th><th>Scope</th><th>Screenshot</th><th>DOM</th><th>Network</th><th>Console</th><th>Evidence</th></tr>"
         ]
-        for record in records:
+        for record in comparison_records:
             differences = record.get("differences") or {}
             cells = [
                 record.get("artifactId") or record.get("id"),
@@ -648,7 +720,7 @@ class PackagingRunner:
                 self._runtime_compare_evidence_links(record),
             ]
             rows.append("<tr>" + "".join(f"<td>{self._html_cell(value)}</td>" for value in cells) + "</tr>")
-        return f"<table>{''.join(rows)}</table>"
+        return summary_html + f"<table>{''.join(rows)}</table>"
 
     def _runtime_execution_boundaries(self, traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -1064,7 +1136,8 @@ class PackagingRunner:
         attachment_ids = [str(item["artifactId"]) for item in attachments if item["included"]]
         build_details = self._build_typecheck_report_details(job_id=job_id, store=store, artifacts=artifacts)
         review_details = self._review_report_details(job_id=job_id, store=store, artifacts=artifacts)
-        risk_details = self._risk_report_details([*build_details, *review_details])
+        runtime_compare_details = self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts)
+        risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details])
         return [
             self._report_section(
                 title="Completion Decision",
@@ -1102,7 +1175,7 @@ class PackagingRunner:
                 summary="Scenario and viewport comparison differences with evidence deep links.",
                 artifact_kinds=("runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
-                details=self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts),
+                details=runtime_compare_details,
             ),
             self._report_section(
                 title="Browser Runner Operations",
@@ -1386,42 +1459,61 @@ class PackagingRunner:
         text = str(value)
         return text if len(text) <= max_length else f"{text[: max_length - 3]}..."
     def _runtime_compare_report_details(self, *, job_id: str, store, artifacts: list[ArtifactRecord]) -> list[dict[str, Any]]:
-        entries = [artifact for artifact in artifacts if artifact.kind == "runtime_comparison"]
-        if not entries:
+        comparison_entries = [artifact for artifact in artifacts if artifact.kind == "runtime_comparison"]
+        trace_entries = [artifact for artifact in artifacts if artifact.kind == "runtime_trace"]
+        comparison_payloads: list[dict[str, Any]] = []
+        trace_payloads: list[dict[str, Any]] = []
+        for artifact in comparison_entries:
+            payload = self._read_report_payload(job_id=job_id, store=store, artifact=artifact, kind="runtime_comparison")
+            if isinstance(payload.get("differences"), dict):
+                payload["artifactId"] = artifact.id
+                comparison_payloads.append(payload)
+        for artifact in trace_entries:
+            payload = self._read_report_payload(job_id=job_id, store=store, artifact=artifact, kind="runtime_trace")
+            if payload.get("target") in {"runtime_compare_matrix", "runtime_compare_retry_summary"}:
+                payload["artifactId"] = artifact.id
+                trace_payloads.append(payload)
+        if not comparison_payloads and not trace_payloads:
             return []
+
+        matrix_summaries = self._runtime_compare_matrix_summaries(trace_payloads)
+        retry_summary = self._runtime_compare_retry_summary(trace_payloads)
         latest_by_scope: dict[str, dict[str, Any]] = {}
-        for artifact in entries:
-            payload = None
-            try:
-                payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
-            except Exception:
-                payload = None
-            if not isinstance(payload, dict):
-                continue
-            payload.setdefault("artifactId", artifact.id)
+        history_by_scope: dict[str, list[dict[str, Any]]] = {}
+        for payload in sorted(comparison_payloads, key=self._record_attempt):
             differences = payload.get("differences") or {}
             scope = differences.get("comparisonScope") or {}
             viewport = scope.get("viewport") or {}
-            viewport_label = "default viewport"
-            if isinstance(viewport, dict):
-                viewport_name = viewport.get("name")
-                viewport_size = ""
-                if viewport.get("width") and viewport.get("height"):
-                    viewport_size = f"{viewport['width']}x{viewport['height']}"
-                viewport_label = " ".join(str(part) for part in (viewport_name, viewport_size) if part) or viewport_label
+            viewport_label = self._viewport_label(viewport)
             scope_label = f"{scope.get('scenarioName') or payload.get('scenarioArtifactId') or 'unknown'} / {viewport_label}"
+            key = f"{scope.get('scenarioName') or 'unknown'}::{viewport_label}"
+            attempt_history = history_by_scope.setdefault(key, [])
+            attempt_history.append(
+                {
+                    "attempt": self._record_attempt(payload),
+                    "status": str(payload.get("status") or "unknown"),
+                    "comparisonArtifactId": payload.get("artifactId"),
+                    "scenarioArtifactId": payload.get("scenarioArtifactId"),
+                    "traceArtifactIds": self._string_list(payload.get("traceArtifactIds")),
+                    "screenshotArtifactIds": self._string_list(payload.get("screenshotArtifactIds")),
+                    "domChanged": bool(differences.get("domChanged")),
+                    "networkChanged": bool(differences.get("networkChanged")),
+                    "consoleChanged": bool(differences.get("consoleChanged")),
+                    "screenshotChanged": differences.get("screenshotChanged"),
+                }
+            )
             dom_differences = differences.get("domDifferences") or []
             network_diff = differences.get("networkDiff") or {}
             console_diff = differences.get("consoleDiff") or {}
-            key = f"{scope.get('scenarioName') or 'unknown'}::{viewport_label}"
             latest_by_scope[key] = {
                 "label": "Runtime compare scope",
                 "value": scope_label,
-                "status": str(payload.get("status") or "unknown"),
+                "status": self._report_detail_status(payload.get("status")),
                 "details": {
                     "attempt": payload.get("attempt"),
-                    "comparisonArtifactId": artifact.id,
+                    "comparisonArtifactId": payload.get("artifactId"),
                     "scenarioArtifactId": payload.get("scenarioArtifactId"),
+                    "failureClass": "runtime_error" if str(payload.get("status")) in {"fail", "retry", "best_effort"} else "none",
                     "comparisonScope": {
                         "scenarioName": scope.get("scenarioName"),
                         "networkPolicy": scope.get("networkPolicy"),
@@ -1431,13 +1523,141 @@ class PackagingRunner:
                     "domDifferences": [self._dom_diff_summary(item) for item in dom_differences if isinstance(item, dict)],
                     "networkDiff": self._compact_collection_diff(network_diff),
                     "consoleDiff": self._compact_collection_diff(console_diff),
+                    "attemptHistory": attempt_history,
                     "evidenceLinks": self._runtime_compare_evidence_link_list(
                         payload,
-                        comparison_artifact_id=artifact.id,
+                        comparison_artifact_id=str(payload.get("artifactId")),
                     ),
                 },
             }
-        return list(latest_by_scope.values())
+        for key, detail in latest_by_scope.items():
+            detail["details"]["attemptHistory"] = history_by_scope.get(key, [])
+
+        details = self._runtime_compare_summary_details(
+            comparison_payloads=comparison_payloads,
+            matrix_summaries=matrix_summaries,
+            retry_summary=retry_summary,
+        )
+        details.extend(latest_by_scope.values())
+        return details
+
+    def _runtime_compare_summary_details(
+        self,
+        *,
+        comparison_payloads: list[dict[str, Any]],
+        matrix_summaries: list[dict[str, Any]],
+        retry_summary: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not comparison_payloads and not matrix_summaries and retry_summary is None:
+            return []
+        status_counts = self._status_counts(comparison_payloads)
+        latest_matrix = matrix_summaries[-1] if matrix_summaries else {}
+        selected = latest_matrix.get("selectedRunCount")
+        requested = latest_matrix.get("requestedRunCount")
+        omitted = latest_matrix.get("omittedRunCount")
+        budget_exhausted = bool(retry_summary and retry_summary.get("budgetExhausted"))
+        final_review_status = str(retry_summary.get("finalReviewStatus")) if retry_summary else ""
+        comparison_needs_attention = any(item.get("status") in {"fail", "retry", "best_effort"} for item in comparison_payloads)
+        status = (
+            "fail"
+            if budget_exhausted or final_review_status == "fail"
+            else "best_effort"
+            if comparison_needs_attention or final_review_status in {"retry", "best_effort"}
+            else "pass"
+        )
+        evidence_ids = [
+            *(str(item.get("artifactId")) for item in matrix_summaries if item.get("artifactId")),
+            *(str(item.get("artifactId")) for item in comparison_payloads if item.get("artifactId")),
+        ]
+        if retry_summary and retry_summary.get("artifactId"):
+            evidence_ids.append(str(retry_summary["artifactId"]))
+        details = {
+            "matrix": {
+                "requestedRunCount": requested,
+                "selectedRunCount": selected,
+                "omittedRunCount": omitted,
+                "maxMatrixRuns": latest_matrix.get("maxMatrixRuns"),
+                "matrixSelection": latest_matrix.get("matrixSelection"),
+                "attemptCount": len(matrix_summaries),
+                "attempts": [self._compact_matrix_summary(item) for item in matrix_summaries],
+            },
+            "retryBudget": self._compact_retry_summary(retry_summary),
+            "statusCounts": status_counts,
+            "scopeCount": len({self._runtime_compare_scope_key(item) for item in comparison_payloads}),
+            "comparisonCount": len(comparison_payloads),
+            "failureClass": "runtime_error" if status in {"fail", "best_effort", "retry"} else "none",
+            "evidenceLinks": self._artifact_evidence_links(*evidence_ids),
+        }
+        value = f"matrix {selected if selected is not None else 0}/{requested if requested is not None else 0} selected"
+        if retry_summary:
+            value += f"; attempts {retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}"
+        return [
+            {
+                "label": "Runtime compare matrix summary",
+                "value": value,
+                "status": status,
+                "details": details,
+            }
+        ]
+
+    def _compact_matrix_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifactId": summary.get("artifactId"),
+            "attempt": self._record_attempt(summary),
+            "requestedRunCount": summary.get("requestedRunCount"),
+            "selectedRunCount": summary.get("selectedRunCount"),
+            "omittedRunCount": summary.get("omittedRunCount"),
+            "maxMatrixRuns": summary.get("maxMatrixRuns"),
+            "matrixSelection": summary.get("matrixSelection"),
+            "pruned": summary.get("pruned"),
+        }
+
+    def _compact_retry_summary(self, summary: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(summary, dict):
+            return {}
+        attempts = summary.get("attempts") if isinstance(summary.get("attempts"), list) else []
+        return {
+            "artifactId": summary.get("artifactId"),
+            "maxAttempts": summary.get("maxAttempts"),
+            "attemptsUsed": summary.get("attemptsUsed"),
+            "budgetExhausted": summary.get("budgetExhausted"),
+            "stoppedReason": summary.get("stoppedReason"),
+            "finalProjectArtifactId": summary.get("finalProjectArtifactId"),
+            "finalReviewStatus": summary.get("finalReviewStatus"),
+            "attempts": [self._compact_retry_attempt(item) for item in attempts if isinstance(item, dict)],
+        }
+
+    def _compact_retry_attempt(self, attempt: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "attempt": attempt.get("attempt"),
+            "reviewGateTriggered": attempt.get("reviewGateTriggered"),
+            "comparisonArtifactIds": self._string_list(attempt.get("comparisonArtifactIds")),
+            "reviewArtifactId": attempt.get("reviewArtifactId"),
+            "plannedRepairArtifactId": attempt.get("plannedRepairArtifactId"),
+            "repairArtifactId": attempt.get("repairArtifactId"),
+            "appliedProjectArtifactId": attempt.get("appliedProjectArtifactId"),
+        }
+
+    def _status_counts(self, payloads: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for payload in payloads:
+            status = str(payload.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    def _runtime_compare_scope_key(self, payload: dict[str, Any]) -> str:
+        differences = payload.get("differences") if isinstance(payload.get("differences"), dict) else {}
+        scope = differences.get("comparisonScope") if isinstance(differences.get("comparisonScope"), dict) else {}
+        return f"{scope.get('scenarioName') or 'unknown'}::{self._viewport_label(scope.get('viewport'))}"
+
+    def _viewport_label(self, viewport: Any) -> str:
+        if not isinstance(viewport, dict):
+            return "default viewport"
+        viewport_name = viewport.get("name")
+        viewport_size = ""
+        if viewport.get("width") and viewport.get("height"):
+            viewport_size = f"{viewport['width']}x{viewport['height']}"
+        return " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "default viewport"
 
     def _dom_diff_summary(self, item: dict[str, Any]) -> dict[str, Any]:
         return {

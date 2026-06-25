@@ -316,7 +316,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 screenshots = store.list_artifacts(job.id, kind="runtime_screenshot")
                 self.assertEqual(len(scenarios), 1)
                 self.assertEqual(len(comparisons), 1)
-                self.assertEqual(len(traces), 1)
+                self.assertEqual(len(traces), 2)
                 self.assertEqual(len(reports), 1)
                 self.assertEqual(len(screenshots), 2)
 
@@ -336,6 +336,15 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertIn("status_2xx", comparison_payload["differences"]["networkDiff"]["groups"])
                 self.assertEqual(comparison_payload["differences"]["consoleDiff"]["changed"], True)
                 self.assertIn("log", comparison_payload["differences"]["consoleDiff"]["groups"])
+                matrix_trace_payload = next(
+                    json.loads(store.read_artifact(job.id, artifact.id))
+                    for artifact in traces
+                    if json.loads(store.read_artifact(job.id, artifact.id)).get("target") == "runtime_compare_matrix"
+                )
+                self.assertEqual(matrix_trace_payload["requestedRunCount"], 1)
+                self.assertEqual(matrix_trace_payload["selectedRunCount"], 1)
+                self.assertEqual(matrix_trace_payload["omittedRunCount"], 0)
+                self.assertFalse(matrix_trace_payload["pruned"])
                 self.assertEqual(validation_payload["comparisonArtifactId"], comparisons[0].id)
                 self.assertEqual(set(validation_payload["screenshotArtifactIds"]), {artifact.id for artifact in screenshots})
             finally:

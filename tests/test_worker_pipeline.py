@@ -324,13 +324,19 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("networkDiff", runtime_comparison_payload["differences"])
                 self.assertIn("consoleDiff", runtime_comparison_payload["differences"])
                 self.assertEqual(runtime_comparison_payload["differences"]["comparisonScope"]["scenarioName"], "default-load")
-                self.assertIn(build_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(build_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(generated_project_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(build_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(typecheck_log_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(typecheck_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
-                self.assertIn(typecheck_review_artifact.id, artifact_by_kind["runtime_trace"].parent_artifact_ids)
+                runtime_trace_artifacts = [artifact for artifact in artifacts if artifact.kind == "runtime_trace"]
+                runtime_compare_trace_artifact = next(
+                    artifact
+                    for artifact in runtime_trace_artifacts
+                    if json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8")).get("target") == "comparison"
+                )
+                self.assertIn(build_log_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(build_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(generated_project_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(build_review_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(typecheck_log_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(typecheck_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
+                self.assertIn(typecheck_review_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
                 self.assertIn(runtime_compare_review_artifact.id, artifact_by_kind["audit_report"].parent_artifact_ids)
                 audit_report = Path(artifact_by_kind["audit_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("# AI JS Unpack Audit Report", audit_report)
@@ -347,11 +353,11 @@ class WorkerPipelineTest(unittest.TestCase):
                     Path(artifact_by_kind["evidence_index"].storage_uri).read_text(encoding="utf-8")
                 )
                 self.assertEqual(evidence_index_payload["kind"], "evidence_index")
-                self.assertEqual(evidence_index_payload["includedCount"], 9)
+                self.assertEqual(evidence_index_payload["includedCount"], 11)
                 package_paths = {item["packagePath"] for item in evidence_index_payload["attachments"] if item["included"]}
                 self.assertIn(f"evidence/build_log/{build_log_artifact.id}.json", package_paths)
                 self.assertIn(f"evidence/build_log/{typecheck_log_artifact.id}.json", package_paths)
-                self.assertIn(f"evidence/runtime_trace/{artifact_by_kind['runtime_trace'].id}.json", package_paths)
+                self.assertIn(f"evidence/runtime_trace/{runtime_compare_trace_artifact.id}.json", package_paths)
                 self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", package_paths)
                 self.assertIn(f"evidence/runtime_scenario/{artifact_by_kind['runtime_scenario'].id}.json", package_paths)
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", package_paths)
@@ -589,10 +595,17 @@ class WorkerPipelineTest(unittest.TestCase):
                     for artifact in artifacts
                     if artifact.kind == "runtime_comparison"
                 ]
+                runtime_traces = [
+                    json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))
+                    for artifact in artifacts
+                    if artifact.kind == "runtime_trace"
+                ]
                 generated_projects = [artifact for artifact in artifacts if artifact.kind == "generated_project"]
                 result_package = next(artifact for artifact in artifacts if artifact.kind == "result_package")
+                evidence_index = next(artifact for artifact in artifacts if artifact.kind == "evidence_index")
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+                evidence_index_payload = json.loads(Path(evidence_index.storage_uri).read_text(encoding="utf-8"))
 
                 self.assertEqual(sum(1 for event in run.events if event.status == "runtime_smoke"), 3)
                 self.assertEqual(sum(1 for event in run.events if event.status == "runtime_compare"), 3)
@@ -605,10 +618,33 @@ class WorkerPipelineTest(unittest.TestCase):
                 )
                 self.assertEqual({payload["attempt"] for payload in runtime_comparisons}, {0, 1, 2})
                 self.assertTrue(all(payload["differences"]["domChanged"] for payload in runtime_comparisons))
+                retry_summary = next(
+                    payload for payload in runtime_traces if payload.get("target") == "runtime_compare_retry_summary"
+                )
+                matrix_summaries = [payload for payload in runtime_traces if payload.get("target") == "runtime_compare_matrix"]
+                self.assertEqual(retry_summary["maxAttempts"], 3)
+                self.assertEqual(retry_summary["attemptsUsed"], 3)
+                self.assertTrue(retry_summary["budgetExhausted"])
+                self.assertEqual(retry_summary["stoppedReason"], "retry_budget_exhausted")
+                self.assertEqual([payload["attempt"] for payload in matrix_summaries], [0, 1, 2])
+                report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
+                runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
+                matrix_detail = next(item for item in runtime_details if item["label"] == "Runtime compare matrix summary")
+                scope_detail = next(item for item in runtime_details if item["label"] == "Runtime compare scope")
+                self.assertEqual(matrix_detail["status"], "fail")
+                self.assertTrue(matrix_detail["details"]["retryBudget"]["budgetExhausted"])
+                self.assertEqual(matrix_detail["details"]["retryBudget"]["attemptsUsed"], 3)
+                self.assertEqual(len(scope_detail["details"]["attemptHistory"]), 3)
                 self.assertTrue(
                     any(
                         observation["group"] == "reviewRuns" and observation["failureClass"] == "runtime_error"
                         for observation in audit_payload["completionDecision"]["observations"]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        item["label"] == "Runtime compare matrix summary" and item["status"] == "fail"
+                        for item in report_sections["risk-and-failure-groups"]["details"]
                     )
                 )
             finally:

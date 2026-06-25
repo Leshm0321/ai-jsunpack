@@ -1488,7 +1488,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         parents = parent_artifact_ids or []
         store.update_status(job_id, "runtime_compare")
         matrix, matrix_plan = self._scenario_matrix_from_config(job_id=job_id, config=scenario_config)
-        matrix_trace_artifact = self._write_matrix_trace_if_pruned(
+        matrix_trace_artifact = self._write_matrix_trace(
             job_id=job_id,
             store=store,
             parent_artifact_ids=parents,
@@ -1903,7 +1903,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             selected_indexes.add(index)
         return [matrix[index] for index in sorted(selected_indexes)[:max_runs]]
 
-    def _write_matrix_trace_if_pruned(
+    def _write_matrix_trace(
         self,
         *,
         job_id: str,
@@ -1911,20 +1911,20 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         parent_artifact_ids: list[str],
         matrix_plan: dict[str, Any],
         attempt: int,
-    ) -> ArtifactRecord | None:
-        if matrix_plan["omittedRunCount"] <= 0:
-            return None
+    ) -> ArtifactRecord:
         payload = {
             "kind": "runtime_trace",
             "jobId": job_id,
             "target": "runtime_compare_matrix",
+            "attempt": attempt,
+            "pruned": matrix_plan["omittedRunCount"] > 0,
             **matrix_plan,
         }
         return store.write_artifact(
             job_id,
             kind="runtime_trace",
             stage="runtime_compare",
-            filename="runtime-compare-matrix.json",
+            filename=f"runtime-compare-matrix-attempt-{attempt}.json",
             content=self._json_bytes(payload),
             content_type="application/json",
             producer="worker.runtime_compare",
