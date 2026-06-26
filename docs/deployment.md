@@ -241,6 +241,18 @@ Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`co
 
 真实发布完成后，用 UTF-8 JSON 清单记录外部证据，再运行 `deploy.release_archive` 生成最终归档核验报告。清单只记录证据引用、digest、revision、approval record 和快照位置，不记录 secret 值：
 
+可先从 release gate 报告生成待填清单模板：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_evidence_manifest `
+  --release-gate-report tmp\release-gate\release-gate.json `
+  --compose-smoke-report tmp\release-gate\compose-smoke.json `
+  --deployment-smoke-report tmp\release-gate\deployment-smoke.json `
+  --output tmp\release-gate\production-evidence-manifest.json
+```
+
+模板会带出 Actions run、artifact 名称、服务镜像 tag、GitHub Environment 和回滚 tag，并用 `<...>` 占位标出必须补录的真实平台证据。`deploy.release_archive` 会拒绝未替换的占位值，因此必须先补齐 GHCR digest、DB snapshot、Artifact Store export、service logs、secret revision/approval record 后再核验。
+
 ```json
 {
   "kind": "production_release_evidence_manifest",

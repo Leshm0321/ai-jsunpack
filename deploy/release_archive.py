@@ -13,6 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "tmp" / "release-archive" / "release-archive.json"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
+PLACEHOLDER_PATTERN = re.compile(r"<[^>]+>")
 SECRET_VALUE_KEYS = {
     "access_token",
     "accesstoken",
@@ -119,6 +120,16 @@ def run_release_archive(config: ReleaseArchiveConfig) -> dict[str, Any]:
     if not ci_run_valid:
         missing_evidence.append("ciRun")
     add_check(checks, "ci_run_evidence", ci_run_valid, evidence=ci_run_summary(manifest.get("ciRun")))
+
+    placeholder_paths = placeholder_value_paths(manifest)
+    if placeholder_paths:
+        missing_evidence.append("placeholderValuesReplaced")
+    add_check(
+        checks,
+        "placeholder_values_replaced",
+        not placeholder_paths,
+        evidence={"paths": placeholder_paths},
+    )
 
     secret_paths = secret_value_paths(manifest)
     secret_flag_paths = secret_value_flag_paths(manifest)
@@ -309,6 +320,19 @@ def secret_value_paths(value: Any, *, path: str = "$") -> list[str]:
     elif isinstance(value, list):
         for index, child in enumerate(value):
             paths.extend(secret_value_paths(child, path=f"{path}[{index}]"))
+    return paths
+
+
+def placeholder_value_paths(value: Any, *, path: str = "$") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(placeholder_value_paths(child, path=f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(placeholder_value_paths(child, path=f"{path}[{index}]"))
+    elif isinstance(value, str) and PLACEHOLDER_PATTERN.search(value):
+        paths.append(path)
     return paths
 
 
