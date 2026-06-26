@@ -28,16 +28,19 @@ graph LR
 本仓库提供本地部署合约：
 
 ```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner build
 docker compose -f deploy/docker-compose.yml up db artifact-store api web
 docker compose -f deploy/docker-compose.yml --profile worker --profile browser-runner up
 ```
 
-生产部署前需要替换 compose 中的占位镜像：
+compose 默认从本仓库构建服务镜像，也支持用环境变量覆盖为 CI 发布的固定镜像：
 
 - `ai-jsunpack/api:local`
 - `ai-jsunpack/worker:local`
 - `ai-jsunpack/browser-runner:local`
 - `ai-jsunpack/web:local`
+
+对应构建入口位于 `deploy/docker/`。PostgreSQL、MinIO、API、Browser Runner 和 Web 都有 healthcheck；`artifact-store-init` 会在 API/Worker/Browser Runner 启动前创建 MinIO bucket；Worker 通过队列进程、ops heartbeat 和部署 smoke 报告验证。
 
 ## 环境变量文件
 
@@ -170,6 +173,54 @@ Prometheus scrape 必须携带拥有 ops read 权限的 Bearer token。告警规
   --soak-runs 200 `
   --output tmp\deployment-smoke-postgres.json
 ```
+
+Docker 可用时，运行真实 compose 拓扑演练：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.compose_smoke `
+  --output tmp\deployment-compose-smoke\compose-smoke.json `
+  --artifact-root tmp\deployment-compose-smoke\artifacts `
+  --soak-runs 10
+```
+
+该命令默认构建镜像、启动 `worker` 与 `browser-runner` profiles、等待 compose healthcheck、针对 `127.0.0.1:5432` PostgreSQL 和 `127.0.0.1:9000` MinIO 运行 archive-ready `deployment_smoke`、收集近期服务日志并关闭拓扑。验收通过时：
+
+- `compose-smoke.json` 的 `status` 为 `pass`。
+- `deploymentSmoke.status` 为 `pass`。
+- `deploymentSmoke.archive_manifest.archiveReady` 为 `true`。
+- `deploymentSmoke.archive_manifest.retainedEvidence` 包含结果包 hash、报告类型、Prometheus 抓取、告警事件、retention cleanup 和 Browser Runner soak 证据。
+
+默认自动测试不启动 Docker；使用 `--dry-run` 可只验证命令计划和报告结构：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.compose_smoke --dry-run --output tmp\deployment-compose-smoke\dry-run.json
+```
+
+## 失败诊断与回滚
+
+先查看 compose 状态和健康检查：
+
+```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 120
+```
+
+- DB 不健康：检查 `db` 日志、端口占用和 `POSTGRES_*` 设置。
+- MinIO 或 bucket init 失败：检查 `artifact-store`、`artifact-store-init` 日志，确认 MinIO root 凭据和 `AI_JSUNPACK_ARTIFACT_S3_BUCKET` 一致。
+- API 启动失败：检查部署 profile，API 不能携带 Worker sandbox、Browser Runner、Core CLI 或模型 provider 配置。
+- Worker 无任务或 degraded：检查 `/ops/metrics`、Worker lease 配置、共享 DB 和 Artifact Store 连接。
+- Browser Runner degraded：检查 `/health`、队列 backend、lease/retry 阈值和 Playwright 镜像依赖。
+- Prometheus 或告警失败：确认 Bearer token 使用共享 `AI_JSUNPACK_AUTH_SECRET` 签发并具备 ops read 权限。
+- 结果包缺失：检查 Worker packaging 日志、`deploymentSmoke.failedChecks` 和 retained Artifact Store 内容。
+
+回滚时先保留证据，再切回上一组镜像 tag：
+
+```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 200 > tmp\deployment-compose-smoke\compose-logs.txt
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+```
+
+保留 `compose-smoke.json`、`deployment-smoke.json`、PostgreSQL 导出或 volume、MinIO bucket 导出和日志摘要。回退镜像后重新运行 compose smoke，对比 `archive_manifest.retainedEvidence` 中的结果包 hash、报告类型、Prometheus 抓取和告警事件。
 
 ## 生产上线检查
 

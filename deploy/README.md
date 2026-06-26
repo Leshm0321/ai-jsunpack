@@ -8,7 +8,32 @@ This directory separates runtime configuration by service boundary.
 - `db` and `artifact-store` are infrastructure services shared by API and Worker.
 - `web` only receives `VITE_API_*` values at build/runtime boundary.
 
-The compose file is a deployment contract and local starting point. Replace placeholder image names with your built images or CI-published images before production use.
+The compose file is a deployment contract and local starting point. It can build local service images from this repository, and each image can still be overridden with `AI_JSUNPACK_API_IMAGE`, `AI_JSUNPACK_WORKER_IMAGE`, `AI_JSUNPACK_BROWSER_RUNNER_IMAGE`, and `AI_JSUNPACK_WEB_IMAGE` when CI publishes immutable tags.
+
+## Compose Images and Health Checks
+
+Local service Dockerfiles live under `deploy/docker/`:
+
+- `api.Dockerfile` starts `uvicorn apps.api.app.main:app`.
+- `worker.Dockerfile` starts `python -m apps.worker.worker.queue` and includes the built Core CLI.
+- `browser-runner.Dockerfile` starts `uvicorn apps.browser_runner.app.main:app` with Playwright Chromium installed.
+- `web.Dockerfile` builds the Vite workspace and serves the static bundle on port 5173.
+
+`deploy/docker-compose.yml` includes health checks for PostgreSQL, MinIO, API, Browser Runner, and Web. The one-shot `artifact-store-init` service creates the configured MinIO bucket before API, Worker, or Browser Runner services start. Worker is a long-running queue consumer and is verified through ops heartbeats and the deployment smoke report instead of an HTTP health check.
+
+Build and start the full local topology:
+
+```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner build
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner up -d
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
+```
+
+Stop it after inspection:
+
+```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+```
 
 ## Validation
 
@@ -23,6 +48,17 @@ Run the local production smoke/soak acceptance check before release handoff:
 
 The default path uses temporary SQLite, a temporary Artifact Store, API TestClient, a controlled Worker pipeline, synthetic Browser Runner soak, simulated webhook delivery, and retention cleanup checks. It exits non-zero when any critical check fails and writes an `archive_manifest` section into the JSON report with result package hashes, report kinds, Prometheus scrape evidence, alert delivery status, retention evidence, and Browser Runner soak assessment.
 
+Run the compose rehearsal when Docker is available:
+
+```powershell
+.venv\Scripts\python.exe -m deploy.compose_smoke `
+  --output tmp\deployment-compose-smoke\compose-smoke.json `
+  --artifact-root tmp\deployment-compose-smoke\artifacts `
+  --soak-runs 10
+```
+
+The compose rehearsal builds images unless `--skip-build` is passed, starts the worker and browser-runner profiles, waits for service health checks, runs the archive-ready deployment smoke against PostgreSQL on `127.0.0.1:5432` and MinIO on `127.0.0.1:9000`, stores retained artifact metadata under the requested artifact root, captures recent compose logs, and tears the topology down unless `--keep-running` is passed. The report is ready for release handoff when `status=pass`, `deploymentSmoke.status=pass`, and `deploymentSmoke.archive_manifest.archiveReady=true`.
+
 For an archive-ready topology rehearsal, pass a shared metadata DB and retain artifacts:
 
 ```powershell
@@ -36,6 +72,27 @@ For an archive-ready topology rehearsal, pass a shared metadata DB and retain ar
 ```
 
 The persisted report is the release handoff artifact. Keep it with the retained Artifact Store directory or object-store export so reviewers can verify `archive_manifest.archiveReady`, `archive_manifest.artifactKinds`, `archive_manifest.retainedEvidence.resultPackageSha256`, webhook delivery, Prometheus coverage, retention cleanup evidence, and Browser Runner capacity assessment together.
+
+## Failure Diagnosis and Rollback
+
+Use `docker compose ... ps` first; an unhealthy dependency usually explains downstream startup failures.
+
+- DB unhealthy: inspect `db` logs, credentials in `deploy/env/db.env.example`, and whether port `127.0.0.1:5432` is already used.
+- MinIO unhealthy or bucket init failed: inspect `artifact-store` and `artifact-store-init` logs, then verify `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, and `AI_JSUNPACK_ARTIFACT_S3_BUCKET` match across env files.
+- API exits immediately: check `/health` logs for deployment profile violations. API must not receive Worker sandbox, Browser Runner, Core CLI, or model provider variables.
+- Worker idle or degraded: check `worker` logs and `/ops/metrics`; verify a source input exists and `AI_JSUNPACK_WORKER_ID`, lease, DB, and Artifact Store settings point at the shared topology.
+- Browser Runner degraded: check `/health`, queue backend settings, lease thresholds, and whether Playwright dependencies are present in the image.
+- Prometheus or alert checks fail: verify the auth secret is shared and the generated Bearer token has ops read access.
+- Result package missing: inspect Worker packaging logs, retained Artifact Store contents, and `deploymentSmoke.failedChecks`.
+
+Rollback by preserving evidence first, then returning to the previous image tag:
+
+```powershell
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 200 > tmp\deployment-compose-smoke\compose-logs.txt
+docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+```
+
+For production-like rehearsals, retain the PostgreSQL volume/export and MinIO bucket export with the compose smoke JSON report before deleting volumes. Re-run `deploy.compose_smoke` after reverting tags and compare the new `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`, report kinds, Prometheus scrape evidence, and alert event history.
 
 ## Sandbox and Browser Isolation Profiles
 
