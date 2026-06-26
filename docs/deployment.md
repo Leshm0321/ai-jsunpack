@@ -227,7 +227,7 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
 - `AI_JSUNPACK_ALERT_WEBHOOK_URL`（可选）
 - Worker 模型 provider 凭据（仅 cloud_allowed 部署需要）
 
-首个真实发布归档推荐使用 GitHub Environments 作为 secret manager 记录面：
+仓库侧阶段 8 已提供发布前预检、发布门禁、证据清单生成和归档核验能力。真实生产发布仍需要在目标 GitHub/GHCR/生产环境中执行，并把外部证据归档为运维验收记录；这些证据不提交进仓库。首个真实发布归档推荐使用 GitHub Environments 作为 secret manager 记录面：
 
 1. 在目标 environment 中配置生产 secret，并启用需要的审批或保护规则。
 2. 在发布机或 CI runner 上运行预检，确认 GitHub CLI、目标仓库、workflow 和 Docker daemon 可用：
@@ -239,7 +239,7 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
   --output tmp\release-gate\release-readiness.json
 ```
 
-预检报告 `status=ready` 才表示本地触发条件齐备；`status=blocked` 时按 `blockers` 和 `nextActions` 修复。预检只检查执行前提，不会替代真实 workflow、GHCR digest 或生产快照证据。
+预检报告 `status=ready` 才表示本地触发条件齐备；`status=blocked` 时按 `blockers` 和 `nextActions` 修复。预检只检查执行前提，不会替代真实 workflow、GHCR digest 或生产快照证据，也不代表仓库实现仍缺少阶段 8 能力。
 
 3. 手动触发 release gate workflow，填写不可变 `version`、`previous_version`、`secret_environment=production` 和 `push_images=true`。
 4. 归档 Actions run URL、run id、commit、actor、environment 名称和上传的 Actions artifacts。
@@ -250,7 +250,7 @@ Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`co
 
 ### 发布归档核验
 
-真实发布完成后，用 UTF-8 JSON 清单记录外部证据，再运行 `deploy.release_archive` 生成最终归档核验报告。清单只记录证据引用、digest、revision、approval record 和快照位置，不记录 secret 值：
+真实发布完成后，用 UTF-8 JSON 清单记录外部运维证据，再运行 `deploy.release_archive` 生成最终归档核验报告。清单只记录证据引用、digest、revision、approval record 和快照位置，不记录 secret 值：
 
 可先从 release gate 报告生成待填清单模板：
 
