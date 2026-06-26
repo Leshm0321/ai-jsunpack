@@ -63,6 +63,7 @@ class ReleaseGateConfig:
     compose_artifact_root: Path = DEFAULT_COMPOSE_ARTIFACT_ROOT
     deployment_smoke_output: Path = DEFAULT_DEPLOYMENT_SMOKE_OUTPUT
     project_name: str = "ai-jsunpack-release-gate"
+    secret_environment: str = ""
     sbom_tool: str = "syft"
     scan_tool: str = "trivy"
     scan_severity: str = "HIGH,CRITICAL"
@@ -97,6 +98,11 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
     parser.add_argument("--compose-artifact-root", type=Path, default=DEFAULT_COMPOSE_ARTIFACT_ROOT)
     parser.add_argument("--deployment-smoke-output", type=Path, default=DEFAULT_DEPLOYMENT_SMOKE_OUTPUT)
     parser.add_argument("--project-name", default="ai-jsunpack-release-gate")
+    parser.add_argument(
+        "--secret-environment",
+        default="",
+        help="Secret manager environment name, for example a GitHub Environment.",
+    )
     parser.add_argument("--sbom-tool", default="syft", help="SBOM tool command, or 'none' to skip.")
     parser.add_argument("--scan-tool", default="trivy", help="Image scanner command, or 'none' to skip.")
     parser.add_argument("--scan-severity", default="HIGH,CRITICAL")
@@ -123,6 +129,7 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
         compose_artifact_root=args.compose_artifact_root,
         deployment_smoke_output=args.deployment_smoke_output,
         project_name=args.project_name,
+        secret_environment=args.secret_environment,
         sbom_tool=args.sbom_tool,
         scan_tool=args.scan_tool,
         scan_severity=args.scan_severity,
@@ -181,7 +188,7 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
         "requiredSecrets": required_secret_template(config),
         "commandPlan": plan,
         "releaseGates": release_gate_summary(config),
-        "archivePlan": archive_plan(config),
+        "archivePlan": archive_plan(config, images),
         "rollback": rollback_summary(config, images),
         "checks": checks,
     }
@@ -200,6 +207,16 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
             "compose_image_overrides",
             True,
             evidence=plan["composeSmokeGate"]["environment"],
+        )
+        add_check(
+            checks,
+            "production_archive_plan",
+            True,
+            evidence={
+                "productionArchiveItems": len(report["archivePlan"]["productionArchiveChecklist"]),
+                "registryDigestItems": len(report["archivePlan"]["registryDigestEvidence"]),
+                "secretManager": report["archivePlan"]["secretManagerEvidence"]["provider"],
+            },
         )
         if not dockerfiles_present:
             raise FileNotFoundError("One or more service Dockerfiles are missing.")
@@ -399,6 +416,7 @@ def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
     if config.ci_platform == "github_actions":
         for secret in secrets:
             secret["githubActions"] = github_secret_mapping(secret["name"])
+            secret["githubEnvironment"] = config.secret_environment or "<github-environment>"
         secrets.insert(
             0,
             {
@@ -406,6 +424,7 @@ def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
                 "scope": "release workflow",
                 "injection": "GitHub Actions automatic token with contents:read and packages:write permissions",
                 "githubActions": "${{ github.token }}",
+                "githubEnvironment": config.secret_environment or "<workflow>",
             },
         )
     return secrets
@@ -429,7 +448,9 @@ def ci_platform_summary(config: ReleaseGateConfig) -> dict[str, Any]:
             },
             "workflow": ".github/workflows/release-gate.yml",
             "secretStore": "GitHub repository or environment secrets",
+            "secretEnvironment": config.secret_environment or "<github-environment>",
             "artifactStore": "GitHub Actions run artifacts plus retained production DB/Artifact Store snapshots",
+            "runContext": github_actions_run_context(config),
         }
     return {
         "name": "generic",
@@ -439,7 +460,7 @@ def ci_platform_summary(config: ReleaseGateConfig) -> dict[str, Any]:
     }
 
 
-def archive_plan(config: ReleaseGateConfig) -> dict[str, Any]:
+def archive_plan(config: ReleaseGateConfig, images: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "localArtifacts": [
             str(config.output_path),
@@ -456,6 +477,10 @@ def archive_plan(config: ReleaseGateConfig) -> dict[str, Any]:
             "secret manager revision or deployment environment record without secret values",
         ],
         "githubActionsArtifacts": github_actions_artifacts(config) if config.ci_platform == "github_actions" else [],
+        "ciRun": ci_run_context(config),
+        "registryDigestEvidence": registry_digest_evidence(images),
+        "secretManagerEvidence": secret_manager_evidence(config),
+        "productionArchiveChecklist": production_archive_checklist(config, images),
     }
 
 
@@ -466,6 +491,128 @@ def github_actions_artifacts(config: ReleaseGateConfig) -> list[dict[str, str]]:
         {"name": "release-gate-scans", "path": str(config.scan_output_dir)},
         {"name": "compose-smoke-report", "path": str(config.compose_smoke_output)},
         {"name": "deployment-smoke-report", "path": str(config.deployment_smoke_output)},
+    ]
+
+
+def ci_run_context(config: ReleaseGateConfig) -> dict[str, Any]:
+    if config.ci_platform == "github_actions":
+        return github_actions_run_context(config)
+    return {
+        "provider": "generic",
+        "runUrl": "<ci-run-url>",
+        "runId": "<ci-run-id>",
+        "repository": "<repository>",
+        "commit": short_sha(config.git_sha),
+    }
+
+
+def github_actions_run_context(config: ReleaseGateConfig) -> dict[str, Any]:
+    server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    repository = os.getenv("GITHUB_REPOSITORY", "<owner/repo>")
+    run_id = os.getenv("GITHUB_RUN_ID", "<run-id>")
+    return {
+        "provider": "github_actions",
+        "workflow": os.getenv("GITHUB_WORKFLOW", "Release Gate"),
+        "runId": run_id,
+        "runNumber": os.getenv("GITHUB_RUN_NUMBER", "<run-number>"),
+        "runAttempt": os.getenv("GITHUB_RUN_ATTEMPT", "<run-attempt>"),
+        "runUrl": f"{server_url}/{repository}/actions/runs/{run_id}",
+        "repository": repository,
+        "actor": os.getenv("GITHUB_ACTOR", "<actor>"),
+        "ref": os.getenv("GITHUB_REF_NAME", "<ref>"),
+        "commit": short_sha(os.getenv("GITHUB_SHA", config.git_sha)),
+        "environment": config.secret_environment or os.getenv("GITHUB_ENVIRONMENT_NAME", "<github-environment>"),
+    }
+
+
+def registry_digest_evidence(images: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "service": image["service"],
+            "tag": image["versionTag"],
+            "digestReference": f"{image['repository']}@sha256:<registry-digest>",
+            "source": "container registry package digest after push_images=true",
+        }
+        for image in images
+    ]
+
+
+def secret_manager_evidence(config: ReleaseGateConfig) -> dict[str, Any]:
+    if config.ci_platform == "github_actions":
+        return {
+            "provider": "github_environments",
+            "environment": config.secret_environment or os.getenv("GITHUB_ENVIRONMENT_NAME", "<github-environment>"),
+            "requiredEvidence": [
+                "environment secret revision or configuration change record without values",
+                "workflow environment approval or deployment protection record when enabled",
+                "repository or environment secret names matching requiredSecrets[].githubActions",
+            ],
+            "containsSecretValues": False,
+        }
+    return {
+        "provider": "external_secret_manager",
+        "environment": config.secret_environment or "<deployment-environment>",
+        "requiredEvidence": [
+            "secret manager revision or sealed variable revision without values",
+            "deployment approval record when the target platform supports approvals",
+            "secret names matching requiredSecrets[].name",
+        ],
+        "containsSecretValues": False,
+    }
+
+
+def production_archive_checklist(config: ReleaseGateConfig, images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    actions_artifacts = github_actions_artifacts(config) if config.ci_platform == "github_actions" else []
+    return [
+        {
+            "name": "ci_workflow_run",
+            "required": True,
+            "status": "external_required",
+            "evidenceRef": ci_run_context(config)["runUrl"],
+            "containsSecretValues": False,
+        },
+        {
+            "name": "actions_artifacts",
+            "required": config.ci_platform == "github_actions",
+            "status": "external_required" if config.ci_platform == "github_actions" else "not_applicable",
+            "evidenceRef": [item["name"] for item in actions_artifacts],
+            "containsSecretValues": False,
+        },
+        {
+            "name": "ghcr_image_digests",
+            "required": config.push,
+            "status": "external_required",
+            "evidenceRef": [item["digestReference"] for item in registry_digest_evidence(images)],
+            "containsSecretValues": False,
+        },
+        {
+            "name": "database_snapshot",
+            "required": True,
+            "status": "external_required",
+            "evidenceRef": "PostgreSQL dump or volume snapshot retained outside CI workspace",
+            "containsSecretValues": False,
+        },
+        {
+            "name": "artifact_store_export",
+            "required": True,
+            "status": "external_required",
+            "evidenceRef": "Artifact Store bucket or prefix export retained outside CI workspace",
+            "containsSecretValues": False,
+        },
+        {
+            "name": "secret_manager_revision",
+            "required": True,
+            "status": "external_required",
+            "evidenceRef": secret_manager_evidence(config)["environment"],
+            "containsSecretValues": False,
+        },
+        {
+            "name": "rollback_evidence",
+            "required": True,
+            "status": "external_required",
+            "evidenceRef": config.previous_version or "<previous-known-good-tag>",
+            "containsSecretValues": False,
+        },
     ]
 
 
@@ -493,6 +640,15 @@ def release_gate_summary(config: ReleaseGateConfig) -> list[dict[str, Any]]:
                 str(config.compose_smoke_output),
                 str(config.deployment_smoke_output),
                 "deploymentSmoke.archive_manifest.archiveReady=true",
+            ],
+        },
+        {
+            "name": "production_archive_evidence",
+            "required": True,
+            "evidence": [
+                "archivePlan.productionArchiveChecklist",
+                "archivePlan.registryDigestEvidence",
+                "archivePlan.secretManagerEvidence",
             ],
         },
     ]

@@ -15,6 +15,11 @@ on:
         description: Registry namespace under ghcr.io.
         required: false
         type: string
+      secret_environment:
+        description: GitHub Environment that owns production release secrets.
+        required: false
+        default: production
+        type: string
       push_images:
         description: Push images to GHCR after local release gate checks.
         required: true
@@ -46,12 +51,14 @@ jobs:
     name: Release gate
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    environment: ${{ inputs.secret_environment }}
     env:
       RELEASE_GATE_DIR: tmp/release-gate
       REGISTRY: ghcr.io
       REPOSITORY_PREFIX: ${{ inputs.repository_prefix || github.repository }}
       VERSION: ${{ inputs.version }}
       PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      SECRET_ENVIRONMENT: ${{ inputs.secret_environment }}
       PUSH_IMAGES: ${{ inputs.push_images }}
       SBOM_TOOL: ${{ inputs.sbom_tool }}
       SCAN_TOOL: ${{ inputs.scan_tool }}
@@ -126,6 +133,7 @@ jobs:
             --version "$VERSION"
             --git-sha "${{ github.sha }}"
             --ci-platform github_actions
+            --secret-environment "$SECRET_ENVIRONMENT"
             --sbom-tool "$SBOM_TOOL"
             --scan-tool "$SCAN_TOOL"
             --output "$RELEASE_GATE_DIR/release-gate.json"

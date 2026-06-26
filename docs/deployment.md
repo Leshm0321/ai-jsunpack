@@ -201,6 +201,7 @@ Prometheus scrape 必须携带拥有 ops read 权限的 Bearer token。告警规
 - `version`：不可变发布 tag，必填。
 - `previous_version`：上一组已知可回滚 tag，可选但生产发布建议填写。
 - `repository_prefix`：GHCR namespace，默认当前 GitHub repository。
+- `secret_environment`：持有生产发布 secret 的 GitHub Environment，默认 `production`。
 - `push_images`：为 `true` 时才执行 `docker push`；为 `false` 时只构建、扫描和演练。
 - `sbom_tool`：默认 `syft`，离线例外可选 `none`。
 - `scan_tool`：默认 `trivy`，离线例外可选 `none`。
@@ -214,6 +215,7 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
   --version "$VERSION" \
   --git-sha "$GITHUB_SHA" \
   --ci-platform github_actions \
+  --secret-environment "$SECRET_ENVIRONMENT" \
   --execute
 ```
 
@@ -225,7 +227,15 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
 - `AI_JSUNPACK_ALERT_WEBHOOK_URL`（可选）
 - Worker 模型 provider 凭据（仅 cloud_allowed 部署需要）
 
-Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`compose-smoke.json` 和 `deployment-smoke.json`。GitHub artifacts 不能替代生产持久证据；发布后仍必须在目标平台保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、registry image digest、compose/service logs，以及 secret manager revision 或部署环境记录（不含 secret 值）。
+首个真实发布归档推荐使用 GitHub Environments 作为 secret manager 记录面：
+
+1. 在目标 environment 中配置生产 secret，并启用需要的审批或保护规则。
+2. 手动触发 release gate workflow，填写不可变 `version`、`previous_version`、`secret_environment=production` 和 `push_images=true`。
+3. 归档 Actions run URL、run id、commit、actor、environment 名称和上传的 Actions artifacts。
+4. 从 GHCR 记录每个服务镜像 tag 对应的 registry digest。
+5. 在生产平台外部保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、compose/service logs、secret environment revision 或环境配置变更记录，以及回滚版本对照。
+
+Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`compose-smoke.json` 和 `deployment-smoke.json`。`release-gate.json` 的 `archivePlan.productionArchiveChecklist` 会列出仍需外部保留的证据项，`registryDigestEvidence` 会列出每个服务应补录的 GHCR digest 引用，`secretManagerEvidence` 会标记 GitHub Environment 名称且明确不包含 secret 值。GitHub artifacts 不能替代生产持久证据；发布后仍必须在目标平台保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、registry image digest、compose/service logs，以及 secret manager revision 或部署环境记录（不含 secret 值）。
 
 ## 自动化验收
 

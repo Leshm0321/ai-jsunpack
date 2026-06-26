@@ -86,6 +86,7 @@ class ReleaseGateTest(unittest.TestCase):
                     sbom_output_dir=Path(temp_dir) / "sbom",
                     scan_output_dir=Path(temp_dir) / "scans",
                     ci_platform="github_actions",
+                    secret_environment="production",
                 )
             )
 
@@ -93,12 +94,30 @@ class ReleaseGateTest(unittest.TestCase):
             self.assertEqual(report["ciPlatform"]["name"], "github_actions")
             self.assertEqual(report["ciPlatform"]["workflow"], ".github/workflows/release-gate.yml")
             self.assertEqual(report["ciPlatform"]["permissions"]["packages"], "write")
+            self.assertEqual(report["ciPlatform"]["secretEnvironment"], "production")
             self.assertEqual(report["images"][0]["versionTag"], "ghcr.io/owner/ai-jsunpack/api:2026.06.26")
 
             secret_refs = {secret["name"]: secret.get("githubActions") for secret in report["requiredSecrets"]}
             self.assertEqual(secret_refs["GITHUB_TOKEN"], "${{ github.token }}")
             self.assertEqual(secret_refs["AI_JSUNPACK_AUTH_SECRET"], "${{ secrets.AI_JSUNPACK_AUTH_SECRET }}")
+            self.assertEqual(
+                {secret["name"]: secret.get("githubEnvironment") for secret in report["requiredSecrets"]}[
+                    "AI_JSUNPACK_AUTH_SECRET"
+                ],
+                "production",
+            )
             self.assertIn("release-gate-scans", {item["name"] for item in report["archivePlan"]["githubActionsArtifacts"]})
+            self.assertEqual(report["archivePlan"]["secretManagerEvidence"]["provider"], "github_environments")
+            self.assertEqual(report["archivePlan"]["secretManagerEvidence"]["environment"], "production")
+            self.assertIn(
+                "ghcr.io/owner/ai-jsunpack/api@sha256:<registry-digest>",
+                {item["digestReference"] for item in report["archivePlan"]["registryDigestEvidence"]},
+            )
+            checklist = {item["name"]: item for item in report["archivePlan"]["productionArchiveChecklist"]}
+            self.assertEqual(checklist["ci_workflow_run"]["status"], "external_required")
+            self.assertIn("release-gate-report", checklist["actions_artifacts"]["evidenceRef"])
+            self.assertFalse(checklist["secret_manager_revision"]["containsSecretValues"])
+            self.assertIn("production_archive_evidence", {gate["name"] for gate in report["releaseGates"]})
 
             scan_command = report["commandPlan"]["scan"][0]
             self.assertIn("--output", scan_command)
@@ -109,7 +128,10 @@ class ReleaseGateTest(unittest.TestCase):
 
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("packages: write", workflow)
+        self.assertIn("secret_environment:", workflow)
+        self.assertIn("environment: ${{ inputs.secret_environment }}", workflow)
         self.assertIn("--ci-platform github_actions", workflow)
+        self.assertIn("--secret-environment", workflow)
         self.assertIn("--execute", workflow)
         self.assertIn("--push", workflow)
         self.assertIn("release-gate-report", workflow)
