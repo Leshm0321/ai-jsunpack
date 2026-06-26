@@ -230,10 +230,21 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
 首个真实发布归档推荐使用 GitHub Environments 作为 secret manager 记录面：
 
 1. 在目标 environment 中配置生产 secret，并启用需要的审批或保护规则。
-2. 手动触发 release gate workflow，填写不可变 `version`、`previous_version`、`secret_environment=production` 和 `push_images=true`。
-3. 归档 Actions run URL、run id、commit、actor、environment 名称和上传的 Actions artifacts。
-4. 从 GHCR 记录每个服务镜像 tag 对应的 registry digest。
-5. 在生产平台外部保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、compose/service logs、secret environment revision 或环境配置变更记录，以及回滚版本对照。
+2. 在发布机或 CI runner 上运行预检，确认 GitHub CLI、目标仓库、workflow 和 Docker daemon 可用：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_readiness `
+  --repository <owner>/<repo> `
+  --secret-environment production `
+  --output tmp\release-gate\release-readiness.json
+```
+
+预检报告 `status=ready` 才表示本地触发条件齐备；`status=blocked` 时按 `blockers` 和 `nextActions` 修复。预检只检查执行前提，不会替代真实 workflow、GHCR digest 或生产快照证据。
+
+3. 手动触发 release gate workflow，填写不可变 `version`、`previous_version`、`secret_environment=production` 和 `push_images=true`。
+4. 归档 Actions run URL、run id、commit、actor、environment 名称和上传的 Actions artifacts。
+5. 从 GHCR 记录每个服务镜像 tag 对应的 registry digest。
+6. 在生产平台外部保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、compose/service logs、secret environment revision 或环境配置变更记录，以及回滚版本对照。
 
 Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`compose-smoke.json` 和 `deployment-smoke.json`。`release-gate.json` 的 `archivePlan.productionArchiveChecklist` 会列出仍需外部保留的证据项，`registryDigestEvidence` 会列出每个服务应补录的 GHCR digest 引用，`secretManagerEvidence` 会标记 GitHub Environment 名称且明确不包含 secret 值。GitHub artifacts 不能替代生产持久证据；发布后仍必须在目标平台保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、registry image digest、compose/service logs，以及 secret manager revision 或部署环境记录（不含 secret 值）。
 
