@@ -46,6 +46,19 @@ Secrets must come from a CI or platform secret store. Do not commit resolved val
 
 GitHub Actions users can run `.github/workflows/release-gate.yml` through `workflow_dispatch`. It targets GHCR by default, uses `GITHUB_TOKEN` with `contents: read` and `packages: write`, runs under the selected `secret_environment`, and calls `deploy.release_gate --ci-platform github_actions --secret-environment <environment> --execute`. Images are pushed only when the `push_images` input is true. The workflow uploads release gate, SBOM, scan, compose smoke, and deployment smoke reports as Actions artifacts; `release-gate.json` also records a `productionArchiveChecklist` with the required external evidence. Production DB snapshots, Artifact Store exports, GHCR registry digests, service logs, rollback evidence, and GitHub Environment revision or approval records must still be retained by the deployment platform outside the GitHub runner workspace.
 
+After the first real run, write those external references into a UTF-8 `production_release_evidence_manifest` JSON file and verify the final archive with:
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_archive `
+  --release-gate-report tmp\release-gate\release-gate.json `
+  --compose-smoke-report tmp\release-gate\compose-smoke.json `
+  --deployment-smoke-report tmp\release-gate\deployment-smoke.json `
+  --evidence-manifest tmp\release-gate\production-evidence-manifest.json `
+  --output tmp\release-gate\production-release-archive.json
+```
+
+The verifier requires executed release gate evidence, passing compose/deployment smoke reports, `archiveReady=true`, registry digests for pushed images, a secret manager revision or approval record without values, retained DB/Artifact Store evidence, service logs, and rollback evidence. Use `platformDifferences` in the manifest for Kubernetes Secret, Vault, SOPS/SealedSecrets, or other production injection differences that need documentation follow-up.
+
 ## Compose Images and Health Checks
 
 Local service Dockerfiles live under `deploy/docker/`:

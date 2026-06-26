@@ -237,6 +237,75 @@ workflow 会先运行仓库基础验证，再安装发布工具并调用：
 
 Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`compose-smoke.json` 和 `deployment-smoke.json`。`release-gate.json` 的 `archivePlan.productionArchiveChecklist` 会列出仍需外部保留的证据项，`registryDigestEvidence` 会列出每个服务应补录的 GHCR digest 引用，`secretManagerEvidence` 会标记 GitHub Environment 名称且明确不包含 secret 值。GitHub artifacts 不能替代生产持久证据；发布后仍必须在目标平台保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、registry image digest、compose/service logs，以及 secret manager revision 或部署环境记录（不含 secret 值）。
 
+### 发布归档核验
+
+真实发布完成后，用 UTF-8 JSON 清单记录外部证据，再运行 `deploy.release_archive` 生成最终归档核验报告。清单只记录证据引用、digest、revision、approval record 和快照位置，不记录 secret 值：
+
+```json
+{
+  "kind": "production_release_evidence_manifest",
+  "schemaVersion": "1",
+  "ciRun": {
+    "runUrl": "https://github.com/<owner>/<repo>/actions/runs/<run-id>",
+    "runId": "<run-id>",
+    "commit": "<commit-sha>",
+    "environment": "production",
+    "artifacts": [
+      "release-gate-report",
+      "release-gate-sbom",
+      "release-gate-scans",
+      "compose-smoke-report",
+      "deployment-smoke-report"
+    ]
+  },
+  "registryDigests": [
+    {
+      "service": "api",
+      "tag": "ghcr.io/<owner>/<repo>/api:<version>",
+      "digest": "sha256:<digest>"
+    }
+  ],
+  "secretManager": {
+    "provider": "github_environments",
+    "environment": "production",
+    "revision": "<environment-revision-or-change-record>",
+    "approvalRecord": "<approval-or-deployment-protection-record>",
+    "containsSecretValues": false
+  },
+  "databaseSnapshot": {
+    "evidenceRef": "s3://release-archive/<version>/db.dump",
+    "sha256": "<snapshot-sha256>",
+    "containsSecretValues": false
+  },
+  "artifactStoreExport": {
+    "evidenceRef": "s3://release-archive/<version>/artifacts/",
+    "sha256": "<export-sha256>",
+    "containsSecretValues": false
+  },
+  "serviceLogs": {
+    "evidenceRef": "s3://release-archive/<version>/service-logs.txt"
+  },
+  "rollbackEvidence": {
+    "evidenceRef": "ghcr.io/<owner>/<repo>/api:<previous-version>",
+    "previousVersion": "<previous-version>"
+  },
+  "platformDifferences": []
+}
+```
+
+核验命令：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_archive `
+  --release-gate-report tmp\release-gate\release-gate.json `
+  --compose-smoke-report tmp\release-gate\compose-smoke.json `
+  --deployment-smoke-report tmp\release-gate\deployment-smoke.json `
+  --evidence-manifest tmp\release-gate\production-evidence-manifest.json `
+  --output tmp\release-gate\production-release-archive.json
+```
+
+核验通过要求：release gate 为执行模式且状态为 `pass`，compose smoke 和 deployment smoke 均通过，`deploymentSmoke.archive_manifest.archiveReady=true`，`push_images=true` 时所有服务镜像都有真实 registry digest，CI run、secret manager revision/approval、DB snapshot、Artifact Store export、service logs 和 rollback evidence 均有引用。若实际平台使用 Kubernetes Secret、Vault、SOPS/SealedSecrets 或其他 secret 注入机制，在 `platformDifferences` 中记录差异，并同步更新本指南。
+
 ## 自动化验收
 
 仓库提供一个本地可复跑的生产验收编排入口，默认使用临时 SQLite、临时 Artifact Store、API TestClient、受控 Worker pipeline 和模拟 webhook，不依赖 Docker、MinIO、外网或真实 PostgreSQL：
