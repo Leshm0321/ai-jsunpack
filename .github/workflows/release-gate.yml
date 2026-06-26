@@ -1,0 +1,185 @@
+name: Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable image version tag to publish.
+        required: true
+        type: string
+      previous_version:
+        description: Previous known-good image version for rollback evidence.
+        required: false
+        type: string
+      repository_prefix:
+        description: Registry namespace under ghcr.io.
+        required: false
+        type: string
+      push_images:
+        description: Push images to GHCR after local release gate checks.
+        required: true
+        default: false
+        type: boolean
+      sbom_tool:
+        description: SBOM tool command, or none for an approved exception.
+        required: true
+        default: syft
+        type: choice
+        options:
+          - syft
+          - none
+      scan_tool:
+        description: Vulnerability scanner command, or none for an approved exception.
+        required: true
+        default: trivy
+        type: choice
+        options:
+          - trivy
+          - none
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RELEASE_GATE_DIR: tmp/release-gate
+      REGISTRY: ghcr.io
+      REPOSITORY_PREFIX: ${{ inputs.repository_prefix || github.repository }}
+      VERSION: ${{ inputs.version }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      PUSH_IMAGES: ${{ inputs.push_images }}
+      SBOM_TOOL: ${{ inputs.sbom_tool }}
+      SCAN_TOOL: ${{ inputs.scan_tool }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project dependencies
+        shell: bash
+        run: |
+          npm ci
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+
+      - name: Install release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          if [ "$SBOM_TOOL" = "syft" ]; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$HOME/.local/bin"
+          fi
+          if [ "$SCAN_TOOL" = "trivy" ]; then
+            sudo apt-get update
+            sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update
+            sudo apt-get install -y trivy
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run repository validation
+        shell: bash
+        run: |
+          npm run check
+          npm run test:core
+          npm run build:web
+          .venv/bin/python -m compileall apps packages tests
+          .venv/bin/python -m unittest discover -s tests
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push_images }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Run release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RELEASE_GATE_DIR"
+          args=(
+            -m deploy.release_gate
+            --registry "$REGISTRY"
+            --repository-prefix "$REPOSITORY_PREFIX"
+            --version "$VERSION"
+            --git-sha "${{ github.sha }}"
+            --ci-platform github_actions
+            --sbom-tool "$SBOM_TOOL"
+            --scan-tool "$SCAN_TOOL"
+            --output "$RELEASE_GATE_DIR/release-gate.json"
+            --sbom-output-dir "$RELEASE_GATE_DIR/sbom"
+            --scan-output-dir "$RELEASE_GATE_DIR/scans"
+            --compose-smoke-output "$RELEASE_GATE_DIR/compose-smoke.json"
+            --compose-artifact-root "$RELEASE_GATE_DIR/artifacts"
+            --deployment-smoke-output "$RELEASE_GATE_DIR/deployment-smoke.json"
+            --execute
+          )
+          if [ -n "$PREVIOUS_VERSION" ]; then
+            args+=(--previous-version "$PREVIOUS_VERSION")
+          fi
+          if [ "$PUSH_IMAGES" = "true" ]; then
+            args+=(--push)
+          fi
+          .venv/bin/python "${args[@]}"
+
+      - name: Upload release gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-report
+          path: tmp/release-gate/release-gate.json
+          if-no-files-found: warn
+
+      - name: Upload SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-sbom
+          path: tmp/release-gate/sbom
+          if-no-files-found: warn
+
+      - name: Upload vulnerability scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-scans
+          path: tmp/release-gate/scans
+          if-no-files-found: warn
+
+      - name: Upload compose smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-smoke-report
+          path: tmp/release-gate/compose-smoke.json
+          if-no-files-found: warn
+
+      - name: Upload deployment smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-smoke-report
+          path: tmp/release-gate/deployment-smoke.json
+          if-no-files-found: warn

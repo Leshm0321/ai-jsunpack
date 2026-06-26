@@ -16,6 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "tmp" / "release-gate" / "release-gate.json"
 DEFAULT_SBOM_DIR = ROOT / "tmp" / "release-gate" / "sbom"
+DEFAULT_SCAN_DIR = ROOT / "tmp" / "release-gate" / "scans"
 DEFAULT_COMPOSE_SMOKE_OUTPUT = ROOT / "tmp" / "release-gate" / "compose-smoke.json"
 DEFAULT_COMPOSE_ARTIFACT_ROOT = ROOT / "tmp" / "release-gate" / "artifacts"
 DEFAULT_DEPLOYMENT_SMOKE_OUTPUT = ROOT / "tmp" / "release-gate" / "deployment-smoke.json"
@@ -54,8 +55,10 @@ class ReleaseGateConfig:
     version: str
     git_sha: str = ""
     previous_version: str = ""
+    ci_platform: str = "generic"
     output_path: Path = DEFAULT_OUTPUT
     sbom_output_dir: Path = DEFAULT_SBOM_DIR
+    scan_output_dir: Path = DEFAULT_SCAN_DIR
     compose_smoke_output: Path = DEFAULT_COMPOSE_SMOKE_OUTPUT
     compose_artifact_root: Path = DEFAULT_COMPOSE_ARTIFACT_ROOT
     deployment_smoke_output: Path = DEFAULT_DEPLOYMENT_SMOKE_OUTPUT
@@ -81,8 +84,15 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
     parser.add_argument("--version", required=True, help="Immutable release version or tag.")
     parser.add_argument("--git-sha", default="", help="Commit SHA to pin as an auxiliary image tag.")
     parser.add_argument("--previous-version", default="", help="Previous known-good image version for rollback evidence.")
+    parser.add_argument(
+        "--ci-platform",
+        choices=("generic", "github_actions"),
+        default="generic",
+        help="CI platform metadata to include in the release report.",
+    )
     parser.add_argument("--output", dest="output_path", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--sbom-output-dir", type=Path, default=DEFAULT_SBOM_DIR)
+    parser.add_argument("--scan-output-dir", type=Path, default=DEFAULT_SCAN_DIR)
     parser.add_argument("--compose-smoke-output", type=Path, default=DEFAULT_COMPOSE_SMOKE_OUTPUT)
     parser.add_argument("--compose-artifact-root", type=Path, default=DEFAULT_COMPOSE_ARTIFACT_ROOT)
     parser.add_argument("--deployment-smoke-output", type=Path, default=DEFAULT_DEPLOYMENT_SMOKE_OUTPUT)
@@ -105,8 +115,10 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
         version=args.version,
         git_sha=git_sha,
         previous_version=args.previous_version,
+        ci_platform=args.ci_platform,
         output_path=args.output_path,
         sbom_output_dir=args.sbom_output_dir,
+        scan_output_dir=args.scan_output_dir,
         compose_smoke_output=args.compose_smoke_output,
         compose_artifact_root=args.compose_artifact_root,
         deployment_smoke_output=args.deployment_smoke_output,
@@ -165,9 +177,11 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
         "generatedAt": utc_now(),
         "config": safe_config(config),
         "images": images,
-        "requiredSecrets": required_secret_template(),
+        "ciPlatform": ci_platform_summary(config),
+        "requiredSecrets": required_secret_template(config),
         "commandPlan": plan,
         "releaseGates": release_gate_summary(config),
+        "archivePlan": archive_plan(config),
         "rollback": rollback_summary(config, images),
         "checks": checks,
     }
@@ -193,6 +207,7 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
         if config.execute:
             config.output_path.parent.mkdir(parents=True, exist_ok=True)
             config.sbom_output_dir.mkdir(parents=True, exist_ok=True)
+            config.scan_output_dir.mkdir(parents=True, exist_ok=True)
             run_commands("image_build", plan["build"], checks)
             run_commands("sbom_generation", plan["sbom"], checks, allow_empty=True)
             run_commands("vulnerability_scan", plan["scan"], checks, allow_empty=True)
@@ -320,18 +335,23 @@ def sbom_command(config: ReleaseGateConfig, image: dict[str, Any]) -> list[str]:
 
 def scan_command(config: ReleaseGateConfig, image: dict[str, Any]) -> list[str]:
     tool = config.scan_tool.lower()
+    output_path = config.scan_output_dir / f"{image['service']}-{config.version}.scan.json"
     if Path(config.scan_tool).name.lower() == "trivy" or tool == "trivy":
         return [
             config.scan_tool,
             "image",
             "--exit-code",
             "1",
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
             "--severity",
             config.scan_severity,
             image["versionTag"],
         ]
     if Path(config.scan_tool).name.lower() == "grype" or tool == "grype":
-        return [config.scan_tool, image["versionTag"], "--fail-on", "high"]
+        return [config.scan_tool, image["versionTag"], "--fail-on", "high", "-o", "json", "--file", str(output_path)]
     return [config.scan_tool, image["versionTag"]]
 
 
@@ -343,8 +363,8 @@ def tool_enabled(value: str) -> bool:
     return value.strip().lower() not in DISABLED_TOOL_NAMES
 
 
-def required_secret_template() -> list[dict[str, str]]:
-    return [
+def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
+    secrets = [
         {
             "name": "AI_JSUNPACK_AUTH_SECRET",
             "scope": "api,worker,browser-runner",
@@ -375,6 +395,77 @@ def required_secret_template() -> list[dict[str, str]]:
             "scope": "worker",
             "injection": "only when cloud_allowed mode is enabled for the deployment",
         },
+    ]
+    if config.ci_platform == "github_actions":
+        for secret in secrets:
+            secret["githubActions"] = github_secret_mapping(secret["name"])
+        secrets.insert(
+            0,
+            {
+                "name": "GITHUB_TOKEN",
+                "scope": "release workflow",
+                "injection": "GitHub Actions automatic token with contents:read and packages:write permissions",
+                "githubActions": "${{ github.token }}",
+            },
+        )
+    return secrets
+
+
+def github_secret_mapping(name: str) -> str:
+    if name == "model provider credentials":
+        return "repository/environment secrets for the selected provider, injected only into Worker release jobs"
+    return "${{ secrets." + name + " }}"
+
+
+def ci_platform_summary(config: ReleaseGateConfig) -> dict[str, Any]:
+    if config.ci_platform == "github_actions":
+        return {
+            "name": "github_actions",
+            "registry": config.registry,
+            "registryLogin": "docker login using github.actor and GITHUB_TOKEN",
+            "permissions": {
+                "contents": "read",
+                "packages": "write",
+            },
+            "workflow": ".github/workflows/release-gate.yml",
+            "secretStore": "GitHub repository or environment secrets",
+            "artifactStore": "GitHub Actions run artifacts plus retained production DB/Artifact Store snapshots",
+        }
+    return {
+        "name": "generic",
+        "registry": config.registry,
+        "secretStore": "external CI secret store, deployment secret manager, or sealed variables",
+        "artifactStore": "release system artifact archive plus retained production DB/Artifact Store snapshots",
+    }
+
+
+def archive_plan(config: ReleaseGateConfig) -> dict[str, Any]:
+    return {
+        "localArtifacts": [
+            str(config.output_path),
+            str(config.compose_smoke_output),
+            str(config.deployment_smoke_output),
+            str(config.sbom_output_dir),
+            str(config.scan_output_dir),
+        ],
+        "externalEvidence": [
+            "container registry image digests for each pushed tag",
+            "PostgreSQL dump or volume snapshot retained outside the CI workspace",
+            "Artifact Store bucket or prefix export retained outside the CI workspace",
+            "compose logs captured before rollback or teardown",
+            "secret manager revision or deployment environment record without secret values",
+        ],
+        "githubActionsArtifacts": github_actions_artifacts(config) if config.ci_platform == "github_actions" else [],
+    }
+
+
+def github_actions_artifacts(config: ReleaseGateConfig) -> list[dict[str, str]]:
+    return [
+        {"name": "release-gate-report", "path": str(config.output_path)},
+        {"name": "release-gate-sbom", "path": str(config.sbom_output_dir)},
+        {"name": "release-gate-scans", "path": str(config.scan_output_dir)},
+        {"name": "compose-smoke-report", "path": str(config.compose_smoke_output)},
+        {"name": "deployment-smoke-report", "path": str(config.deployment_smoke_output)},
     ]
 
 

@@ -189,6 +189,44 @@ Prometheus scrape 必须携带拥有 ops read 权限的 Bearer token。告警规
 
 发布后 gate 必须保留 `release-gate.json`、`compose-smoke.json`、`deployment-smoke.json`、SBOM、扫描报告、compose logs、PostgreSQL 导出或 volume 快照、Artifact Store bucket/prefix 导出。回滚时将 compose 镜像变量切回 `previous-version` 对应 tag，再运行 `deploy.compose_smoke --skip-build`，对比 `archive_manifest.retainedEvidence` 中的结果包 hash、报告类型、Prometheus 抓取和 alert event。
 
+### GitHub Actions 与 GHCR
+
+仓库内置 `.github/workflows/release-gate.yml`，用于在 GitHub Actions runner 中执行真实发布门禁。该 workflow 通过 `workflow_dispatch` 手动触发，默认 registry 为 `ghcr.io`，默认镜像 namespace 为当前 `owner/repo`，并要求 job permissions 至少包含：
+
+- `contents: read`
+- `packages: write`
+
+触发参数：
+
+- `version`：不可变发布 tag，必填。
+- `previous_version`：上一组已知可回滚 tag，可选但生产发布建议填写。
+- `repository_prefix`：GHCR namespace，默认当前 GitHub repository。
+- `push_images`：为 `true` 时才执行 `docker push`；为 `false` 时只构建、扫描和演练。
+- `sbom_tool`：默认 `syft`，离线例外可选 `none`。
+- `scan_tool`：默认 `trivy`，离线例外可选 `none`。
+
+workflow 会先运行仓库基础验证，再安装发布工具并调用：
+
+```bash
+.venv/bin/python -m deploy.release_gate \
+  --registry ghcr.io \
+  --repository-prefix "$REPOSITORY_PREFIX" \
+  --version "$VERSION" \
+  --git-sha "$GITHUB_SHA" \
+  --ci-platform github_actions \
+  --execute
+```
+
+当 `push_images=true` 时追加 `--push`，并使用 GitHub 自动注入的 `GITHUB_TOKEN` 登录 GHCR。`deploy.release_gate` 只在报告中记录 secret 名称和 GitHub Actions 引用，不记录 secret 值。生产环境至少应在 repository 或 environment secrets 中配置：
+
+- `AI_JSUNPACK_AUTH_SECRET`
+- `AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY`
+- `AI_JSUNPACK_BROWSER_RUNNER_TOKEN`
+- `AI_JSUNPACK_ALERT_WEBHOOK_URL`（可选）
+- Worker 模型 provider 凭据（仅 cloud_allowed 部署需要）
+
+Actions artifacts 会归档 `release-gate.json`、SBOM、漏洞扫描 JSON、`compose-smoke.json` 和 `deployment-smoke.json`。GitHub artifacts 不能替代生产持久证据；发布后仍必须在目标平台保留 PostgreSQL dump 或 volume snapshot、Artifact Store bucket/prefix export、registry image digest、compose/service logs，以及 secret manager revision 或部署环境记录（不含 secret 值）。
+
 ## 自动化验收
 
 仓库提供一个本地可复跑的生产验收编排入口，默认使用临时 SQLite、临时 Artifact Store、API TestClient、受控 Worker pipeline 和模拟 webhook，不依赖 Docker、MinIO、外网或真实 PostgreSQL：

@@ -7,6 +7,8 @@ from pathlib import Path
 
 from deploy.release_gate import ReleaseGateConfig, main, run_release_gate
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class ReleaseGateTest(unittest.TestCase):
     def test_dry_run_writes_release_report_with_pinned_images_and_gates(self):
@@ -71,6 +73,50 @@ class ReleaseGateTest(unittest.TestCase):
             gates = {gate["name"]: gate for gate in report["releaseGates"]}
             self.assertFalse(gates["sbom_generation"]["required"])
             self.assertFalse(gates["vulnerability_scan"]["required"])
+
+    def test_github_actions_report_records_platform_artifacts_and_secret_refs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = run_release_gate(
+                ReleaseGateConfig(
+                    registry="ghcr.io",
+                    repository_prefix="owner/ai-jsunpack",
+                    version="2026.06.26",
+                    git_sha="abcdef1234567890",
+                    output_path=Path(temp_dir) / "release-gate.json",
+                    sbom_output_dir=Path(temp_dir) / "sbom",
+                    scan_output_dir=Path(temp_dir) / "scans",
+                    ci_platform="github_actions",
+                )
+            )
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["ciPlatform"]["name"], "github_actions")
+            self.assertEqual(report["ciPlatform"]["workflow"], ".github/workflows/release-gate.yml")
+            self.assertEqual(report["ciPlatform"]["permissions"]["packages"], "write")
+            self.assertEqual(report["images"][0]["versionTag"], "ghcr.io/owner/ai-jsunpack/api:2026.06.26")
+
+            secret_refs = {secret["name"]: secret.get("githubActions") for secret in report["requiredSecrets"]}
+            self.assertEqual(secret_refs["GITHUB_TOKEN"], "${{ github.token }}")
+            self.assertEqual(secret_refs["AI_JSUNPACK_AUTH_SECRET"], "${{ secrets.AI_JSUNPACK_AUTH_SECRET }}")
+            self.assertIn("release-gate-scans", {item["name"] for item in report["archivePlan"]["githubActionsArtifacts"]})
+
+            scan_command = report["commandPlan"]["scan"][0]
+            self.assertIn("--output", scan_command)
+            self.assertIn(str(Path(temp_dir) / "scans" / "api-2026.06.26.scan.json"), scan_command)
+
+    def test_github_actions_workflow_invokes_release_gate_and_uploads_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("packages: write", workflow)
+        self.assertIn("--ci-platform github_actions", workflow)
+        self.assertIn("--execute", workflow)
+        self.assertIn("--push", workflow)
+        self.assertIn("release-gate-report", workflow)
+        self.assertIn("release-gate-sbom", workflow)
+        self.assertIn("release-gate-scans", workflow)
+        self.assertIn("compose-smoke-report", workflow)
+        self.assertIn("deployment-smoke-report", workflow)
 
     def test_report_contains_secret_names_without_secret_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
