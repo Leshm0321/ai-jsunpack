@@ -21,6 +21,7 @@ export interface CoreAnalysisResult extends HeadlessAnalysisResult {
   sourceMapAnalysis: SourceMapArtifactAnalysis;
   graphAnalysis: GraphAnalysis;
   transformAnalysis: TransformAnalysis;
+  moduleRecoveryAnalysis: ModuleRecoveryAnalysis;
 }
 
 export interface NormalizedInputPackage {
@@ -47,6 +48,11 @@ export interface ReconstructionPlan {
   astIndexes: AstIndex[];
   sourceMapAnalysis: SourceMapArtifactAnalysis;
   graphAnalysis: GraphAnalysis;
+  moduleRecoveryAnalysis: ModuleRecoveryAnalysis;
+  runtimeWrappers: RuntimeWrapperCandidate[];
+  moduleBoundaries: ModuleBoundaryCandidate[];
+  importExportCandidates: ImportExportCandidate[];
+  generatedModules: GeneratedModuleRecord[];
   scriptTransforms: ScriptTransformRecord[];
   transformLog: TransformLogEntry[];
   rollbackMap: RollbackMapEntry[];
@@ -55,6 +61,10 @@ export interface ReconstructionPlan {
     chunkGraphEdgeCount: number;
     resourceGraphEdgeCount: number;
     moduleCandidateCount: number;
+    runtimeWrapperCount: number;
+    moduleBoundaryCount: number;
+    importExportCandidateCount: number;
+    generatedModuleCount: number;
     transformCount: number;
     symbolCount: number;
   };
@@ -75,6 +85,10 @@ export interface GeneratedProjectManifest {
   generatedFiles: string[];
   copiedSourceFiles: string[];
   transformedSourceFiles: string[];
+  generatedModuleFiles: string[];
+  entrypointFiles: string[];
+  typeDefinitionFiles: string[];
+  runtimeShimFiles: string[];
   analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
@@ -104,10 +118,18 @@ export interface SourceMapBundleAnalysis {
   sourceMapFile: string | null;
   sourceRoot: string | null;
   sources: string[];
+  recoveredSources: SourceMapRecoveredSource[];
   sourceCandidates: string[];
   sourcesContentAvailable: string[];
   missingSourcesContent: string[];
   warnings: string[];
+}
+
+export interface SourceMapRecoveredSource {
+  source: string;
+  candidatePath: string;
+  contentHash: string;
+  content: string;
 }
 
 export interface SourceMapArtifactAnalysis {
@@ -149,6 +171,100 @@ export interface GraphAnalysis {
   };
 }
 
+export type EvidenceRiskLevel = "low" | "medium" | "high";
+
+export interface SourceRange {
+  start: number;
+  end: number;
+}
+
+export type RuntimeKind =
+  | "webpack"
+  | "vite_or_rollup"
+  | "rollup"
+  | "esbuild"
+  | "umd"
+  | "iife"
+  | "browserify"
+  | "systemjs"
+  | "parcel"
+  | "commonjs"
+  | "unknown";
+
+export interface RuntimeWrapperCandidate {
+  id: string;
+  filePath: string;
+  runtimeKind: RuntimeKind;
+  wrapperKind: string;
+  confidence: number;
+  riskLevel: EvidenceRiskLevel;
+  loc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  detail: string;
+  evidenceRefs: string[];
+}
+
+export interface ModuleBoundaryCandidate {
+  id: string;
+  filePath: string;
+  moduleId: string;
+  boundaryKind: "source_map_source" | "runtime_module_table" | "static_es_module" | "system_register" | "single_bundle";
+  runtimeKind: RuntimeKind;
+  confidence: number;
+  riskLevel: EvidenceRiskLevel;
+  sourcePath?: string;
+  loc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  detail: string;
+  evidenceRefs: string[];
+}
+
+export interface ImportExportCandidate {
+  id: string;
+  filePath: string;
+  candidateKind:
+    | "static_import"
+    | "dynamic_import"
+    | "re_export"
+    | "named_export"
+    | "default_export"
+    | "commonjs_export"
+    | "runtime_dependency"
+    | "external_module";
+  source?: string;
+  importedName?: string;
+  exportedName?: string;
+  runtimeKind?: RuntimeKind;
+  confidence: number;
+  riskLevel: EvidenceRiskLevel;
+  loc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  detail: string;
+  evidenceRefs: string[];
+}
+
+export interface GeneratedModuleRecord {
+  modulePath: string;
+  sourceKind: "source_map_sources_content" | "script_metadata" | "module_index";
+  sourceFilePath?: string;
+  sourceMapPath?: string;
+  boundaryId?: string;
+  sourceHash: string;
+  riskLevel: EvidenceRiskLevel;
+  evidenceRefs: string[];
+}
+
+export interface ModuleRecoveryAnalysis {
+  runtimeWrappers: RuntimeWrapperCandidate[];
+  moduleBoundaries: ModuleBoundaryCandidate[];
+  importExportCandidates: ImportExportCandidate[];
+  generatedModules: GeneratedModuleRecord[];
+  warnings: string[];
+}
+
 export interface ScriptTransformRecord {
   filePath: string;
   originalHash: string;
@@ -163,6 +279,11 @@ export interface TransformLogEntry {
   kind: string;
   status: "applied" | "skipped";
   originalLoc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  riskLevel?: EvidenceRiskLevel;
+  reversible?: boolean;
+  evidenceRefs?: string[];
   originalSnippet?: string;
   transformedSnippet?: string;
   detail?: string;
@@ -173,6 +294,11 @@ export interface RollbackMapEntry {
   kind: string;
   originalLoc?: string;
   transformedLoc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  riskLevel?: EvidenceRiskLevel;
+  reversible?: boolean;
+  evidenceRefs?: string[];
   originalSnippet?: string;
   transformedSnippet?: string;
 }
@@ -203,12 +329,30 @@ const GENERATED_PROJECT_FILES = [
   "src/analysis/ast-indexes.json",
   "src/analysis/source-map-analysis.json",
   "src/analysis/graph-analysis.json",
+  "src/analysis/runtime-wrappers.json",
+  "src/analysis/module-boundaries.json",
+  "src/analysis/import-export-candidates.json",
+  "src/analysis/generated-modules.json",
   "src/analysis/transform-log.json",
   "src/analysis/rollback-map.json",
+  "src/entrypoints/reconstruction-entry.ts",
+  "src/modules/module-index.ts",
+  "src/runtime-shims/browser-globals.ts",
+  "src/types/reconstruction.d.ts",
   "scripts/build.mjs",
   "scripts/typecheck.mjs"
 ];
 const LOCAL_SOURCE_SCHEMES = new Set(["webpack", "rollup", "vite", "parcel", "browserify", "ng", "esbuild", "turbopack", "snowpack"]);
+const SUPPORTED_RUNTIME_MARKERS: Array<{ runtimeKind: RuntimeKind; markers: string[] }> = [
+  { runtimeKind: "webpack", markers: ["__webpack_require__", "webpackJsonp", "webpackChunk"] },
+  { runtimeKind: "vite_or_rollup", markers: ["__vitePreload", "import.meta", "modulepreload"] },
+  { runtimeKind: "rollup", markers: ["Object.freeze", "__esModule"] },
+  { runtimeKind: "esbuild", markers: ["__defProp", "__export", "__toESM", "__commonJS"] },
+  { runtimeKind: "umd", markers: ["typeof exports", "define.amd", "factory"] },
+  { runtimeKind: "browserify", markers: ["function r(e,n,t)", "function o(i,f)", "browserify"] },
+  { runtimeKind: "systemjs", markers: ["System.register", "System.import"] },
+  { runtimeKind: "parcel", markers: ["parcelRequire", "newRequire"] }
+];
 
 export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<CoreAnalysisResult> {
   const normalized = config.rootDir ? undefined : await normalizeInputPackage(inputPath);
@@ -229,6 +373,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
     const detectedRuntime = detectBundleRuntime(inventory, astIndexes);
     const graphAnalysis = buildGraphAnalysis(inventory, astIndexes, sourceMapAnalysis);
     const transformAnalysis = await buildTransformAnalysis(rootDir, astIndexes);
+    const moduleRecoveryAnalysis = await buildModuleRecoveryAnalysis(rootDir, inventory, astIndexes, sourceMapAnalysis, detectedRuntime);
 
     return {
       inventory,
@@ -237,6 +382,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
       sourceMapAnalysis,
       graphAnalysis,
       transformAnalysis,
+      moduleRecoveryAnalysis,
       artifacts: []
     };
   } finally {
@@ -591,6 +737,398 @@ export function buildGraphAnalysis(
   };
 }
 
+async function buildModuleRecoveryAnalysis(
+  rootDir: string,
+  inventory: InputInventory,
+  astIndexes: AstIndex[],
+  sourceMapAnalysis: SourceMapArtifactAnalysis,
+  detectedRuntime: string[]
+): Promise<ModuleRecoveryAnalysis> {
+  const runtimeWrappers: RuntimeWrapperCandidate[] = [];
+  const moduleBoundaries: ModuleBoundaryCandidate[] = [];
+  const importExportCandidates: ImportExportCandidate[] = [];
+  const generatedModules: GeneratedModuleRecord[] = [];
+  const warnings: string[] = [];
+  const seenGeneratedModulePaths = new Set<string>();
+
+  for (const bundleAnalysis of sourceMapAnalysis.bundleAnalyses) {
+    for (const recoveredSource of bundleAnalysis.recoveredSources) {
+      const modulePath = uniqueGeneratedModulePath(
+        seenGeneratedModulePaths,
+        path.posix.join("src/modules/recovered", withTsExtension(recoveredSource.candidatePath))
+      );
+      const boundaryId = candidateId("source-map-boundary", bundleAnalysis.bundlePath, bundleAnalysis.sourceMapPath, recoveredSource.candidatePath);
+      moduleBoundaries.push({
+        id: boundaryId,
+        filePath: bundleAnalysis.bundlePath,
+        moduleId: recoveredSource.candidatePath,
+        boundaryKind: "source_map_source",
+        runtimeKind: runtimeKindFromDetected(detectedRuntime),
+        confidence: 0.95,
+        riskLevel: "low",
+        sourcePath: recoveredSource.candidatePath,
+        detail: `Recovered module candidate from sourcesContent in ${bundleAnalysis.sourceMapPath}.`,
+        evidenceRefs: [`source_map:${bundleAnalysis.sourceMapPath}`, `script:${bundleAnalysis.bundlePath}`]
+      });
+      generatedModules.push({
+        modulePath,
+        sourceKind: "source_map_sources_content",
+        sourceFilePath: recoveredSource.candidatePath,
+        sourceMapPath: bundleAnalysis.sourceMapPath,
+        boundaryId,
+        sourceHash: recoveredSource.contentHash,
+        riskLevel: "low",
+        evidenceRefs: [`source_map:${bundleAnalysis.sourceMapPath}`, `script:${bundleAnalysis.bundlePath}`]
+      });
+    }
+  }
+
+  for (const astIndex of astIndexes) {
+    const scriptPath = path.join(rootDir, astIndex.filePath);
+    let source: string;
+    try {
+      source = await fs.readFile(scriptPath, "utf8");
+    } catch (error) {
+      warnings.push(`Failed to read script ${astIndex.filePath} for module recovery: ${error instanceof Error ? error.message : "Unknown error"}`);
+      continue;
+    }
+
+    let ast: ReturnType<typeof parse>;
+    try {
+      ast = parse(source, {
+        sourceType: "unambiguous",
+        plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+        errorRecovery: true,
+        tokens: true
+      });
+    } catch (error) {
+      warnings.push(`Failed to parse script ${astIndex.filePath} for module recovery: ${error instanceof Error ? error.message : "Unknown Babel parse error"}`);
+      continue;
+    }
+
+    const runtimeKinds = detectRuntimeKindsForSource(source, astIndex, detectedRuntime);
+    runtimeWrappers.push(...collectRuntimeWrapperCandidates(astIndex.filePath, source, ast, runtimeKinds));
+    moduleBoundaries.push(...collectRuntimeModuleBoundaryCandidates(astIndex.filePath, source, ast, runtimeKinds, inventory.isSingleBundle));
+    importExportCandidates.push(...collectImportExportCandidates(astIndex.filePath, ast, runtimeKinds));
+
+    const scriptModulePath = uniqueGeneratedModulePath(
+      seenGeneratedModulePaths,
+      path.posix.join("src/modules/scripts", `${sanitizeGeneratedModulePath(astIndex.filePath)}.module.ts`)
+    );
+    generatedModules.push({
+      modulePath: scriptModulePath,
+      sourceKind: "script_metadata",
+      sourceFilePath: astIndex.filePath,
+      sourceHash: astIndex.sourceHash,
+      riskLevel: runtimeKinds.has("unknown") ? "medium" : "low",
+      evidenceRefs: [`script:${astIndex.filePath}`, `ast_index:${astIndex.filePath}`]
+    });
+  }
+
+  if (runtimeWrappers.length === 0 && astIndexes.length > 0) {
+    warnings.push("No explicit bundle runtime wrapper was detected; recovery is limited to source maps, ESM syntax, and script metadata.");
+  }
+  if (moduleBoundaries.length === 0 && astIndexes.length > 0) {
+    warnings.push("No module boundary candidates were detected; generated modules are metadata-only.");
+  }
+
+  return {
+    runtimeWrappers: sortRuntimeWrappers(runtimeWrappers),
+    moduleBoundaries: sortModuleBoundaries(moduleBoundaries),
+    importExportCandidates: sortImportExportCandidates(importExportCandidates),
+    generatedModules: generatedModules.sort((left, right) => left.modulePath.localeCompare(right.modulePath)),
+    warnings
+  };
+}
+
+function detectRuntimeKindsForSource(source: string, astIndex: AstIndex, detectedRuntime: string[]): Set<RuntimeKind> {
+  const runtimeKinds = new Set<RuntimeKind>();
+  for (const markerGroup of SUPPORTED_RUNTIME_MARKERS) {
+    if (markerGroup.markers.some((marker) => source.includes(marker))) {
+      runtimeKinds.add(markerGroup.runtimeKind);
+    }
+  }
+  if (astIndex.imports.length > 0 || astIndex.exports.length > 0) {
+    runtimeKinds.add("vite_or_rollup");
+  }
+  if (/\bmodule\.exports\b|\bexports\.[A-Za-z_$]/.test(source)) {
+    runtimeKinds.add("commonjs");
+  }
+  if (detectedRuntime.includes("single_bundle_best_effort") && runtimeKinds.size === 0) {
+    runtimeKinds.add("iife");
+  }
+  if (runtimeKinds.size === 0) {
+    runtimeKinds.add("unknown");
+  }
+  return runtimeKinds;
+}
+
+function collectRuntimeWrapperCandidates(
+  filePath: string,
+  source: string,
+  ast: ReturnType<typeof parse>,
+  runtimeKinds: Set<RuntimeKind>
+): RuntimeWrapperCandidate[] {
+  const candidates: RuntimeWrapperCandidate[] = [];
+  const programRuntimeKind = preferredRuntimeKind(runtimeKinds);
+  const firstStatement = ast.program.body[0];
+  if (firstStatement?.type === "ExpressionStatement" && firstStatement.expression.type === "CallExpression") {
+    candidates.push({
+      id: candidateId("runtime-wrapper", filePath, "program-call", firstStatement.start ?? 0),
+      filePath,
+      runtimeKind: programRuntimeKind,
+      wrapperKind: isIifeCallExpression(firstStatement.expression) ? "iife_bootstrap" : "call_expression_bootstrap",
+      confidence: programRuntimeKind === "unknown" ? 0.55 : 0.8,
+      riskLevel: programRuntimeKind === "unknown" ? "medium" : "low",
+      loc: formatNodeLoc(firstStatement),
+      sourceRange: formatSourceRange(firstStatement),
+      astPath: "Program.body[0]",
+      detail: "Top-level call expression marks a bundle bootstrap or IIFE wrapper candidate.",
+      evidenceRefs: [`script:${filePath}`]
+    });
+  }
+  if (ast.program.body.length === 1 && ast.program.body[0]?.type === "FunctionDeclaration") {
+    candidates.push({
+      id: candidateId("runtime-wrapper", filePath, "single-function", ast.program.body[0].start ?? 0),
+      filePath,
+      runtimeKind: programRuntimeKind,
+      wrapperKind: "single_function_wrapper",
+      confidence: 0.65,
+      riskLevel: "medium",
+      loc: formatNodeLoc(ast.program.body[0]),
+      sourceRange: formatSourceRange(ast.program.body[0]),
+      astPath: "Program.body[0]",
+      detail: "Single top-level function marks a deferred wrapper candidate.",
+      evidenceRefs: [`script:${filePath}`]
+    });
+  }
+  if (source.includes("typeof exports") && source.includes("define.amd")) {
+    candidates.push(markerRuntimeWrapper(filePath, "umd", "umd_factory_wrapper", source, "CommonJS/AMD/global branches indicate a UMD factory wrapper."));
+  }
+  if (source.includes("__webpack_require__")) {
+    candidates.push(markerRuntimeWrapper(filePath, "webpack", "webpack_bootstrap", source, "Webpack runtime marker __webpack_require__ indicates a bootstrap wrapper."));
+  }
+  if (source.includes("System.register")) {
+    candidates.push(markerRuntimeWrapper(filePath, "systemjs", "system_register_wrapper", source, "System.register call indicates a SystemJS module wrapper."));
+  }
+  return dedupeById(candidates);
+}
+
+function collectRuntimeModuleBoundaryCandidates(
+  filePath: string,
+  source: string,
+  ast: ReturnType<typeof parse>,
+  runtimeKinds: Set<RuntimeKind>,
+  isSingleBundle: boolean
+): ModuleBoundaryCandidate[] {
+  const candidates: ModuleBoundaryCandidate[] = [];
+  const traverseAst = getTraverse();
+  const primaryRuntime = preferredRuntimeKind(runtimeKinds);
+
+  traverseAst(ast, {
+    ObjectExpression(path: NodePath<t.ObjectExpression>) {
+      if (!runtimeKinds.has("webpack") && !runtimeKinds.has("browserify") && !runtimeKinds.has("parcel")) {
+        return;
+      }
+      const moduleProperties = path.node.properties.filter((property) => {
+        if (!t.isObjectProperty(property)) {
+          return false;
+        }
+        return t.isFunctionExpression(property.value) || t.isArrowFunctionExpression(property.value);
+      });
+      if (moduleProperties.length < 2) {
+        return;
+      }
+      for (const property of moduleProperties) {
+        if (!t.isObjectProperty(property)) {
+          continue;
+        }
+        const moduleId = propertyKeyName(property.key);
+        if (!moduleId) {
+          continue;
+        }
+        candidates.push({
+          id: candidateId("runtime-module-boundary", filePath, moduleId, property.start ?? 0),
+          filePath,
+          moduleId,
+          boundaryKind: "runtime_module_table",
+          runtimeKind: primaryRuntime,
+          confidence: 0.82,
+          riskLevel: "medium",
+          loc: formatNodeLoc(property),
+          sourceRange: formatSourceRange(property),
+          astPath: formatAstPath(path),
+          detail: `Function-valued module table property ${moduleId} marks a bundled module boundary candidate.`,
+          evidenceRefs: [`script:${filePath}`, `runtime:${primaryRuntime}`]
+        });
+      }
+    },
+    ArrayExpression(path: NodePath<t.ArrayExpression>) {
+      if (!runtimeKinds.has("webpack") && !runtimeKinds.has("browserify")) {
+        return;
+      }
+      const moduleElements = path.node.elements.filter((element) => t.isFunctionExpression(element) || t.isArrowFunctionExpression(element));
+      if (moduleElements.length < 2) {
+        return;
+      }
+      path.node.elements.forEach((element, index) => {
+        if (!t.isFunctionExpression(element) && !t.isArrowFunctionExpression(element)) {
+          return;
+        }
+        candidates.push({
+          id: candidateId("runtime-module-boundary", filePath, String(index), element.start ?? index),
+          filePath,
+          moduleId: String(index),
+          boundaryKind: "runtime_module_table",
+          runtimeKind: primaryRuntime,
+          confidence: 0.78,
+          riskLevel: "medium",
+          loc: formatNodeLoc(element),
+          sourceRange: formatSourceRange(element),
+          astPath: formatAstPath(path),
+          detail: `Function-valued module table array element ${index} marks a bundled module boundary candidate.`,
+          evidenceRefs: [`script:${filePath}`, `runtime:${primaryRuntime}`]
+        });
+      });
+    },
+    ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, `Static import ${path.node.source.value} marks this script as an ESM module candidate.`));
+    },
+    ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "Named export marks this script as an ESM module candidate."));
+    },
+    ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "Default export marks this script as an ESM module candidate."));
+    },
+    CallExpression(path: NodePath<t.CallExpression>) {
+      if (t.isMemberExpression(path.node.callee) && memberExpressionName(path.node.callee) === "System.register") {
+        candidates.push({
+          id: candidateId("system-register-boundary", filePath, path.node.start ?? 0),
+          filePath,
+          moduleId: `${filePath}:system-register`,
+          boundaryKind: "system_register",
+          runtimeKind: "systemjs",
+          confidence: 0.85,
+          riskLevel: "medium",
+          loc: formatNodeLoc(path.node),
+          sourceRange: formatSourceRange(path.node),
+          astPath: formatAstPath(path),
+          detail: "System.register call marks a SystemJS module boundary candidate.",
+          evidenceRefs: [`script:${filePath}`, "runtime:systemjs"]
+        });
+      }
+    }
+  });
+
+  if (isSingleBundle && candidates.length === 0 && source.trim().length > 0) {
+    candidates.push({
+      id: candidateId("single-bundle-boundary", filePath),
+      filePath,
+      moduleId: filePath,
+      boundaryKind: "single_bundle",
+      runtimeKind: primaryRuntime,
+      confidence: 0.5,
+      riskLevel: "medium",
+      detail: "Single JavaScript bundle without an HTML entry is preserved as one best-effort module boundary.",
+      evidenceRefs: [`script:${filePath}`]
+    });
+  }
+
+  return dedupeById(candidates);
+}
+
+function collectImportExportCandidates(
+  filePath: string,
+  ast: ReturnType<typeof parse>,
+  runtimeKinds: Set<RuntimeKind>
+): ImportExportCandidate[] {
+  const candidates: ImportExportCandidate[] = [];
+  const primaryRuntime = preferredRuntimeKind(runtimeKinds);
+  const traverseAst = getTraverse();
+
+  traverseAst(ast, {
+    ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
+      if (path.node.specifiers.length === 0) {
+        candidates.push(importExportCandidate(filePath, "static_import", path, {
+          source: path.node.source.value,
+          runtimeKind: primaryRuntime,
+          detail: `Side-effect static import from ${path.node.source.value}.`
+        }));
+        return;
+      }
+      for (const specifier of path.node.specifiers) {
+        candidates.push(importExportCandidate(filePath, "static_import", path, {
+          source: path.node.source.value,
+          importedName: importSpecifierName(specifier),
+          runtimeKind: primaryRuntime,
+          detail: `Static import candidate from ${path.node.source.value}.`
+        }));
+      }
+    },
+    ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
+      const candidateKind = path.node.source?.value ? "re_export" : "named_export";
+      if (path.node.specifiers.length === 0 && path.node.declaration) {
+        candidates.push(importExportCandidate(filePath, candidateKind, path, {
+          source: path.node.source?.value,
+          exportedName: declarationExportName(path.node.declaration),
+          runtimeKind: primaryRuntime,
+          detail: "Named export declaration candidate."
+        }));
+        return;
+      }
+      for (const specifier of path.node.specifiers) {
+        candidates.push(importExportCandidate(filePath, candidateKind, path, {
+          source: path.node.source?.value,
+          exportedName: exportSpecifierName(specifier),
+          runtimeKind: primaryRuntime,
+          detail: path.node.source?.value ? `Re-export candidate from ${path.node.source.value}.` : "Named export specifier candidate."
+        }));
+      }
+    },
+    ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
+      candidates.push(importExportCandidate(filePath, "default_export", path, {
+        exportedName: "default",
+        runtimeKind: primaryRuntime,
+        detail: "Default export candidate."
+      }));
+    },
+    CallExpression(path: NodePath<t.CallExpression>) {
+      if (path.node.callee.type === "Import" && t.isStringLiteral(path.node.arguments[0])) {
+        candidates.push(importExportCandidate(filePath, "dynamic_import", path, {
+          source: path.node.arguments[0].value,
+          runtimeKind: primaryRuntime,
+          detail: `Dynamic import candidate from ${path.node.arguments[0].value}.`
+        }));
+      }
+      if (t.isIdentifier(path.node.callee, { name: "require" }) && t.isStringLiteral(path.node.arguments[0])) {
+        candidates.push(importExportCandidate(filePath, "runtime_dependency", path, {
+          source: path.node.arguments[0].value,
+          runtimeKind: "commonjs",
+          detail: `CommonJS require dependency candidate from ${path.node.arguments[0].value}.`
+        }));
+      }
+      if (t.isIdentifier(path.node.callee, { name: "__webpack_require__" }) && path.node.arguments.length > 0) {
+        candidates.push(importExportCandidate(filePath, "runtime_dependency", path, {
+          source: codeForNode(path.node.arguments[0] as t.Node),
+          runtimeKind: "webpack",
+          detail: "Webpack runtime dependency candidate."
+        }));
+      }
+    },
+    AssignmentExpression(path: NodePath<t.AssignmentExpression>) {
+      if (isCommonJsExportTarget(path.node.left)) {
+        candidates.push(importExportCandidate(filePath, "commonjs_export", path, {
+          exportedName: commonJsExportName(path.node.left),
+          runtimeKind: "commonjs",
+          detail: "CommonJS export assignment candidate."
+        }));
+      }
+    }
+  });
+
+  return dedupeById(candidates);
+}
+
 async function buildTransformAnalysis(rootDir: string, astIndexes: AstIndex[]): Promise<TransformAnalysis> {
   const scriptTransforms: ScriptTransformRecord[] = [];
   const transformLog: TransformLogEntry[] = [];
@@ -801,6 +1339,11 @@ function markProgramWrappers(
       kind: "wrapper_mark",
       status: "applied",
       originalLoc: formatNodeLoc(firstStatement),
+      sourceRange: formatSourceRange(firstStatement),
+      astPath: "Program.body[0]",
+      riskLevel: "low",
+      reversible: true,
+      evidenceRefs: [`script:${filePath}`],
       detail: "Marked call-expression wrapper for later reconstruction."
     });
   }
@@ -811,6 +1354,11 @@ function markProgramWrappers(
       kind: "wrapper_mark",
       status: "applied",
       originalLoc: formatNodeLoc(body[0]),
+      sourceRange: formatSourceRange(body[0]),
+      astPath: "Program.body[0]",
+      riskLevel: "medium",
+      reversible: true,
+      evidenceRefs: [`script:${filePath}`],
       detail: "Marked single-function wrapper for later reconstruction."
     });
   }
@@ -870,6 +1418,253 @@ function literalValueForExpression(node: t.Expression): string | number | boolea
   return undefined;
 }
 
+function runtimeKindFromDetected(detectedRuntime: string[]): RuntimeKind {
+  if (detectedRuntime.includes("webpack")) {
+    return "webpack";
+  }
+  if (detectedRuntime.includes("vite_or_rollup")) {
+    return "vite_or_rollup";
+  }
+  if (detectedRuntime.includes("single_bundle_best_effort")) {
+    return "iife";
+  }
+  return "unknown";
+}
+
+function preferredRuntimeKind(runtimeKinds: Set<RuntimeKind>): RuntimeKind {
+  const preference: RuntimeKind[] = ["webpack", "vite_or_rollup", "rollup", "esbuild", "umd", "iife", "browserify", "systemjs", "parcel", "commonjs"];
+  return preference.find((runtimeKind) => runtimeKinds.has(runtimeKind)) ?? "unknown";
+}
+
+function markerRuntimeWrapper(
+  filePath: string,
+  runtimeKind: RuntimeKind,
+  wrapperKind: string,
+  source: string,
+  detail: string
+): RuntimeWrapperCandidate {
+  const markerIndex = markerIndexForRuntime(source, runtimeKind);
+  return {
+    id: candidateId("runtime-wrapper", filePath, runtimeKind, wrapperKind),
+    filePath,
+    runtimeKind,
+    wrapperKind,
+    confidence: 0.78,
+    riskLevel: "low",
+    sourceRange: markerIndex >= 0 ? { start: markerIndex, end: markerIndex + runtimeKind.length } : undefined,
+    detail,
+    evidenceRefs: [`script:${filePath}`, `runtime:${runtimeKind}`]
+  };
+}
+
+function markerIndexForRuntime(source: string, runtimeKind: RuntimeKind): number {
+  const markers = SUPPORTED_RUNTIME_MARKERS.find((entry) => entry.runtimeKind === runtimeKind)?.markers ?? [];
+  for (const marker of markers) {
+    const index = source.indexOf(marker);
+    if (index >= 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function staticModuleBoundary(
+  filePath: string,
+  runtimeKind: RuntimeKind,
+  nodePath: NodePath<t.ImportDeclaration | t.ExportNamedDeclaration | t.ExportDefaultDeclaration>,
+  detail: string
+): ModuleBoundaryCandidate {
+  return {
+    id: candidateId("static-module-boundary", filePath, nodePath.node.type, nodePath.node.start ?? 0),
+    filePath,
+    moduleId: filePath,
+    boundaryKind: "static_es_module",
+    runtimeKind,
+    confidence: 0.9,
+    riskLevel: "low",
+    sourcePath: filePath,
+    loc: formatNodeLoc(nodePath.node),
+    sourceRange: formatSourceRange(nodePath.node),
+    astPath: formatAstPath(nodePath),
+    detail,
+    evidenceRefs: [`script:${filePath}`, "syntax:esm"]
+  };
+}
+
+function importExportCandidate(
+  filePath: string,
+  candidateKind: ImportExportCandidate["candidateKind"],
+  nodePath: NodePath,
+  options: {
+    source?: string;
+    importedName?: string;
+    exportedName?: string;
+    runtimeKind?: RuntimeKind;
+    detail: string;
+  }
+): ImportExportCandidate {
+  const source = options.source;
+  return {
+    id: candidateId("import-export", filePath, candidateKind, source ?? "", options.importedName ?? "", options.exportedName ?? "", nodePath.node.start ?? 0),
+    filePath,
+    candidateKind,
+    source,
+    importedName: options.importedName,
+    exportedName: options.exportedName,
+    runtimeKind: options.runtimeKind,
+    confidence: candidateKind === "runtime_dependency" || candidateKind === "commonjs_export" ? 0.75 : 0.92,
+    riskLevel: candidateKind === "runtime_dependency" || candidateKind === "commonjs_export" ? "medium" : "low",
+    loc: formatNodeLoc(nodePath.node),
+    sourceRange: formatSourceRange(nodePath.node),
+    astPath: formatAstPath(nodePath),
+    detail: options.detail,
+    evidenceRefs: [`script:${filePath}`, `syntax:${candidateKind}`]
+  };
+}
+
+function importSpecifierName(specifier: t.ImportDeclaration["specifiers"][number]): string {
+  if (t.isImportDefaultSpecifier(specifier)) {
+    return "default";
+  }
+  if (t.isImportNamespaceSpecifier(specifier)) {
+    return "*";
+  }
+  return specifier.imported.type === "Identifier" ? specifier.imported.name : specifier.imported.value;
+}
+
+function exportSpecifierName(specifier: t.ExportNamedDeclaration["specifiers"][number]): string {
+  if (t.isExportSpecifier(specifier)) {
+    return specifier.exported.type === "Identifier" ? specifier.exported.name : specifier.exported.value;
+  }
+  if (t.isExportNamespaceSpecifier(specifier)) {
+    return specifier.exported.name;
+  }
+  return "default";
+}
+
+function declarationExportName(declaration: t.Declaration): string | undefined {
+  if ((t.isFunctionDeclaration(declaration) || t.isClassDeclaration(declaration)) && declaration.id?.name) {
+    return declaration.id.name;
+  }
+  if (t.isVariableDeclaration(declaration)) {
+    const first = declaration.declarations[0];
+    return t.isIdentifier(first?.id) ? first.id.name : undefined;
+  }
+  return undefined;
+}
+
+function propertyKeyName(key: t.ObjectProperty["key"]): string | null {
+  if (t.isIdentifier(key)) {
+    return key.name;
+  }
+  if (t.isStringLiteral(key) || t.isNumericLiteral(key)) {
+    return String(key.value);
+  }
+  return null;
+}
+
+function memberExpressionName(node: t.MemberExpression): string {
+  const objectName = t.isIdentifier(node.object) ? node.object.name : t.isMemberExpression(node.object) ? memberExpressionName(node.object) : codeForNode(node.object);
+  const propertyName = t.isIdentifier(node.property) ? node.property.name : t.isStringLiteral(node.property) ? node.property.value : codeForNode(node.property);
+  return `${objectName}.${propertyName}`;
+}
+
+function isCommonJsExportTarget(node: t.LVal | t.Expression): boolean {
+  if (!t.isMemberExpression(node)) {
+    return false;
+  }
+  const name = memberExpressionName(node);
+  return name === "module.exports" || name.startsWith("exports.") || name.startsWith("module.exports.");
+}
+
+function commonJsExportName(node: t.LVal | t.Expression): string | undefined {
+  if (!t.isMemberExpression(node)) {
+    return undefined;
+  }
+  const name = memberExpressionName(node);
+  if (name === "module.exports") {
+    return "default";
+  }
+  return name.replace(/^module\.exports\./, "").replace(/^exports\./, "");
+}
+
+function isIifeCallExpression(node: t.CallExpression): boolean {
+  return t.isFunctionExpression(node.callee) || t.isArrowFunctionExpression(node.callee);
+}
+
+function formatSourceRange(node: t.Node): SourceRange | undefined {
+  return typeof node.start === "number" && typeof node.end === "number" ? { start: node.start, end: node.end } : undefined;
+}
+
+function formatAstPath(path: NodePath): string {
+  const segments: string[] = [];
+  let current: NodePath | null = path;
+  while (current) {
+    const key = typeof current.key === "number" ? `[${current.key}]` : current.key ? `.${String(current.key)}` : "";
+    segments.unshift(`${current.node.type}${key}`);
+    current = current.parentPath;
+  }
+  return segments.join("/");
+}
+
+function candidateId(...parts: Array<string | number>): string {
+  return parts
+    .map((part) => String(part).replace(/[^A-Za-z0-9_.:-]+/g, "_"))
+    .join(":")
+    .replace(/_+/g, "_");
+}
+
+function dedupeById<T extends { id: string }>(records: T[]): T[] {
+  const deduped = new Map<string, T>();
+  for (const record of records) {
+    deduped.set(record.id, record);
+  }
+  return [...deduped.values()];
+}
+
+function sortRuntimeWrappers(records: RuntimeWrapperCandidate[]): RuntimeWrapperCandidate[] {
+  return dedupeById(records).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function sortModuleBoundaries(records: ModuleBoundaryCandidate[]): ModuleBoundaryCandidate[] {
+  return dedupeById(records).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function sortImportExportCandidates(records: ImportExportCandidate[]): ImportExportCandidate[] {
+  return dedupeById(records).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function sanitizeGeneratedModulePath(candidatePath: string): string {
+  const normalized = candidatePath.replace(/\\/g, "/").replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/*/, "").replace(/^\/+/, "");
+  const parts = normalized.split("/").filter((part) => part && part !== "." && part !== "..");
+  const sanitizedParts = parts.map((part) => part.replace(/[^A-Za-z0-9._-]/g, "_"));
+  return sanitizedParts.join("/") || "module";
+}
+
+function withTsExtension(candidatePath: string): string {
+  const extension = path.posix.extname(candidatePath);
+  if (extension === ".ts" || extension === ".tsx") {
+    return candidatePath;
+  }
+  if ([".js", ".mjs", ".cjs", ".jsx"].includes(extension)) {
+    return `${candidatePath.slice(0, -extension.length)}.ts`;
+  }
+  return `${candidatePath}.ts`;
+}
+
+function uniqueGeneratedModulePath(seen: Set<string>, desiredPath: string): string {
+  let candidate = desiredPath;
+  const extension = path.posix.extname(desiredPath);
+  const stem = extension ? desiredPath.slice(0, -extension.length) : desiredPath;
+  let index = 2;
+  while (seen.has(candidate)) {
+    candidate = `${stem}-${index}${extension}`;
+    index += 1;
+  }
+  seen.add(candidate);
+  return candidate;
+}
+
 function logAppliedTransform(
   filePath: string,
   kind: string,
@@ -884,6 +1679,9 @@ function logAppliedTransform(
     kind,
     status: "applied",
     originalLoc,
+    riskLevel: "low",
+    reversible: true,
+    evidenceRefs: [`script:${filePath}`],
     originalSnippet,
     transformedSnippet
   });
@@ -892,6 +1690,9 @@ function logAppliedTransform(
     kind,
     originalLoc,
     transformedLoc: originalLoc,
+    riskLevel: "low",
+    reversible: true,
+    evidenceRefs: [`script:${filePath}`],
     originalSnippet,
     transformedSnippet
   });
@@ -932,6 +1733,11 @@ export function planReconstruction(
     astIndexes: analysis.astIndexes,
     sourceMapAnalysis: analysis.sourceMapAnalysis,
     graphAnalysis: analysis.graphAnalysis,
+    moduleRecoveryAnalysis: analysis.moduleRecoveryAnalysis,
+    runtimeWrappers: analysis.moduleRecoveryAnalysis.runtimeWrappers,
+    moduleBoundaries: analysis.moduleRecoveryAnalysis.moduleBoundaries,
+    importExportCandidates: analysis.moduleRecoveryAnalysis.importExportCandidates,
+    generatedModules: analysis.moduleRecoveryAnalysis.generatedModules,
     scriptTransforms: analysis.transformAnalysis.scriptTransforms,
     transformLog: analysis.transformAnalysis.transformLog,
     rollbackMap: analysis.transformAnalysis.rollbackMap,
@@ -940,6 +1746,10 @@ export function planReconstruction(
       chunkGraphEdgeCount: analysis.graphAnalysis.chunkGraph.edges.length,
       resourceGraphEdgeCount: analysis.graphAnalysis.resourceGraph.edges.length,
       moduleCandidateCount: analysis.graphAnalysis.moduleCandidateGraph.nodes.filter((node) => node.kind === "source_candidate").length,
+      runtimeWrapperCount: analysis.moduleRecoveryAnalysis.runtimeWrappers.length,
+      moduleBoundaryCount: analysis.moduleRecoveryAnalysis.moduleBoundaries.length,
+      importExportCandidateCount: analysis.moduleRecoveryAnalysis.importExportCandidates.length,
+      generatedModuleCount: analysis.moduleRecoveryAnalysis.generatedModules.length,
       transformCount: analysis.transformAnalysis.transformLog.filter((entry) => entry.status === "applied" && entry.kind !== "wrapper_mark").length,
       symbolCount: analysis.astIndexes.reduce((count, index) => count + index.symbols.length, 0)
     },
@@ -955,7 +1765,13 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
     await fs.rm(projectRoot, { recursive: true, force: true });
     await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "src", "analysis"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "entrypoints"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "modules"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "modules", "scripts"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "modules", "recovered"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "runtime-shims"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "src", "transformed"), { recursive: true });
+    await fs.mkdir(path.join(projectRoot, "src", "types"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(projectRoot, "public", "original"), { recursive: true });
 
@@ -981,9 +1797,17 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       "src/analysis/ast-indexes.json",
       "src/analysis/source-map-analysis.json",
       "src/analysis/graph-analysis.json",
+      "src/analysis/runtime-wrappers.json",
+      "src/analysis/module-boundaries.json",
+      "src/analysis/import-export-candidates.json",
+      "src/analysis/generated-modules.json",
       "src/analysis/transform-log.json",
       "src/analysis/rollback-map.json"
     ];
+    const generatedModuleFiles = await writeGeneratedModules(projectRoot, plan);
+    const entrypointFiles = ["src/entrypoints/reconstruction-entry.ts"];
+    const typeDefinitionFiles = ["src/types/reconstruction.d.ts"];
+    const runtimeShimFiles = ["src/runtime-shims/browser-globals.ts"];
 
     const manifest: GeneratedProjectManifest = {
       kind: "generated_project",
@@ -993,6 +1817,10 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       generatedFiles: GENERATED_PROJECT_FILES,
       copiedSourceFiles,
       transformedSourceFiles,
+      generatedModuleFiles,
+      entrypointFiles,
+      typeDefinitionFiles,
+      runtimeShimFiles,
       analysisFiles,
       sourceRoot: "public/original",
       limitations: plan.limitations
@@ -1040,6 +1868,28 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       jobId: plan.jobId,
       graphAnalysis: plan.graphAnalysis
     });
+    await writeJson(path.join(projectRoot, "src", "analysis", "runtime-wrappers.json"), {
+      kind: "runtime_wrappers",
+      jobId: plan.jobId,
+      runtimeWrappers: plan.runtimeWrappers,
+      warnings: plan.moduleRecoveryAnalysis.warnings
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "module-boundaries.json"), {
+      kind: "module_boundaries",
+      jobId: plan.jobId,
+      moduleBoundaries: plan.moduleBoundaries,
+      warnings: plan.moduleRecoveryAnalysis.warnings
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "import-export-candidates.json"), {
+      kind: "import_export_candidates",
+      jobId: plan.jobId,
+      importExportCandidates: plan.importExportCandidates
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "generated-modules.json"), {
+      kind: "generated_modules",
+      jobId: plan.jobId,
+      generatedModules: plan.generatedModules
+    });
     await writeJson(path.join(projectRoot, "src", "analysis", "transform-log.json"), {
       kind: "transform_log",
       jobId: plan.jobId,
@@ -1052,6 +1902,9 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
     });
     await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
     await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
+    await fs.writeFile(path.join(projectRoot, "src", "entrypoints", "reconstruction-entry.ts"), reconstructionEntrySource(plan, manifest), "utf8");
+    await fs.writeFile(path.join(projectRoot, "src", "runtime-shims", "browser-globals.ts"), runtimeShimSource(), "utf8");
+    await fs.writeFile(path.join(projectRoot, "src", "types", "reconstruction.d.ts"), reconstructionTypesSource(), "utf8");
     await fs.writeFile(path.join(projectRoot, "index.html"), indexHtmlSource(plan, manifest), "utf8");
     await fs.writeFile(path.join(projectRoot, "scripts", "build.mjs"), buildScriptSource(), "utf8");
     await fs.writeFile(path.join(projectRoot, "scripts", "typecheck.mjs"), typecheckScriptSource(), "utf8");
@@ -1094,16 +1947,26 @@ async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Pr
       const sourceCandidatesForBundle = resolveSourceCandidates(bundlePath, sourceMapPath, sources, sourceRoot);
       const availableSourcesContent: string[] = [];
       const missingSourcesContent: string[] = [];
+      const recoveredSources: SourceMapRecoveredSource[] = [];
 
-      for (const source of rawSources) {
+      rawSources.forEach((source, index) => {
         const content = sourceContentFor(traceMap, source);
         const normalizedSource = normalizeSourceMapCandidate(source) ?? source;
         if (content === null) {
           missingSourcesContent.push(normalizedSource);
-          continue;
+          return;
         }
         availableSourcesContent.push(normalizedSource);
-      }
+        const resolvedCandidate = sourceCandidatesForBundle.find((candidate) => candidate.endsWith(normalizedSource.replace(/^\.\.\//, "")))
+          ?? sourceCandidatesForBundle[index]
+          ?? normalizedSource;
+        recoveredSources.push({
+          source: normalizedSource,
+          candidatePath: sanitizeGeneratedModulePath(resolvedCandidate),
+          contentHash: sha256(Buffer.from(content)),
+          content
+        });
+      });
 
       for (const candidate of sourceCandidatesForBundle) {
         sourceCandidates.add(candidate);
@@ -1123,6 +1986,7 @@ async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Pr
         sourceMapFile: normalizeSourceMapFile(traceMap.file),
         sourceRoot,
         sources,
+        recoveredSources,
         sourceCandidates: sourceCandidatesForBundle,
         sourcesContentAvailable: availableSourcesContent,
         missingSourcesContent,
@@ -1237,6 +2101,77 @@ function normalizeSourceMapCandidate(candidate: string | null | undefined): stri
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function writeGeneratedModules(projectRoot: string, plan: ReconstructionPlan): Promise<string[]> {
+  const writtenFiles: string[] = [];
+  const recoveredContentByPath = new Map<string, SourceMapRecoveredSource>();
+  for (const bundleAnalysis of plan.sourceMapAnalysis.bundleAnalyses) {
+    for (const recoveredSource of bundleAnalysis.recoveredSources) {
+      recoveredContentByPath.set(recoveredSource.candidatePath, recoveredSource);
+    }
+  }
+
+  for (const generatedModule of plan.generatedModules) {
+    const safePath = safeGeneratedProjectRelativePath(generatedModule.modulePath);
+    const targetPath = path.join(projectRoot, safePath);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const recoveredSource = generatedModule.sourceFilePath ? recoveredContentByPath.get(generatedModule.sourceFilePath) : undefined;
+    const sourceText = recoveredSource
+      ? recoveredModuleSource(generatedModule, recoveredSource)
+      : metadataModuleSource(generatedModule, plan);
+    await fs.writeFile(targetPath, sourceText, "utf8");
+    writtenFiles.push(toPosix(safePath));
+  }
+
+  const indexPath = "src/modules/module-index.ts";
+  await fs.writeFile(path.join(projectRoot, indexPath), moduleIndexSource(plan.generatedModules), "utf8");
+  writtenFiles.push(indexPath);
+  return [...new Set(writtenFiles)].sort();
+}
+
+function recoveredModuleSource(generatedModule: GeneratedModuleRecord, recoveredSource: SourceMapRecoveredSource): string {
+  return `// Recovered from source map sourcesContent.
+// Source: ${recoveredSource.source}
+// Hash: ${recoveredSource.contentHash}
+
+${recoveredSource.content.trimEnd()}
+
+export const __reconstructionModuleMeta = ${JSON.stringify(generatedModule, null, 2)} as const;
+`;
+}
+
+function metadataModuleSource(generatedModule: GeneratedModuleRecord, plan: ReconstructionPlan): string {
+  const boundary = generatedModule.boundaryId ? plan.moduleBoundaries.find((candidate) => candidate.id === generatedModule.boundaryId) : undefined;
+  return `import type { GeneratedModuleMeta, ModuleBoundaryMeta } from "../types/reconstruction";
+
+export const moduleMeta: GeneratedModuleMeta = ${JSON.stringify(generatedModule, null, 2)};
+
+export const boundaryMeta: ModuleBoundaryMeta | null = ${JSON.stringify(boundary ?? null, null, 2)};
+
+export function describeModule(): string {
+  return moduleMeta.sourceFilePath ?? moduleMeta.modulePath;
+}
+`;
+}
+
+function moduleIndexSource(generatedModules: GeneratedModuleRecord[]): string {
+  return `import type { GeneratedModuleMeta } from "../types/reconstruction";
+
+export const generatedModules: GeneratedModuleMeta[] = ${JSON.stringify(generatedModules, null, 2)};
+
+export function generatedModuleCount(): number {
+  return generatedModules.length;
+}
+`;
+}
+
+function safeGeneratedProjectRelativePath(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  if (!normalized.startsWith("src/") || normalized.includes("\0") || normalized.split("/").some((part) => part === "..")) {
+    throw new Error(`Unsafe generated project file path: ${filePath}`);
+  }
+  return normalized;
 }
 
 async function listFiles(rootDir: string): Promise<string[]> {
@@ -1855,7 +2790,111 @@ function resolveInsideRoot(rootDir: string, safeRelative: string): string {
 }
 
 function mainTsSource(manifest: GeneratedProjectManifest): string {
-  return `export interface ReconstructionManifest {
+  return `import { generatedModuleCount } from "./modules/module-index";
+import type { ReconstructionManifest } from "./types/reconstruction";
+
+export const reconstructionManifest: ReconstructionManifest = ${JSON.stringify(manifest, null, 2)};
+
+export function sourceFileCount(): number {
+  return reconstructionManifest.copiedSourceFiles.length;
+}
+
+export function moduleCandidateCount(): number {
+  return generatedModuleCount();
+}
+`;
+}
+
+function reconstructionEntrySource(plan: ReconstructionPlan, manifest: GeneratedProjectManifest): string {
+  return `import { reconstructionManifest, moduleCandidateCount, sourceFileCount } from "../main";
+
+export const reconstructionEntrySummary = {
+  entryHtml: ${JSON.stringify(plan.entryHtml)},
+  detectedRuntime: ${JSON.stringify(plan.detectedRuntime)},
+  sourceFiles: sourceFileCount(),
+  generatedModules: moduleCandidateCount(),
+  analysisFiles: reconstructionManifest.analysisFiles.length,
+  generatedModuleFiles: reconstructionManifest.generatedModuleFiles.length
+} as const;
+
+export function describeReconstructionEntry(): string {
+  return \`${manifest.entrypoint}: \${reconstructionEntrySummary.generatedModules} generated module records\`;
+}
+`;
+}
+
+function runtimeShimSource(): string {
+  return `export interface BrowserGlobalShim {
+  name: string;
+  reason: string;
+  riskLevel: "low" | "medium" | "high";
+}
+
+export const browserGlobalShims: BrowserGlobalShim[] = [
+  {
+    name: "window",
+    reason: "Generated modules may reference browser globals preserved from the original bundle.",
+    riskLevel: "low"
+  },
+  {
+    name: "document",
+    reason: "Static host validation needs a typed placeholder for DOM-oriented recovered code.",
+    riskLevel: "low"
+  }
+];
+`;
+}
+
+function reconstructionTypesSource(): string {
+  return `export type EvidenceRiskLevel = "low" | "medium" | "high";
+
+export interface SourceRange {
+  start: number;
+  end: number;
+}
+
+export interface RuntimeWrapperMeta {
+  id: string;
+  filePath: string;
+  runtimeKind: string;
+  wrapperKind: string;
+  confidence: number;
+  riskLevel: EvidenceRiskLevel;
+  loc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  detail: string;
+  evidenceRefs: string[];
+}
+
+export interface ModuleBoundaryMeta {
+  id: string;
+  filePath: string;
+  moduleId: string;
+  boundaryKind: string;
+  runtimeKind: string;
+  confidence: number;
+  riskLevel: EvidenceRiskLevel;
+  sourcePath?: string;
+  loc?: string;
+  sourceRange?: SourceRange;
+  astPath?: string;
+  detail: string;
+  evidenceRefs: string[];
+}
+
+export interface GeneratedModuleMeta {
+  modulePath: string;
+  sourceKind: string;
+  sourceFilePath?: string;
+  sourceMapPath?: string;
+  boundaryId?: string;
+  sourceHash: string;
+  riskLevel: EvidenceRiskLevel;
+  evidenceRefs: string[];
+}
+
+export interface ReconstructionManifest {
   kind: "generated_project";
   jobId?: string;
   projectPath: string;
@@ -1863,15 +2902,13 @@ function mainTsSource(manifest: GeneratedProjectManifest): string {
   generatedFiles: string[];
   copiedSourceFiles: string[];
   transformedSourceFiles: string[];
+  generatedModuleFiles: string[];
+  entrypointFiles: string[];
+  typeDefinitionFiles: string[];
+  runtimeShimFiles: string[];
   analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
-}
-
-export const reconstructionManifest: ReconstructionManifest = ${JSON.stringify(manifest, null, 2)};
-
-export function sourceFileCount(): number {
-  return reconstructionManifest.copiedSourceFiles.length;
 }
 `;
 }
@@ -1908,6 +2945,8 @@ function indexHtmlSource(plan: ReconstructionPlan, manifest: GeneratedProjectMan
           <dd>${escapeHtml(runtime)}</dd>
           <dt>Copied source files</dt>
           <dd>${manifest.copiedSourceFiles.length}</dd>
+          <dt>Generated modules</dt>
+          <dd>${manifest.generatedModuleFiles.length}</dd>
           <dt>Manifest</dt>
           <dd>src/reconstruction-manifest.json</dd>
         </dl>
@@ -1958,11 +2997,15 @@ if (
   !Array.isArray(manifest.copiedSourceFiles) ||
   !Array.isArray(manifest.generatedFiles) ||
   !Array.isArray(manifest.transformedSourceFiles) ||
+  !Array.isArray(manifest.generatedModuleFiles) ||
+  !Array.isArray(manifest.entrypointFiles) ||
+  !Array.isArray(manifest.typeDefinitionFiles) ||
+  !Array.isArray(manifest.runtimeShimFiles) ||
   !Array.isArray(manifest.analysisFiles)
 ) {
   throw new Error("Generated project manifest file lists are invalid.");
 }
-if (!mainSource.includes("export interface ReconstructionManifest")) {
+if (!mainSource.includes("reconstructionManifest")) {
   throw new Error("Generated TypeScript entry contract is missing.");
 }
 for (const filePath of manifest.copiedSourceFiles) {
@@ -1971,7 +3014,14 @@ for (const filePath of manifest.copiedSourceFiles) {
   }
   await access(path.join(root, filePath));
 }
-for (const filePath of [...manifest.transformedSourceFiles, ...manifest.analysisFiles]) {
+for (const filePath of [
+  ...manifest.transformedSourceFiles,
+  ...manifest.generatedModuleFiles,
+  ...manifest.entrypointFiles,
+  ...manifest.typeDefinitionFiles,
+  ...manifest.runtimeShimFiles,
+  ...manifest.analysisFiles
+]) {
   if (path.isAbsolute(filePath) || filePath.includes("..")) {
     throw new Error(\`Unsafe generated evidence file path: \${filePath}\`);
   }

@@ -70,9 +70,111 @@ test("analyzeInputPackage builds analysis graphs and low-risk transform evidence
     assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "computed_property_literal_restore" && entry.status === "applied"));
     assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "low_risk_constant_fold" && entry.status === "applied"));
     assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "sequence_expression_expand" && entry.status === "applied"));
+    assert.ok(result.transformAnalysis.transformLog.every((entry) => entry.kind === "parse" || entry.riskLevel));
+    assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.evidenceRefs?.includes("script:assets/app.js")));
     assert.ok(result.transformAnalysis.rollbackMap.length >= 3);
+    assert.ok(result.transformAnalysis.rollbackMap.every((entry) => entry.riskLevel && entry.reversible === true));
     assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("window.document"));
     assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("const value = 3"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage records webpack runtime wrappers and module table candidates", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-webpack-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(path.join(root, "index.html"), '<script src="./assets/bundle.js"></script>');
+    await writeFile(
+      path.join(root, "assets", "bundle.js"),
+      [
+        "(function(modules){",
+        "  function __webpack_require__(id){ return modules[id]({}, {}, __webpack_require__); }",
+        "  return __webpack_require__(0);",
+        "})({",
+        "  0: function(module, exports, __webpack_require__){ const dep = __webpack_require__(1); module.exports = dep; },",
+        "  1: function(module){ module.exports = { value: 1 }; }",
+        "});"
+      ].join("\n")
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.ok(result.moduleRecoveryAnalysis.runtimeWrappers.some((wrapper) => wrapper.runtimeKind === "webpack"));
+    assert.ok(result.moduleRecoveryAnalysis.moduleBoundaries.some((boundary) => boundary.boundaryKind === "runtime_module_table" && boundary.moduleId === "0"));
+    assert.ok(result.moduleRecoveryAnalysis.moduleBoundaries.some((boundary) => boundary.moduleId === "1"));
+    assert.ok(result.moduleRecoveryAnalysis.importExportCandidates.some((candidate) => candidate.candidateKind === "runtime_dependency" && candidate.runtimeKind === "webpack"));
+    assert.ok(result.moduleRecoveryAnalysis.runtimeWrappers.every((wrapper) => wrapper.sourceRange || wrapper.loc || wrapper.evidenceRefs.length > 0));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage records UMD and SystemJS wrapper evidence", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-umd-system-"));
+  try {
+    await writeFile(
+      path.join(root, "umd.js"),
+      [
+        "(function(root, factory){",
+        "  if (typeof exports === 'object') module.exports = factory();",
+        "  else if (typeof define === 'function' && define.amd) define([], factory);",
+        "  else root.Lib = factory();",
+        "})(this, function(){ return { boot: function(){ return 1; } }; });"
+      ].join("\n")
+    );
+    await writeFile(
+      path.join(root, "system.js"),
+      "System.register('app', [], function(exports){ return { execute: function(){ exports('value', 1); } }; });"
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.ok(result.moduleRecoveryAnalysis.runtimeWrappers.some((wrapper) => wrapper.runtimeKind === "umd"));
+    assert.ok(result.moduleRecoveryAnalysis.runtimeWrappers.some((wrapper) => wrapper.runtimeKind === "systemjs"));
+    assert.ok(result.moduleRecoveryAnalysis.moduleBoundaries.some((boundary) => boundary.boundaryKind === "system_register"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage records ESM import export candidates and source map recovered modules", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-module-recovery-"));
+  try {
+    await mkdir(path.join(root, "assets"));
+    await writeFile(path.join(root, "index.html"), '<script type="module" src="/assets/app.js"></script>');
+    await writeFile(
+      path.join(root, "assets", "app.js"),
+      [
+        "import { helper } from './helper.js';",
+        "export const value = helper();",
+        "export { value as renamed };",
+        "import('./lazy.js').then((mod) => mod.run());",
+        "//# sourceMappingURL=app.js.map"
+      ].join("\n")
+    );
+    await writeFile(path.join(root, "assets", "helper.js"), "export function helper(){return 1}");
+    await writeFile(path.join(root, "assets", "lazy.js"), "export function run(){return 2}");
+    await writeFile(
+      path.join(root, "assets", "app.js.map"),
+      JSON.stringify({
+        version: 3,
+        file: "app.js",
+        sources: ["../src/main.ts", "../src/lazy.ts"],
+        sourcesContent: ["export const main = 1;", "export const lazy = 2;"],
+        names: [],
+        mappings: ""
+      })
+    );
+
+    const result = await analyzeInputPackage(root);
+
+    assert.equal(result.sourceMapAnalysis.bundleAnalyses[0].recoveredSources.length, 2);
+    assert.ok(result.moduleRecoveryAnalysis.generatedModules.some((module) => module.sourceKind === "source_map_sources_content"));
+    assert.ok(result.moduleRecoveryAnalysis.importExportCandidates.some((candidate) => candidate.candidateKind === "static_import" && candidate.source === "./helper.js"));
+    assert.ok(result.moduleRecoveryAnalysis.importExportCandidates.some((candidate) => candidate.candidateKind === "dynamic_import" && candidate.source === "./lazy.js"));
+    assert.ok(result.moduleRecoveryAnalysis.importExportCandidates.some((candidate) => candidate.candidateKind === "named_export"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -328,6 +430,10 @@ test("writeProject emits a buildable generated project shell", async () => {
       kind: string;
       copiedSourceFiles: string[];
       transformedSourceFiles: string[];
+      generatedModuleFiles: string[];
+      entrypointFiles: string[];
+      typeDefinitionFiles: string[];
+      runtimeShimFiles: string[];
       analysisFiles: string[];
     };
 
@@ -335,7 +441,15 @@ test("writeProject emits a buildable generated project shell", async () => {
     assert.equal(manifest.kind, "generated_project");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
     assert.ok(manifest.transformedSourceFiles.includes("src/transformed/assets/app.js"));
+    assert.ok(manifest.generatedModuleFiles.includes("src/modules/module-index.ts"));
+    assert.ok(manifest.entrypointFiles.includes("src/entrypoints/reconstruction-entry.ts"));
+    assert.ok(manifest.typeDefinitionFiles.includes("src/types/reconstruction.d.ts"));
+    assert.ok(manifest.runtimeShimFiles.includes("src/runtime-shims/browser-globals.ts"));
     assert.ok(manifest.analysisFiles.includes("src/analysis/graph-analysis.json"));
+    assert.ok(manifest.analysisFiles.includes("src/analysis/runtime-wrappers.json"));
+    assert.ok(manifest.analysisFiles.includes("src/analysis/module-boundaries.json"));
+    assert.ok(manifest.analysisFiles.includes("src/analysis/import-export-candidates.json"));
+    assert.ok(manifest.analysisFiles.includes("src/analysis/generated-modules.json"));
     const graphAnalysis = JSON.parse(await readFile(path.join(outputDir, "src", "analysis", "graph-analysis.json"), "utf8")) as {
       graphAnalysis: { chunkGraph: { edges: unknown[] } };
     };
@@ -344,6 +458,10 @@ test("writeProject emits a buildable generated project shell", async () => {
     };
     assert.ok(graphAnalysis.graphAnalysis.chunkGraph.edges.length > 0);
     assert.ok(Array.isArray(transformLog.transformLog));
+    const moduleBoundaries = JSON.parse(await readFile(path.join(outputDir, "src", "analysis", "module-boundaries.json"), "utf8")) as {
+      moduleBoundaries: unknown[];
+    };
+    assert.ok(Array.isArray(moduleBoundaries.moduleBoundaries));
     await runScript(outputDir, ["scripts/typecheck.mjs"]);
     await runScript(outputDir, ["scripts/build.mjs"]);
     const buildManifest = JSON.parse(await readFile(path.join(outputDir, "dist", "build-manifest.json"), "utf8")) as {
