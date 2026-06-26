@@ -10,6 +10,40 @@ This directory separates runtime configuration by service boundary.
 
 The compose file is a deployment contract and local starting point. It can build local service images from this repository, and each image can still be overridden with `AI_JSUNPACK_API_IMAGE`, `AI_JSUNPACK_WORKER_IMAGE`, `AI_JSUNPACK_BROWSER_RUNNER_IMAGE`, and `AI_JSUNPACK_WEB_IMAGE` when CI publishes immutable tags.
 
+## Release Gate
+
+Use `deploy.release_gate` as the platform-neutral CI/CD entrypoint. It fixes service image tags, records the SBOM and vulnerability scan command plan, lists required secret injection points, and runs the post-release compose smoke gate when execution mode is enabled.
+
+Dry-run plan:
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_gate `
+  --registry registry.example.com `
+  --repository-prefix ai-jsunpack `
+  --version 2026.06.26 `
+  --git-sha <commit-sha> `
+  --previous-version 2026.06.25 `
+  --output tmp\release-gate\release-gate.json `
+  --dry-run
+```
+
+CI execution:
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_gate `
+  --registry registry.example.com `
+  --repository-prefix ai-jsunpack `
+  --version 2026.06.26 `
+  --git-sha <commit-sha> `
+  --previous-version 2026.06.25 `
+  --execute `
+  --push
+```
+
+The gate writes `release-gate.json` with the pinned `AI_JSUNPACK_*_IMAGE` values that should be injected into compose or the target orchestrator. It defaults to `syft` for SBOM and `trivy` for image vulnerability scanning; pass `--sbom-tool none` or `--scan-tool none` only for explicitly approved offline exceptions. Without `--push`, execution builds and validates local tags but does not publish to a registry.
+
+Secrets must come from a CI or platform secret store. Do not commit resolved values. Required production injections include `AI_JSUNPACK_AUTH_SECRET`, `AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY`, `AI_JSUNPACK_BROWSER_RUNNER_TOKEN`, any Worker model-provider credentials, and a runtime/session `VITE_API_AUTH_TOKEN` strategy for Web.
+
 ## Compose Images and Health Checks
 
 Local service Dockerfiles live under `deploy/docker/`:
@@ -92,7 +126,7 @@ docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worke
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
 ```
 
-For production-like rehearsals, retain the PostgreSQL volume/export and MinIO bucket export with the compose smoke JSON report before deleting volumes. Re-run `deploy.compose_smoke` after reverting tags and compare the new `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`, report kinds, Prometheus scrape evidence, and alert event history.
+For production-like rehearsals, retain the PostgreSQL volume/export, MinIO bucket export, `release-gate.json`, SBOM files, vulnerability scan output, and compose smoke JSON report before deleting volumes. Re-run `deploy.compose_smoke --skip-build` after reverting tags and compare the new `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`, report kinds, Prometheus scrape evidence, and alert event history.
 
 ## Sandbox and Browser Isolation Profiles
 

@@ -144,6 +144,51 @@ Prometheus scrape 必须携带拥有 ops read 权限的 Bearer token。告警规
 5. 发布镜像并按环境注入 secret。
 6. 部署后检查 `/ops/metrics`、`/ops/prometheus` 和 alert event。
 
+本仓库提供平台无关的发布门禁入口，适合被 GitHub Actions、GitLab CI、Jenkins 或手工发布流程调用。默认 `--dry-run` 只生成发布计划和证据报告，不构建、不扫描、不推送镜像：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_gate `
+  --registry registry.example.com `
+  --repository-prefix ai-jsunpack `
+  --version 2026.06.26 `
+  --git-sha <commit-sha> `
+  --previous-version 2026.06.25 `
+  --output tmp\release-gate\release-gate.json `
+  --dry-run
+```
+
+报告会固化四类镜像 tag：
+
+- `AI_JSUNPACK_API_IMAGE`
+- `AI_JSUNPACK_WORKER_IMAGE`
+- `AI_JSUNPACK_BROWSER_RUNNER_IMAGE`
+- `AI_JSUNPACK_WEB_IMAGE`
+
+执行模式用于 CI runner 或发布机：
+
+```powershell
+.venv\Scripts\python.exe -m deploy.release_gate `
+  --registry registry.example.com `
+  --repository-prefix ai-jsunpack `
+  --version 2026.06.26 `
+  --git-sha <commit-sha> `
+  --previous-version 2026.06.25 `
+  --execute `
+  --push
+```
+
+`--execute` 会按报告顺序运行 Docker build、SBOM 生成、漏洞扫描和 `deploy.compose_smoke --skip-build`。`--push` 未设置时不会推送镜像。默认 SBOM 工具为 `syft`，默认扫描工具为 `trivy`；未安装工具时执行模式会失败并在 `release-gate.json` 中记录失败命令。离线或未接入扫描工具的环境可显式传入 `--sbom-tool none` 或 `--scan-tool none`，但发布评审应保留该例外。
+
+生产 secret 必须来自 CI secret store、Kubernetes Secret、Vault、SOPS/SealedSecrets 或等价机制，不能写入仓库。发布门禁报告只列 secret 名称和注入边界，不记录 secret 值。至少需要：
+
+- `AI_JSUNPACK_AUTH_SECRET`：API、Worker、Browser Runner 共享 HMAC secret。
+- `AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY`：Artifact Store 访问密钥。
+- `AI_JSUNPACK_BROWSER_RUNNER_TOKEN`：Worker 调用 Browser Runner 的 service Bearer token。
+- `VITE_API_AUTH_TOKEN`：Web 运行环境或会话注入 token，不应作为长期生产密钥烘焙。
+- 模型 provider 凭据：只注入 Worker，且仅在允许云端模型的部署中启用。
+
+发布后 gate 必须保留 `release-gate.json`、`compose-smoke.json`、`deployment-smoke.json`、SBOM、扫描报告、compose logs、PostgreSQL 导出或 volume 快照、Artifact Store bucket/prefix 导出。回滚时将 compose 镜像变量切回 `previous-version` 对应 tag，再运行 `deploy.compose_smoke --skip-build`，对比 `archive_manifest.retainedEvidence` 中的结果包 hash、报告类型、Prometheus 抓取和 alert event。
+
 ## 自动化验收
 
 仓库提供一个本地可复跑的生产验收编排入口，默认使用临时 SQLite、临时 Artifact Store、API TestClient、受控 Worker pipeline 和模拟 webhook，不依赖 Docker、MinIO、外网或真实 PostgreSQL：
