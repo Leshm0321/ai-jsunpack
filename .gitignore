@@ -1,4 +1,5 @@
 node_modules/
+package-lock.json
 .venv/
 dist/
 build/
@@ -18,6 +19,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.example.env
 artifacts/
 uploads/
 tmp/
