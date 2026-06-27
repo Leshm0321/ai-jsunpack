@@ -1,1 +1,1 @@
-"""Deployment helper modules for local release rehearsal."""
+"""用于本地发布演练的部署辅助模块。"""

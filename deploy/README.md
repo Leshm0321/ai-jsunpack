@@ -1,20 +1,20 @@
-# Deployment Profiles
+# 部署 Profile
 
-This directory separates runtime configuration by service boundary.
+本目录按服务边界拆分运行时配置。
 
-- `api` owns HTTP, auth, metadata, and Artifact access. It must not receive sandbox, browser-runner, Core CLI, or model provider credentials.
-- `worker` owns Core CLI, Agent runtime, build/typecheck sandbox execution, and packaging.
-- `browser-runner` owns Playwright/browser execution capacity for deployments that split browser work from the main worker pool.
-- `db` and `artifact-store` are infrastructure services shared by API and Worker.
-- `web` only receives `VITE_API_*` values at build/runtime boundary.
+- `api` 负责 HTTP、认证、元数据和 Artifact 访问。它不能接收 sandbox、browser-runner、Core CLI 或模型 provider 凭据。
+- `worker` 负责 Core CLI、Agent runtime、build/typecheck sandbox 执行和 packaging。
+- `browser-runner` 为将浏览器工作从主 Worker 池拆出的部署提供 Playwright/browser 执行容量。
+- `db` 和 `artifact-store` 是 API 与 Worker 共享的基础设施服务。
+- `web` 只在构建/运行边界接收 `VITE_API_*` 值。
 
-The compose file is a deployment contract and local starting point. It can build local service images from this repository, and each image can still be overridden with `AI_JSUNPACK_API_IMAGE`, `AI_JSUNPACK_WORKER_IMAGE`, `AI_JSUNPACK_BROWSER_RUNNER_IMAGE`, and `AI_JSUNPACK_WEB_IMAGE` when CI publishes immutable tags.
+compose 文件既是部署契约，也是本地启动入口。它可以从本仓库构建本地服务镜像；当 CI 发布不可变 tag 后，也可以分别用 `AI_JSUNPACK_API_IMAGE`、`AI_JSUNPACK_WORKER_IMAGE`、`AI_JSUNPACK_BROWSER_RUNNER_IMAGE` 和 `AI_JSUNPACK_WEB_IMAGE` 覆盖镜像。
 
-## Release Gate
+## 发布门禁
 
-Use `deploy.release_gate` as the platform-neutral CI/CD entrypoint. It fixes service image tags, records the SBOM and vulnerability scan command plan, lists required secret injection points, and runs the post-release compose smoke gate when execution mode is enabled.
+使用 `deploy.release_gate` 作为平台中立的 CI/CD 入口。它会固定服务镜像 tag、记录 SBOM 和漏洞扫描命令计划、列出所需 secret 注入点，并在执行模式启用时运行发布后的 compose smoke gate。
 
-Dry-run plan:
+Dry-run 计划：
 
 ```powershell
 .venv\Scripts\python.exe -m deploy.release_gate `
@@ -27,7 +27,7 @@ Dry-run plan:
   --dry-run
 ```
 
-CI execution:
+CI 执行：
 
 ```powershell
 .venv\Scripts\python.exe -m deploy.release_gate `
@@ -40,13 +40,13 @@ CI execution:
   --push
 ```
 
-The gate writes `release-gate.json` with the pinned `AI_JSUNPACK_*_IMAGE` values that should be injected into compose or the target orchestrator. It defaults to `syft` for SBOM and `trivy` for image vulnerability scanning; pass `--sbom-tool none` or `--scan-tool none` only for explicitly approved offline exceptions. Without `--push`, execution builds and validates local tags but does not publish to a registry.
+门禁会写出 `release-gate.json`，其中包含应注入 compose 或目标编排器的固定 `AI_JSUNPACK_*_IMAGE` 值。默认使用 `syft` 生成 SBOM，使用 `trivy` 执行镜像漏洞扫描；只有明确批准的离线例外才应传入 `--sbom-tool none` 或 `--scan-tool none`。未设置 `--push` 时，执行模式只构建并验证本地 tag，不发布到 registry。
 
-Secrets must come from a CI or platform secret store. Do not commit resolved values. Required production injections include `AI_JSUNPACK_AUTH_SECRET`, `AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY`, `AI_JSUNPACK_BROWSER_RUNNER_TOKEN`, any Worker model-provider credentials, and a runtime/session `VITE_API_AUTH_TOKEN` strategy for Web.
+Secret 必须来自 CI 或平台 secret store。不要提交解析后的值。生产注入至少包括 `AI_JSUNPACK_AUTH_SECRET`、`AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY`、`AI_JSUNPACK_BROWSER_RUNNER_TOKEN`、Worker 模型 provider 凭据，以及 Web 的运行时/会话 `VITE_API_AUTH_TOKEN` 策略。
 
-GitHub Actions users can run `.github/workflows/release-gate.yml` through `workflow_dispatch`. It targets GHCR by default, uses `GITHUB_TOKEN` with `contents: read` and `packages: write`, runs under the selected `secret_environment`, and calls `deploy.release_gate --ci-platform github_actions --secret-environment <environment> --execute`. Images are pushed only when the `push_images` input is true. The workflow uploads release gate, SBOM, scan, compose smoke, and deployment smoke reports as Actions artifacts; `release-gate.json` also records a `productionArchiveChecklist` with the required external evidence. Production DB snapshots, Artifact Store exports, GHCR registry digests, service logs, rollback evidence, and GitHub Environment revision or approval records must still be retained by the deployment platform outside the GitHub runner workspace.
+GitHub Actions 用户可以通过 `workflow_dispatch` 运行 `.github/workflows/release-gate.yml`。该 workflow 默认目标为 GHCR，使用具备 `contents: read` 与 `packages: write` 权限的 `GITHUB_TOKEN`，在选定的 `secret_environment` 下运行，并调用 `deploy.release_gate --ci-platform github_actions --secret-environment <environment> --execute`。只有 `push_images` 输入为 true 时才推送镜像。workflow 会把 release gate、SBOM、scan、compose smoke 和 deployment smoke 报告上传为 Actions artifacts；`release-gate.json` 也会记录包含外部证据要求的 `productionArchiveChecklist`。生产 DB snapshot、Artifact Store export、GHCR registry digest、服务日志、回滚证据，以及 GitHub Environment revision 或 approval record 仍必须由部署平台在 GitHub runner workspace 外部保留。
 
-After the first real run, write those external references into a UTF-8 `production_release_evidence_manifest` JSON file and verify the final archive with:
+第一次真实运行后，将这些外部引用写入 UTF-8 `production_release_evidence_manifest` JSON 文件，并用以下命令核验最终归档：
 
 ```powershell
 .venv\Scripts\python.exe -m deploy.release_archive `
@@ -57,20 +57,20 @@ After the first real run, write those external references into a UTF-8 `producti
   --output tmp\release-gate\production-release-archive.json
 ```
 
-The verifier requires executed release gate evidence, passing compose/deployment smoke reports, `archiveReady=true`, registry digests for pushed images, a secret manager revision or approval record without values, retained DB/Artifact Store evidence, service logs, and rollback evidence. Use `platformDifferences` in the manifest for Kubernetes Secret, Vault, SOPS/SealedSecrets, or other production injection differences that need documentation follow-up.
+核验器要求存在已执行的 release gate 证据、通过的 compose/deployment smoke 报告、`archiveReady=true`、已推送镜像的 registry digest、不含 secret 值的 secret manager revision 或 approval record、保留的 DB/Artifact Store 证据、服务日志和回滚证据。如实际使用 Kubernetes Secret、Vault、SOPS/SealedSecrets 或其他生产注入差异，请在 manifest 的 `platformDifferences` 中记录，并补充对应文档。
 
-## Compose Images and Health Checks
+## Compose 镜像与健康检查
 
-Local service Dockerfiles live under `deploy/docker/`:
+本地服务 Dockerfile 位于 `deploy/docker/`：
 
-- `api.Dockerfile` starts `uvicorn apps.api.app.main:app`.
-- `worker.Dockerfile` starts `python -m apps.worker.worker.queue` and includes the built Core CLI.
-- `browser-runner.Dockerfile` starts `uvicorn apps.browser_runner.app.main:app` with Playwright Chromium installed.
-- `web.Dockerfile` builds the Vite workspace and serves the static bundle on port 5173.
+- `api.Dockerfile` 启动 `uvicorn apps.api.app.main:app`。
+- `worker.Dockerfile` 启动 `python -m apps.worker.worker.queue`，并包含已构建的 Core CLI。
+- `browser-runner.Dockerfile` 启动 `uvicorn apps.browser_runner.app.main:app`，并安装 Playwright Chromium。
+- `web.Dockerfile` 构建 Vite workspace，并在 5173 端口提供静态 bundle。
 
-`deploy/docker-compose.yml` includes health checks for PostgreSQL, MinIO, API, Browser Runner, and Web. The one-shot `artifact-store-init` service creates the configured MinIO bucket before API, Worker, or Browser Runner services start. Worker is a long-running queue consumer and is verified through ops heartbeats and the deployment smoke report instead of an HTTP health check.
+`deploy/docker-compose.yml` 包含 PostgreSQL、MinIO、API、Browser Runner 和 Web 的健康检查。一次性 `artifact-store-init` 服务会在 API、Worker 或 Browser Runner 启动前创建配置的 MinIO bucket。Worker 是长驻队列消费者，通过 ops heartbeat 和 deployment smoke 报告验证，而不是通过 HTTP health check 验证。
 
-Build and start the full local topology:
+构建并启动完整本地拓扑：
 
 ```powershell
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner build
@@ -78,26 +78,26 @@ docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worke
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
 ```
 
-Stop it after inspection:
+检查完成后停止：
 
 ```powershell
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
 ```
 
-## Validation
+## 验证
 
-When `AI_JSUNPACK_SERVICE_ROLE=api` is set, the API process validates its environment during import/startup and fails fast if Worker/browser execution configuration is present. Without an explicit service role, local development stays permissive and `/health` reports a warning profile instead of failing.
+设置 `AI_JSUNPACK_SERVICE_ROLE=api` 时，API 进程会在 import/startup 阶段校验环境；如果出现 Worker/browser 执行配置，会快速失败。未显式设置服务角色时，本地开发保持宽松，`/health` 返回 warning profile 而不是失败。
 
-Run the local production smoke/soak acceptance check before release handoff:
+发布交付前运行本地生产 smoke/soak 验收：
 
 ```powershell
 .venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
   --output tmp\deployment-smoke.json
 ```
 
-The default path uses temporary SQLite, a temporary Artifact Store, API TestClient, a controlled Worker pipeline, synthetic Browser Runner soak, simulated webhook delivery, and retention cleanup checks. It exits non-zero when any critical check fails and writes an `archive_manifest` section into the JSON report with result package hashes, report kinds, Prometheus scrape evidence, alert delivery status, retention evidence, and Browser Runner soak assessment.
+默认路径使用临时 SQLite、临时 Artifact Store、API TestClient、受控 Worker pipeline、合成 Browser Runner soak、模拟 webhook 投递和 retention cleanup 检查。任一关键检查失败时进程返回非零；报告会写入 `archive_manifest`，其中包含结果包 hash、报告类型、Prometheus scrape 证据、告警投递状态、retention 证据和 Browser Runner soak 评估。
 
-Run the compose rehearsal when Docker is available:
+Docker 可用时运行 compose 演练：
 
 ```powershell
 .venv\Scripts\python.exe -m deploy.compose_smoke `
@@ -106,9 +106,9 @@ Run the compose rehearsal when Docker is available:
   --soak-runs 10
 ```
 
-The compose rehearsal builds images unless `--skip-build` is passed, starts the worker and browser-runner profiles, waits for service health checks, runs the archive-ready deployment smoke against PostgreSQL on `127.0.0.1:5432` and MinIO on `127.0.0.1:9000`, stores retained artifact metadata under the requested artifact root, captures recent compose logs, and tears the topology down unless `--keep-running` is passed. The report is ready for release handoff when `status=pass`, `deploymentSmoke.status=pass`, and `deploymentSmoke.archive_manifest.archiveReady=true`.
+compose 演练默认构建镜像，除非传入 `--skip-build`；它会启动 worker 和 browser-runner profiles、等待服务健康检查、针对 `127.0.0.1:5432` 上的 PostgreSQL 与 `127.0.0.1:9000` 上的 MinIO 运行 archive-ready deployment smoke，将保留的 artifact metadata 存到指定 artifact root，捕获近期 compose 日志，并在未传入 `--keep-running` 时关闭拓扑。报告满足 `status=pass`、`deploymentSmoke.status=pass` 和 `deploymentSmoke.archive_manifest.archiveReady=true` 时，可以作为发布交付证据。
 
-For an archive-ready topology rehearsal, pass a shared metadata DB and retain artifacts:
+如需 archive-ready 拓扑演练，传入共享 metadata DB 并保留 artifact：
 
 ```powershell
 .venv\Scripts\python.exe -m apps.api.app.deployment_smoke `
@@ -120,60 +120,60 @@ For an archive-ready topology rehearsal, pass a shared metadata DB and retain ar
   --output tmp\deployment-smoke-postgres.json
 ```
 
-The persisted report is the release handoff artifact. Keep it with the retained Artifact Store directory or object-store export so reviewers can verify `archive_manifest.archiveReady`, `archive_manifest.artifactKinds`, `archive_manifest.retainedEvidence.resultPackageSha256`, webhook delivery, Prometheus coverage, retention cleanup evidence, and Browser Runner capacity assessment together.
+持久化报告就是发布交付 artifact。将它与保留的 Artifact Store 目录或 object-store export 一起保存，便于审阅者同时核验 `archive_manifest.archiveReady`、`archive_manifest.artifactKinds`、`archive_manifest.retainedEvidence.resultPackageSha256`、webhook 投递、Prometheus 覆盖、retention cleanup 证据和 Browser Runner 容量评估。
 
-## Failure Diagnosis and Rollback
+## 失败诊断与回滚
 
-Use `docker compose ... ps` first; an unhealthy dependency usually explains downstream startup failures.
+先使用 `docker compose ... ps`；不健康的依赖通常能解释下游启动失败。
 
-- DB unhealthy: inspect `db` logs, credentials in `deploy/env/db.env.example`, and whether port `127.0.0.1:5432` is already used.
-- MinIO unhealthy or bucket init failed: inspect `artifact-store` and `artifact-store-init` logs, then verify `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, and `AI_JSUNPACK_ARTIFACT_S3_BUCKET` match across env files.
-- API exits immediately: check `/health` logs for deployment profile violations. API must not receive Worker sandbox, Browser Runner, Core CLI, or model provider variables.
-- Worker idle or degraded: check `worker` logs and `/ops/metrics`; verify a source input exists and `AI_JSUNPACK_WORKER_ID`, lease, DB, and Artifact Store settings point at the shared topology.
-- Browser Runner degraded: check `/health`, queue backend settings, lease thresholds, and whether Playwright dependencies are present in the image.
-- Prometheus or alert checks fail: verify the auth secret is shared and the generated Bearer token has ops read access.
-- Result package missing: inspect Worker packaging logs, retained Artifact Store contents, and `deploymentSmoke.failedChecks`.
+- DB 不健康：检查 `db` 日志、`deploy/env/db.env.example` 中的凭据，以及端口 `127.0.0.1:5432` 是否已被占用。
+- MinIO 不健康或 bucket init 失败：检查 `artifact-store` 和 `artifact-store-init` 日志，再确认 `MINIO_ROOT_USER`、`MINIO_ROOT_PASSWORD` 与 `AI_JSUNPACK_ARTIFACT_S3_BUCKET` 在 env 文件中一致。
+- API 立即退出：检查 `/health` 日志中的部署 profile 违规。API 不能接收 Worker sandbox、Browser Runner、Core CLI 或模型 provider 变量。
+- Worker 空闲或 degraded：检查 `worker` 日志和 `/ops/metrics`；确认 source input 存在，且 `AI_JSUNPACK_WORKER_ID`、lease、DB 与 Artifact Store 配置指向共享拓扑。
+- Browser Runner degraded：检查 `/health`、队列 backend 设置、lease 阈值，以及 Playwright 依赖是否已在镜像中安装。
+- Prometheus 或告警检查失败：确认 auth secret 共享，且生成的 Bearer token 具备 ops read 权限。
+- 结果包缺失：检查 Worker packaging 日志、保留的 Artifact Store 内容和 `deploymentSmoke.failedChecks`。
 
-Rollback by preserving evidence first, then returning to the previous image tag:
+回滚时先保留证据，再回到上一组镜像 tag：
 
 ```powershell
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 200 > tmp\deployment-compose-smoke\compose-logs.txt
 docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
 ```
 
-For production-like rehearsals, retain the PostgreSQL volume/export, MinIO bucket export, `release-gate.json`, SBOM files, vulnerability scan output, and compose smoke JSON report before deleting volumes. Re-run `deploy.compose_smoke --skip-build` after reverting tags and compare the new `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`, report kinds, Prometheus scrape evidence, and alert event history.
+对于近生产演练，删除 volume 前保留 PostgreSQL volume/export、MinIO bucket export、`release-gate.json`、SBOM 文件、漏洞扫描输出和 compose smoke JSON 报告。回退 tag 后重新运行 `deploy.compose_smoke --skip-build`，并比较新的 `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`、报告类型、Prometheus scrape 证据和 alert event history。
 
-## Sandbox and Browser Isolation Profiles
+## Sandbox 与浏览器隔离 Profile
 
-`build_artifact.resourcePolicy` is the audit contract for execution isolation. It records `enforcement`, `runnerKind`, runtime metadata, capability status, and known limitations for every build/typecheck validation.
+`build_artifact.resourcePolicy` 是执行隔离的审计契约。它为每次 build/typecheck validation 记录 `enforcement`、`runnerKind`、runtime metadata、capability status 和 known limitations。
 
-Supported runner profiles:
+支持的 runner profile：
 
-| runnerKind | enforcement | Current execution behavior | Audit meaning |
+| runnerKind | enforcement | 当前执行行为 | 审计含义 |
 | --- | --- | --- | --- |
-| `local` | `local_best_effort` | Executes in a temporary local workspace with command allowlist and cleaned environment. | Records policy intent; no OS/container isolation is claimed. |
-| `container` | `container_enforced` | Executes through Docker or Podman when available. | Records Docker/Podman network, process, memory, CPU, filesystem capability differences. |
-| `gvisor` | `runtime_isolated` | Executes build/typecheck through Docker or Podman with `--runtime runsc` when a container runtime is configured. | Use when deployment routes container execution through gVisor/runsc and wants that boundary reflected in evidence. |
-| `firecracker` | `runtime_isolated` | Executes through a deployment-provided Firecracker launcher when `AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND` or `buildValidation.firecrackerRunnerCommand` is configured; otherwise execution is denied. | Use when deployment owns Firecracker/KVM/jailer/rootfs setup and Artifact Store exchange across the VM boundary. |
-| `remote_browser_runner` | `remote_isolated` | Executes runtime smoke/compare through the separate Browser Runner service when `AI_JSUNPACK_BROWSER_RUNNER_URL` is configured; it does not execute Worker build/typecheck commands. | Use when Playwright/browser work is delegated to a separate Browser Runner service with its own auth, egress, and artifact exchange controls. |
+| `local` | `local_best_effort` | 在临时本地 workspace 中执行，使用命令 allowlist 和清理后的环境。 | 记录策略意图；不声明 OS/container 隔离。 |
+| `container` | `container_enforced` | 可用时通过 Docker 或 Podman 执行。 | 记录 Docker/Podman 的网络、进程、内存、CPU 和文件系统能力差异。 |
+| `gvisor` | `runtime_isolated` | 配置容器 runtime 时，通过 Docker 或 Podman + `--runtime runsc` 执行 build/typecheck。 | 用于部署将容器执行路由到 gVisor/runsc，并希望证据体现该边界的场景。 |
+| `firecracker` | `runtime_isolated` | 配置 `AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND` 或 `buildValidation.firecrackerRunnerCommand` 时，通过部署方提供的 Firecracker launcher 执行；否则拒绝执行。 | 用于部署方拥有 Firecracker/KVM/jailer/rootfs 设置，以及跨 VM 边界 Artifact Store 交换的场景。 |
+| `remote_browser_runner` | `remote_isolated` | 配置 `AI_JSUNPACK_BROWSER_RUNNER_URL` 时，通过独立 Browser Runner 服务执行 runtime smoke/compare；不执行 Worker build/typecheck 命令。 | 用于将 Playwright/browser 工作委托给独立 Browser Runner 服务，并由该服务承担 auth、egress 和 artifact exchange 控制。 |
 
-The high-isolation build profiles intentionally do not fall back to a weaker runner. If `AI_JSUNPACK_SANDBOX_RUNNER=gvisor` is set and no Docker/Podman runtime can be found or configured, validation emits `sandbox_denied` evidence with the selected profile and adapter limitation. If `AI_JSUNPACK_SANDBOX_RUNNER=firecracker` is set without a launcher command, validation emits `sandbox_denied` evidence instead of running locally. `remote_browser_runner` is executable for browser validation only; build/typecheck still require `local`, `container`, `gvisor`, or configured `firecracker`.
+高隔离 build profile 有意不回退到更弱 runner。如果设置 `AI_JSUNPACK_SANDBOX_RUNNER=gvisor` 但找不到或未配置 Docker/Podman runtime，validation 会写入带所选 profile 和 adapter limitation 的 `sandbox_denied` evidence。如果设置 `AI_JSUNPACK_SANDBOX_RUNNER=firecracker` 但没有 launcher command，validation 会写入 `sandbox_denied` evidence，而不是本地执行。`remote_browser_runner` 只可用于浏览器验证；build/typecheck 仍需要 `local`、`container`、`gvisor` 或已配置的 `firecracker`。
 
-Production guidance:
+生产建议：
 
-- Use `container` for the current executable deployment path.
-- Use `gvisor` only when Docker or Podman is configured with the `runsc` runtime. Worker invokes the configured container runtime with `--runtime runsc`, the same workspace/image/env-cleaning behavior as the container runner, and records `runtime_isolated`, `runnerKind=gvisor`, capability details, runtime version, and limitations in `build_artifact.resourcePolicy`.
-- Use `firecracker` only on Linux hosts with KVM, jailer/rootfs provisioning, explicit resource limits, and Artifact Store transfer across the microVM boundary. The configured launcher receives a JSON request on stdin with `workspace`, `workingDirectory`, `command`, `environment`, `networkPolicy`, `resourcePolicy`, `timeoutMs`, and optional `stdinBase64`; it must print JSON on stdout with `stdout`, `stderr`, `exitCode`, `timedOut`, `outputTruncated`, and `failureClass`.
-- `deploy/firecracker/launcher.py` is the production launcher template. It validates the Worker protocol, prepares a per-run exchange directory, checks kernel/rootfs/jailer/firecracker prerequisites, and delegates actual KVM/jailer execution to a deployment wrapper command. `deploy/firecracker/README.md` defines the deployment acceptance checklist, resource mapping, network isolation requirements, Artifact Store exchange boundary, and JSON request/response contract.
-- Use the `browser-runner` service boundary for Playwright/browser execution isolation. Worker submits asynchronous `/browser-runs` requests with a signed worker service Bearer token, polls completion, and records `executionBoundary` plus runtime trace/screenshot evidence in the result package.
-- The browser-runner ASGI app is `apps.browser_runner.app.main:app`; deploy it with the same `AI_JSUNPACK_AUTH_SECRET` as Worker and install Playwright browsers in that image.
-- The browser-runner queue is selected with `AI_JSUNPACK_BROWSER_RUNNER_QUEUE_BACKEND`. Use `postgresql` with `AI_JSUNPACK_BROWSER_RUNNER_QUEUE_DATABASE_URL` for multi-instance deployments that share the metadata DB; use `sqlite` with `AI_JSUNPACK_BROWSER_RUNNER_DB_PATH` only for single-instance local operation.
-- `AI_JSUNPACK_BROWSER_RUNNER_WORKERS`, `AI_JSUNPACK_BROWSER_RUNNER_MAX_ATTEMPTS`, `AI_JSUNPACK_BROWSER_RUNNER_LEASE_SECONDS`, `AI_JSUNPACK_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS`, and `AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS` control per-instance concurrency, retries, lease recovery, and scheduling cadence.
-- `AI_JSUNPACK_BROWSER_RUNNER_MAX_QUEUE_AGE_MS`, `AI_JSUNPACK_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS`, `AI_JSUNPACK_BROWSER_RUNNER_MAX_EXPIRED_RUNNING`, and `AI_JSUNPACK_BROWSER_RUNNER_MAX_RETRY_RATE` define the service-local health thresholds used by `/health`, `/browser-runs/metrics`, and audit evidence.
-- Queue recovery is best-effort on service start: expired `running` runs are re-queued until their attempt cap is reached, then emitted as `best_effort` evidence with timeout classification.
-- `/health` returns `BrowserRunnerQueueHealth` with backend status, queue metrics, worker settings, and alerts; use it as the container readiness/liveness check. `/browser-runs/metrics` requires a worker service Bearer token and returns the same queue metrics without the health wrapper.
-- The API exposes `/ops/heartbeats`, `/ops/metrics`, and `/ops/alerts` JSON endpoints for shared heartbeat persistence, aggregated ops snapshots, and best-effort alert webhook delivery.
-- The API also exposes `/ops/prometheus` as the Prometheus scrape surface for the same aggregated ops snapshot. Scrape requests must include a Bearer token with ops read access; the endpoint intentionally does not provide anonymous metrics because service instance, queue, job status, and alert labels are operationally sensitive.
-- `AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS` controls heartbeat expiry for API, Worker, and Browser Runner ops records; `AI_JSUNPACK_ALERT_WEBHOOK_URL` and `AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS` control API alert delivery.
-- Monitor `queuedCount`, `oldestQueuedAgeMs`, `claimLatencyMs`, `averageRunDurationMs`, `retryRate`, `leaseRecoveryCount`, `expiredRunningCount`, and `backendStatus` for each Browser Runner deployment. Alert when backend status is degraded, `expiredRunningCount` is non-zero, queue age or claim latency exceeds the configured thresholds, retry rate rises above the configured threshold, or queued runs stay above total worker capacity.
-- `BrowserRunSummary` and `runtime_trace.executionBoundary` record queue backend, run attempt, max attempts, worker id, lease recovery, retry policy, queue length, claim latency, run duration, retry rate, backend health, and alert fields so multi-instance scheduling remains auditable in result packages.
+- 使用 `container` 作为当前可执行部署路径。
+- 仅当 Docker 或 Podman 已配置 `runsc` runtime 时使用 `gvisor`。Worker 会使用配置的 container runtime 并传入 `--runtime runsc`，保持与 container runner 相同的 workspace/image/env-cleaning 行为，并在 `build_artifact.resourcePolicy` 中记录 `runtime_isolated`、`runnerKind=gvisor`、capability details、runtime version 和 limitations。
+- 仅在 Linux 主机具备 KVM、jailer/rootfs provisioning、显式资源限制和跨 microVM Artifact Store transfer 时使用 `firecracker`。配置的 launcher 从 stdin 接收 JSON 请求，包含 `workspace`、`workingDirectory`、`command`、`environment`、`networkPolicy`、`resourcePolicy`、`timeoutMs` 和可选 `stdinBase64`；它必须在 stdout 打印 JSON，包含 `stdout`、`stderr`、`exitCode`、`timedOut`、`outputTruncated` 和 `failureClass`。
+- `deploy/firecracker/launcher.py` 是生产 launcher 模板。它校验 Worker 协议、准备每次运行的 exchange directory、检查 kernel/rootfs/jailer/firecracker 前置条件，并将实际 KVM/jailer 执行委托给 deployment wrapper command。`deploy/firecracker/README.md` 定义部署验收清单、资源映射、网络隔离要求、Artifact Store exchange 边界和 JSON request/response 契约。
+- 使用 `browser-runner` 服务边界隔离 Playwright/browser 执行。Worker 使用签名 worker service Bearer token 提交异步 `/browser-runs` 请求，轮询完成结果，并把 `executionBoundary` 以及 runtime trace/screenshot 证据记录到结果包中。
+- browser-runner ASGI app 是 `apps.browser_runner.app.main:app`；部署时使用与 Worker 相同的 `AI_JSUNPACK_AUTH_SECRET`，并在镜像中安装 Playwright browsers。
+- browser-runner 队列由 `AI_JSUNPACK_BROWSER_RUNNER_QUEUE_BACKEND` 选择。多实例部署使用 `postgresql` 和 `AI_JSUNPACK_BROWSER_RUNNER_QUEUE_DATABASE_URL`，与 metadata DB 共享；单实例本地运行才使用 `sqlite` 和 `AI_JSUNPACK_BROWSER_RUNNER_DB_PATH`。
+- `AI_JSUNPACK_BROWSER_RUNNER_WORKERS`、`AI_JSUNPACK_BROWSER_RUNNER_MAX_ATTEMPTS`、`AI_JSUNPACK_BROWSER_RUNNER_LEASE_SECONDS`、`AI_JSUNPACK_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS` 和 `AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS` 控制每实例并发、重试、lease recovery 和调度节奏。
+- `AI_JSUNPACK_BROWSER_RUNNER_MAX_QUEUE_AGE_MS`、`AI_JSUNPACK_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS`、`AI_JSUNPACK_BROWSER_RUNNER_MAX_EXPIRED_RUNNING` 和 `AI_JSUNPACK_BROWSER_RUNNER_MAX_RETRY_RATE` 定义 `/health`、`/browser-runs/metrics` 和审计证据使用的服务本地健康阈值。
+- 服务启动时会 best-effort 恢复队列：过期的 `running` run 会重新入队直到达到 attempt cap，然后以 timeout 分类写出 `best_effort` evidence。
+- `/health` 返回 `BrowserRunnerQueueHealth`，包含 backend status、queue metrics、worker settings 和 alerts；将它作为容器 readiness/liveness check。`/browser-runs/metrics` 要求 worker service Bearer token，并返回不带 health wrapper 的相同队列指标。
+- API 暴露 `/ops/heartbeats`、`/ops/metrics` 和 `/ops/alerts` JSON 端点，用于共享 heartbeat 持久化、聚合 ops snapshot 和 best-effort alert webhook delivery。
+- API 也暴露 `/ops/prometheus` 作为相同聚合 ops snapshot 的 Prometheus scrape surface。Scrape 请求必须包含具备 ops read 权限的 Bearer token；该端点有意不提供匿名指标，因为服务实例、队列、Job 状态和 alert label 都是敏感运维信息。
+- `AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS` 控制 API、Worker 和 Browser Runner ops 记录的 heartbeat 过期时间；`AI_JSUNPACK_ALERT_WEBHOOK_URL` 和 `AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS` 控制 API alert delivery。
+- 监控每个 Browser Runner 部署的 `queuedCount`、`oldestQueuedAgeMs`、`claimLatencyMs`、`averageRunDurationMs`、`retryRate`、`leaseRecoveryCount`、`expiredRunningCount` 和 `backendStatus`。当 backend status degraded、`expiredRunningCount` 非零、队列年龄或 claim latency 超过阈值、retry rate 超过阈值，或 queued runs 持续高于总 worker capacity 时触发告警。
+- `BrowserRunSummary` 和 `runtime_trace.executionBoundary` 会记录 queue backend、run attempt、max attempts、worker id、lease recovery、retry policy、queue length、claim latency、run duration、retry rate、backend health 和 alert fields，使多实例调度在结果包中保持可审计。

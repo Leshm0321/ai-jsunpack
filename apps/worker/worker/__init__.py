@@ -1,2 +1,1 @@
-"""Worker pipeline for AI JS Unpack."""
-
+"""AI JS Unpack 的 Worker pipeline。"""

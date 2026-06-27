@@ -28,7 +28,7 @@ class KnowledgeHit:
 
 
 class StaticKnowledgeRetriever:
-    """Deterministic knowledge retrieval for Core, current-job, and same-project historical evidence."""
+    """为 Core、当前 Job 和同项目历史证据提供确定性知识检索。"""
 
     def retrieve(
         self,

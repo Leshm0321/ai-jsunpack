@@ -49,10 +49,9 @@ class ObjectStorageClient(Protocol):
 
 
 class Boto3ObjectStorageClient:
-    """Production S3/MinIO client backed by boto3.
+    """基于 boto3 的生产 S3/MinIO client。
 
-    The constructor accepts an already-created client for tests and deployments
-    that manage boto3 sessions outside this module.
+    构造函数接受已创建的 client，便于测试或由模块外管理 boto3 session 的部署复用。
     """
 
     def __init__(
@@ -360,7 +359,7 @@ class LocalArtifactStore:
 
 
 class S3CompatibleArtifactStore:
-    """S3/MinIO-compatible artifact store."""
+    """兼容 S3/MinIO 的 Artifact Store。"""
 
     def __init__(
         self,

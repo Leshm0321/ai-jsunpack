@@ -110,7 +110,7 @@ async function responseErrorMessage(response: Response): Promise<string> {
       return JSON.stringify(payload.detail);
     }
   } catch {
-    // Fall back to the status line below when the response is not JSON.
+    // 响应不是 JSON 时，回退到下面的状态行。
   }
   return `${response.status} ${response.statusText}`;
 }

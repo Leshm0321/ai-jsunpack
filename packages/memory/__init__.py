@@ -21,7 +21,7 @@ class JobMemoryContext:
 
 
 class JobMemoryService:
-    """Builds auditable job and project memory context from deterministic artifacts."""
+    """基于确定性 Artifact 构建可审计的 Job 与项目记忆上下文。"""
 
     def create_context(
         self,

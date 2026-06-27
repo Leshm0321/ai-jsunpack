@@ -985,7 +985,7 @@ class RuntimeCompareReviewGateResult:
 
 
 class RuntimeCompareReviewGate:
-    """Turns runtime comparison differences into review and repair evidence."""
+    """将 runtime comparison 差异转为 review 和 repair evidence。"""
 
     def run(
         self,
@@ -1240,7 +1240,7 @@ class RuntimeCompareRepairResult:
 
 
 class RuntimeCompareRepairRunner:
-    """Applies low-risk deterministic runtime repair actions to a generated project attempt."""
+    """对生成工程 attempt 应用低风险确定性 runtime repair 动作。"""
 
     PROTECTED_ROOTS = {"src", "scripts", "node_modules", ".git"}
     PROTECTED_FILES = {

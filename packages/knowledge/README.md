@@ -1,5 +1,5 @@
-# Knowledge Package
+# Knowledge 包
 
-This package implements deterministic retrieval for build runtimes, obfuscation patterns, framework signatures, browser shims, and current-job repair cases.
+该包为构建运行时、混淆模式、框架特征、浏览器 shim 和当前 Job 修复案例实现确定性检索。
 
-Knowledge hits must be written as evidence references and never override direct evidence from the current input package.
+知识命中必须写入为证据引用，不能覆盖当前输入包中的直接证据。

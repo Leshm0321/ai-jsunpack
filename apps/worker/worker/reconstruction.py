@@ -28,7 +28,7 @@ class ReconstructionResult:
 
 
 class ReconstructionRunner:
-    """Runs the deterministic Core writer and persists reconstruction artifacts."""
+    """运行确定性 Core writer，并持久化 reconstruction artifact。"""
 
     def __init__(self, core_bridge: CoreBridge | None = None) -> None:
         self.core_bridge = core_bridge or CoreBridge()

@@ -186,7 +186,7 @@ class RepairOutcome:
 
 
 class BuildValidationRunner:
-    """Runs generated project install, build, typecheck, and repair evidence loops."""
+    """运行生成工程的 install、build、typecheck 和修复证据循环。"""
 
     def __init__(
         self,

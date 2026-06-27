@@ -523,7 +523,7 @@ class LocalSandboxRunner:
 
 
 class ContainerSandboxRunner(LocalSandboxRunner):
-    """Runs sandbox commands through Docker or Podman with container-level limits."""
+    """通过 Docker 或 Podman 执行 sandbox 命令，并应用容器级限制。"""
 
     def __init__(
         self,
@@ -783,7 +783,7 @@ class ContainerSandboxRunner(LocalSandboxRunner):
 
 
 class GVisorSandboxRunner(ContainerSandboxRunner):
-    """Runs sandbox commands through Docker/Podman with the gVisor runsc runtime."""
+    """通过 Docker/Podman 和 gVisor runsc runtime 执行 sandbox 命令。"""
 
     def __init__(
         self,
@@ -851,7 +851,7 @@ class GVisorSandboxRunner(ContainerSandboxRunner):
 
 
 class FirecrackerSandboxRunner(LocalSandboxRunner):
-    """Delegates sandbox commands to a deployment-provided Firecracker launcher."""
+    """将 sandbox 命令委托给部署方提供的 Firecracker launcher。"""
 
     def __init__(
         self,
@@ -1078,7 +1078,7 @@ class FirecrackerSandboxRunner(LocalSandboxRunner):
 
 
 class ProfileOnlySandboxRunner(LocalSandboxRunner):
-    """Records a stronger sandbox profile and denies execution until an adapter is wired."""
+    """记录更强 sandbox profile，并在 adapter 接入前拒绝执行。"""
 
     def __init__(
         self,

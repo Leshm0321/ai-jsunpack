@@ -98,7 +98,7 @@ class PipelineContext:
 
 
 class WorkerPipeline:
-    """Deterministic pipeline shell that later hosts core, Agent, and sandbox calls."""
+    """确定性 pipeline 外壳，用于承载 Core、Agent 和 sandbox 调用。"""
 
     def __init__(
         self,

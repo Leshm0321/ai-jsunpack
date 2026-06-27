@@ -1,10 +1,9 @@
-# Audit Package
+# Audit 包
 
-This package will own evidence references, rollback maps, human-readable reports, and artifact lineage utilities.
+该包负责证据引用、回滚映射、可读报告和 Artifact lineage 工具。
 
-Current scaffold responsibilities:
+当前脚手架职责：
 
-- Keep audit concepts separate from UI and worker orchestration.
-- Provide the target location for `InferenceRecord`, `ReviewRun`, runtime evidence, and report builders.
-- Preserve the product rule that every AI inference, deterministic transform, tool call, browser validation, and repair action is traceable.
-
+- 将审计概念与 UI、Worker 编排保持分离。
+- 为 `InferenceRecord`、`ReviewRun`、runtime evidence 和报告构建器提供目标位置。
+- 保持产品规则：每次 AI 推断、确定性转换、工具调用、浏览器验证和修复动作都必须可追踪。

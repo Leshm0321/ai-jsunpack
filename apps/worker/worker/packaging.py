@@ -63,7 +63,7 @@ class PackagingResult:
 
 
 class PackagingRunner:
-    """Builds the final downloadable package and human-readable audit report."""
+    """构建最终可下载包和可读审计报告。"""
 
     def run(
         self,

@@ -407,7 +407,7 @@ class CrewAgentPassOutput(BaseModel):
 
 
 class CrewAIAgentProvider:
-    """CrewAI-backed provider with auditable policy and failure fallbacks."""
+    """由 CrewAI 支撑的 provider，提供可审计策略和失败 fallback。"""
 
     tool_name = "crewai.agent_pass"
     tool_version = AGENT_TOOL_VERSION
