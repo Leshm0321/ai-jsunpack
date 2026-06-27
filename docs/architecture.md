@@ -103,6 +103,20 @@ flowchart LR
 - `completed_best_effort` 必须保留失败分类、限制说明、证据和可下载产物。
 - 每个 attempt 都应写入新 artifact，便于回溯和复现。
 
+## Agent Runtime 分层
+
+Agent Runtime 是 Worker Pipeline 内的模型辅助层，不直接改写生成工程。它现在由小模块组成：
+
+- `agent_runtime.py`：只负责编排 memory、knowledge、provider 和 artifact 写入顺序，并保留对外兼容导出。
+- `agent_contracts.py`：集中定义 Agent request/result、provider draft、review/repair/report draft 和 CrewAI structured output。
+- `agent_context.py`：构建输入摘要、evidence refs，并按 `cloudMode=desensitized` 执行确定性脱敏。
+- `agent_providers.py`：封装 CrewAI provider、模型策略、Crew task 组装和 provider 失败 fallback。
+- `agent_feedback.py`：把当前 Job 与同项目历史 Review/Fix evidence 转成保守的 inference、diagnosis 和低风险 repair hints。
+- `agent_tools.py`：用声明式 `ToolSpec` 生成 tool registry。CrewAI provider 被标记为 stateful、not parallel-safe，避免未来调度层把它作为无状态并发工具运行。
+- `agent_artifacts.py`：集中写入 plan、inference、runtime diagnosis、report section、repair instruction、review 和 tool call artifacts，保持 lineage 稳定。
+
+设计边界来自当前 Agent 框架实践：工作流状态和路由要显式，模型工具需要 schema 和状态边界，CrewAI agent/task/process 只作为 provider 内部实现，sessions/tracing/guardrails 类能力通过 artifact lineage、tool call 和 review records 表达。
+
 ## Artifact Lineage
 
 ```mermaid

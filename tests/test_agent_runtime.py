@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 from apps.api.app.models import CreateJobRequest, EvidenceRef
 from apps.api.app.store import create_store
-from apps.worker.worker.agent_runtime import AgentContextRedactor, AgentRuntime, AgentRuntimeRequest, ModelPolicyResolver
+from apps.worker.worker.agent_runtime import (
+    AgentContextRedactor,
+    AgentRuntime,
+    AgentRuntimeRequest,
+    AgentToolRegistryBuilder,
+    ModelPolicyResolver,
+)
 from apps.worker.worker.reconstruction import ReconstructionRunner
 from packages.knowledge import StaticKnowledgeRetriever
 
@@ -134,6 +140,18 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(result.input_summary["scripts"], ["assets/app.js"])
         self.assertEqual(result.memory_excerpt, "Job memory mentions boot.")
         self.assertEqual(result.evidence_refs[0].excerpt, "symbols=['boot']")
+
+    def test_tool_registry_marks_crewai_provider_as_stateful_not_parallel_safe(self):
+        entries = AgentToolRegistryBuilder().entries("job_tools")
+        crewai_entry = next(entry for entry in entries if entry.tool_name == "crewai.agent_pass")
+
+        self.assertEqual(crewai_entry.category, "model")
+        self.assertIn("stateful", crewai_entry.description)
+        self.assertIn("not parallel-safe", crewai_entry.description)
+        self.assertIn("model_call", crewai_entry.description)
+        self.assertIn("crewai_storage", crewai_entry.description)
+        self.assertIn("runtime_diagnosis", crewai_entry.output_artifact_kinds)
+        self.assertIn("repair_instruction", crewai_entry.output_artifact_kinds)
 
     def test_static_knowledge_retriever_recognizes_core_and_runtime_patterns(self):
         retriever = StaticKnowledgeRetriever()
