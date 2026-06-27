@@ -37,6 +37,57 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .[dev]
 ```
 
+## 推荐：使用脚本启动
+
+根目录的 `scripts/dev.mjs` 会自动加载 `.env`，并按服务补齐本地开发需要的环境变量。Web 启动时如果 `VITE_API_AUTH_TOKEN` 为空，脚本会用 `.env` 中的 `AI_JSUNPACK_AUTH_SECRET` 自动生成本地 owner token。
+
+API：
+
+```powershell
+node scripts/dev.mjs api
+```
+
+Web：
+
+```powershell
+node scripts/dev.mjs web
+```
+
+Worker：
+
+```powershell
+node scripts/dev.mjs worker
+```
+
+可选 Browser Runner：
+
+```powershell
+node scripts/dev.mjs browser-runner
+```
+
+如果要让 Worker 使用远程 Browser Runner，先启动 Browser Runner，再启动 Worker：
+
+```powershell
+node scripts/dev.mjs worker --use-browser-runner
+```
+
+也可以使用 npm 便捷命令：
+
+```powershell
+npm run dev:api
+npm run dev:web
+npm run dev:worker
+npm run dev:browser-runner
+npm run dev:check
+```
+
+PowerShell 和 Windows cmd 也提供 wrapper：
+
+```powershell
+.\scripts\dev.ps1 api
+.\scripts\dev.cmd api
+```
+
 ## 生成本地 Token
 
 API 使用由 `AI_JSUNPACK_AUTH_SECRET` 签名的 HMAC Bearer token。
@@ -53,9 +104,9 @@ Worker 调用 Browser Runner 的 service token：
 $env:AI_JSUNPACK_BROWSER_RUNNER_TOKEN = .venv\Scripts\python.exe -c "from apps.api.app.auth import create_auth_token; print(create_auth_token(subject='worker-local', kind='service', projects={'default':'owner'}, service_roles=['worker'], secret='dev-secret', ttl_seconds=86400))"
 ```
 
-## 启动服务
+## 手动启动服务
 
-加载 `.env` 后，在独立终端中启动每个服务。
+通常优先使用上面的脚本。需要排查环境变量问题时，可加载 `.env` 后，在独立终端中手动启动每个服务。
 
 API:
 
