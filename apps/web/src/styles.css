@@ -45,9 +45,6 @@ button:disabled {
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -55,7 +52,6 @@ button:disabled {
   padding: 14px 24px;
   border-bottom: 1px solid rgba(3, 105, 161, 0.18);
   background: rgba(240, 249, 255, 0.92);
-  backdrop-filter: blur(16px);
 }
 
 .brand,
@@ -1963,6 +1959,404 @@ button.graph-node:focus-visible {
 .history-row small {
   color: var(--muted);
   font-size: 11px;
+}
+
+/* Modern technical workbench theme */
+:root {
+  color-scheme: dark;
+  color: #e5eefb;
+  background: #08111f;
+  --primary: #38bdf8;
+  --secondary: #22c55e;
+  --positive: #22c55e;
+  --ink: #f8fafc;
+  --muted: #9fb0c7;
+  --surface: rgba(13, 27, 47, 0.86);
+  --surface-strong: #101f35;
+  --surface-soft: rgba(15, 31, 53, 0.72);
+  --border: rgba(148, 163, 184, 0.24);
+  --danger: #fb7185;
+  --warning: #fbbf24;
+  --grid-line: rgba(148, 163, 184, 0.08);
+  --shadow-soft: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --shadow-panel: 0 16px 42px rgba(2, 6, 23, 0.36);
+}
+
+body {
+  color: var(--ink);
+  background:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(135deg, #08111f 0%, #0b1727 45%, #111827 100%);
+  background-size: 32px 32px, 32px 32px, auto;
+}
+
+.app-shell {
+  background:
+    linear-gradient(180deg, rgba(56, 189, 248, 0.08), transparent 320px),
+    linear-gradient(120deg, rgba(34, 197, 94, 0.08), transparent 420px);
+}
+
+.topbar {
+  position: static;
+  max-width: calc(100% - 32px);
+  margin: 0 auto;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #121a22 0%, #0f171f 100%);
+  box-shadow: 0 10px 28px rgba(2, 6, 23, 0.24);
+  isolation: isolate;
+}
+
+.brand,
+.topnav a {
+  color: var(--ink);
+}
+
+.topnav a {
+  position: relative;
+  color: var(--muted);
+  transition: color 180ms ease;
+}
+
+.topnav a:hover {
+  color: var(--ink);
+}
+
+.brand-mark {
+  color: #04111f;
+  background: var(--positive);
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.28), 0 0 26px rgba(34, 197, 94, 0.24);
+}
+
+.language-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  color: var(--muted);
+  background: #14202b;
+}
+
+.language-option {
+  min-width: 34px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.language-option:hover,
+.language-option-active {
+  color: #04111f;
+  border-color: rgba(34, 197, 94, 0.48);
+  background: var(--positive);
+}
+
+.topnav a:focus-visible,
+button:focus-visible,
+.dropzone:focus-within {
+  outline: 3px solid rgba(34, 197, 94, 0.34);
+}
+
+.entry-band {
+  padding-top: 48px;
+}
+
+.entry-copy h1 {
+  color: var(--ink);
+  text-wrap: balance;
+}
+
+.eyebrow,
+.panel-kicker {
+  color: var(--positive);
+}
+
+.entry-text,
+.dropzone span,
+.graph-node small,
+.runtime-compare-note,
+.muted-inline {
+  color: var(--muted);
+}
+
+.primary-action {
+  color: #03120a;
+  background: var(--positive);
+  box-shadow: 0 14px 30px rgba(34, 197, 94, 0.22);
+}
+
+.primary-action:hover {
+  background: #4ade80;
+}
+
+.primary-action:disabled:hover {
+  background: var(--positive);
+}
+
+.secondary-action,
+.download-link,
+.lineage-chip,
+.evidence-ref-chip,
+.graph-mode {
+  color: var(--ink);
+  border-color: rgba(148, 163, 184, 0.28);
+  background: rgba(15, 31, 53, 0.74);
+}
+
+.secondary-action:hover,
+.download-link:hover,
+.lineage-chip:hover,
+.evidence-ref-chip:hover {
+  border-color: rgba(56, 189, 248, 0.58);
+  background: rgba(14, 165, 233, 0.12);
+  box-shadow: 0 10px 24px rgba(2, 132, 199, 0.14);
+}
+
+.entry-visual,
+.workbench-panel {
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(18px);
+}
+
+.entry-visual {
+  position: relative;
+  overflow: hidden;
+}
+
+.entry-visual::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-top: 1px solid rgba(56, 189, 248, 0.28);
+}
+
+.pipeline-node,
+.pipeline-status,
+.stage-step,
+.job-summary,
+.detail-item,
+.detail-block,
+.issue-list,
+.history-row,
+.lineage-panel,
+.preview-panel,
+.empty-state,
+.graph-metric,
+.report-metric,
+.runtime-metric,
+.runtime-compare-status,
+.runtime-diff-metric,
+.runtime-diff-section,
+.runtime-run-card,
+.runtime-screenshot-card,
+.report-row,
+.report-issue-row,
+.package-content-row,
+.report-section-row,
+.evidence-index-row,
+.report-section-detail-row,
+.audit-summary-grid div {
+  border-color: var(--border);
+  background: var(--surface-soft);
+}
+
+.pipeline-node,
+.stage-step {
+  color: var(--ink);
+}
+
+.pipeline-node span,
+.stage-icon,
+.audit-filter-icon,
+.section-heading span {
+  color: var(--positive);
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.pipeline-status,
+.status-token-pass,
+.runtime-pass {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.44);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.pipeline-status.warning,
+.status-warning,
+.status-token-warn,
+.runtime-warn,
+.download-disabled {
+  color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.48);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.status-error,
+.status-token-fail,
+.runtime-fail,
+.preview-error,
+.graph-node-fail {
+  color: #fecdd3;
+  border-color: rgba(251, 113, 133, 0.48);
+  background: rgba(251, 113, 133, 0.1);
+}
+
+.panel-heading {
+  color: var(--primary);
+}
+
+.panel-heading h2,
+.detail-item strong,
+.detail-block code,
+.issue-list code,
+.issue-list strong,
+.job-summary strong,
+.report-row strong,
+.section-heading h3,
+.graph-metric strong,
+.report-metric strong,
+.runtime-metric strong,
+.runtime-diff-metric strong,
+.runtime-diff-section code,
+.runtime-diff-section small,
+.runtime-screenshot-card strong,
+.history-row strong {
+  color: var(--ink);
+}
+
+.dropzone,
+.mode-pill,
+.artifact-row,
+.file-row,
+.preview-message,
+.graph-viewport,
+.graph-node,
+.graph-edge-list,
+.graph-edge-list span,
+.table-shell,
+.data-table th,
+.runtime-comparison-viewport,
+.runtime-comparison-row,
+.runtime-screenshot-card,
+.audit-toolbar input,
+.audit-toolbar select,
+.audit-saved-toolbar input,
+.audit-saved-toolbar select,
+.runtime-filter-grid select,
+.report-detail-filter,
+.report-detail-filter input {
+  color: var(--ink);
+  border-color: var(--border);
+  background: rgba(8, 17, 31, 0.48);
+}
+
+.dropzone:hover,
+.file-row:hover,
+.file-row-active,
+.graph-mode:hover,
+.graph-mode-active,
+.runtime-comparison-row:hover,
+.runtime-comparison-row:focus-visible,
+.runtime-comparison-row.row-active {
+  color: var(--ink);
+  border-color: rgba(56, 189, 248, 0.58);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.mode-pill-active {
+  color: #03120a;
+  border-color: rgba(34, 197, 94, 0.58);
+  background: var(--positive);
+}
+
+.stage-active,
+.graph-node-active,
+.graph-node-selected {
+  border-color: rgba(56, 189, 248, 0.72);
+  box-shadow: inset 3px 0 0 var(--primary), 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.stage-done {
+  border-color: rgba(34, 197, 94, 0.42);
+}
+
+.stage-warning {
+  border-color: rgba(251, 191, 36, 0.58);
+}
+
+.stage-fail {
+  border-color: rgba(251, 113, 133, 0.58);
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.graph-canvas {
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    #0b1424;
+}
+
+.graph-edge-path {
+  stroke: rgba(56, 189, 248, 0.48);
+}
+
+.graph-edges marker path {
+  fill: rgba(56, 189, 248, 0.68);
+}
+
+.graph-node-resource,
+.graph-node-warn,
+.audit-group-row td {
+  background: rgba(15, 31, 53, 0.88);
+}
+
+.graph-node-analysis,
+.graph-node-agent,
+.graph-node-tool {
+  border-color: rgba(168, 85, 247, 0.34);
+}
+
+.graph-node-review,
+.report-risk-strip.warning,
+.audit-group-review td {
+  border-color: rgba(251, 191, 36, 0.42);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.audit-group-blocking td {
+  background: rgba(251, 113, 133, 0.1);
+}
+
+.audit-selected-row,
+.audit-group-passing td {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.data-table th {
+  color: var(--positive);
+}
+
+.data-table td {
+  border-bottom-color: rgba(148, 163, 184, 0.18);
+}
+
+.code-preview,
+.artifact-preview-editor,
+.runtime-screenshot-card img {
+  background: #050b14;
 }
 
 @media (max-width: 1100px) {

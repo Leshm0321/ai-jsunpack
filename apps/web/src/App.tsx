@@ -17,6 +17,7 @@ import {
   FileText,
   Filter,
   GitBranch,
+  Languages,
   Link2,
   ListTree,
   Network,
@@ -61,6 +62,8 @@ import {
   uploadSource
 } from "./api";
 import type { JobSummary } from "./api";
+import { LocalizationContext, persistPreferredLanguage, readPreferredLanguage, translate, useLocalization } from "./i18n";
+import type { Language, LocalizationValue } from "./i18n";
 
 gsap.registerPlugin(useGSAP);
 const ArtifactTextEditor = lazy(() => import("./ArtifactTextEditor"));
@@ -70,10 +73,11 @@ type MetricStatus = "pass" | "warn" | "fail";
 
 interface StageDefinition {
   status: JobStatus;
-  label: string;
+  labelKey: string;
 }
 
 interface StageItem extends StageDefinition {
+  label: string;
   state: StageState;
 }
 
@@ -275,15 +279,15 @@ const runtimeComparisonRowHeight = 50;
 const runtimeComparisonListHeight = 280;
 
 const stageDefinitions: StageDefinition[] = [
-  { status: "queued", label: "Job created" },
-  { status: "intake", label: "Input inventory" },
-  { status: "indexing", label: "AST and resource index" },
-  { status: "agent_pass", label: "Agent inference" },
-  { status: "reconstructing", label: "Project writer" },
-  { status: "runtime_smoke", label: "Browser validation" },
-  { status: "runtime_compare", label: "Runtime compare" },
-  { status: "reviewing", label: "Review and repair" },
-  { status: "completed", label: "Package ready" }
+  { status: "queued", labelKey: "stage.queued" },
+  { status: "intake", labelKey: "stage.intake" },
+  { status: "indexing", labelKey: "stage.indexing" },
+  { status: "agent_pass", labelKey: "stage.agent_pass" },
+  { status: "reconstructing", labelKey: "stage.reconstructing" },
+  { status: "runtime_smoke", labelKey: "stage.runtime_smoke" },
+  { status: "runtime_compare", labelKey: "stage.runtime_compare" },
+  { status: "reviewing", labelKey: "stage.reviewing" },
+  { status: "completed", labelKey: "stage.completed" }
 ];
 
 const reportArtifactKinds = new Set<Artifact["kind"]>([
@@ -347,6 +351,7 @@ function emptyArtifactPreview(): ArtifactPreview {
 }
 
 export function AppContainer() {
+  const [language, setLanguageState] = useState<Language>(() => readPreferredLanguage());
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview>(() => emptyArtifactPreview());
   const [selectedCloudMode, setSelectedCloudMode] = useState<CloudMode>("local_only");
@@ -362,18 +367,30 @@ export function AppContainer() {
   const currentJob = jobSummary?.job ?? null;
   const artifacts = jobSummary?.artifacts ?? [];
   const latestRuntime = evidence.runtimeValidations.at(-1) ?? null;
+  const t = useMemo(() => (key: string) => translate(language, key), [language]);
+  const localization = useMemo<LocalizationValue>(
+    () => ({
+      language,
+      setLanguage: (nextLanguage) => {
+        setLanguageState(nextLanguage);
+        persistPreferredLanguage(nextLanguage);
+      },
+      t
+    }),
+    [language, t]
+  );
   const selectedArtifact = useMemo(
     () => artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? artifacts[0] ?? null,
     [artifacts, selectedArtifactId]
   );
   const data = useMemo<WorkbenchData>(
     () => ({
-      stages: buildStageItems(currentJob?.status),
+      stages: buildStageItems(currentJob?.status, t),
       latestRuntime,
       reportArtifacts: buildReportArtifacts(artifacts),
-      runtimeMetrics: buildRuntimeMetrics(latestRuntime, evidence.runtimeValidations.length)
+      runtimeMetrics: buildRuntimeMetrics(latestRuntime, evidence.runtimeValidations.length, t)
     }),
-    [artifacts, currentJob?.status, evidence.runtimeValidations.length, latestRuntime]
+    [artifacts, currentJob?.status, evidence.runtimeValidations.length, latestRuntime, t]
   );
 
   useEffect(() => {
@@ -463,7 +480,7 @@ export function AppContainer() {
       return;
     }
     if (!selectedUploadFile) {
-      setUploadError("Select an input artifact before creating a job.");
+      setUploadError(t("upload.error.noFile"));
       return;
     }
 
@@ -533,29 +550,31 @@ export function AppContainer() {
   };
 
   return (
-    <AppView
-      apiBaseUrl={API_BASE_URL}
-      artifactPreview={artifactPreview}
-      artifacts={artifacts}
-      currentJob={currentJob}
-      data={data}
-      evidence={evidence}
-      isRefreshing={isRefreshing}
-      isRerunning={isRerunning}
-      isSubmitting={isSubmitting}
-      onArtifactSelect={setSelectedArtifactId}
-      onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
-      onFileChange={setSelectedUploadFile}
-      onRefreshJob={handleRefreshJob}
-      onRerunJob={handleRerunJob}
-      onSelectCloudMode={setSelectedCloudMode}
-      onSubmitJob={handleSubmitJob}
-      pollError={pollError}
-      selectedArtifact={selectedArtifact}
-      selectedCloudMode={selectedCloudMode}
-      selectedUploadFile={selectedUploadFile}
-      uploadError={uploadError}
-    />
+    <LocalizationContext.Provider value={localization}>
+      <AppView
+        apiBaseUrl={API_BASE_URL}
+        artifactPreview={artifactPreview}
+        artifacts={artifacts}
+        currentJob={currentJob}
+        data={data}
+        evidence={evidence}
+        isRefreshing={isRefreshing}
+        isRerunning={isRerunning}
+        isSubmitting={isSubmitting}
+        onArtifactSelect={setSelectedArtifactId}
+        onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
+        onFileChange={setSelectedUploadFile}
+        onRefreshJob={handleRefreshJob}
+        onRerunJob={handleRerunJob}
+        onSelectCloudMode={setSelectedCloudMode}
+        onSubmitJob={handleSubmitJob}
+        pollError={pollError}
+        selectedArtifact={selectedArtifact}
+        selectedCloudMode={selectedCloudMode}
+        selectedUploadFile={selectedUploadFile}
+        uploadError={uploadError}
+      />
+    </LocalizationContext.Provider>
   );
 }
 
@@ -606,6 +625,7 @@ function AppView({
   selectedUploadFile,
   uploadError
 }: AppViewProps) {
+  const { language, setLanguage, t } = useLocalization();
   const rootRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -619,16 +639,23 @@ function AppView({
         (context) => {
           const reduceMotion = Boolean(context.conditions?.reduceMotion);
           if (reduceMotion) {
-            gsap.set(".motion-item", { autoAlpha: 1, x: 0, y: 0, scale: 1 });
+            gsap.set(".motion-item, .topbar, .pipeline-node, .pipeline-status, .stage-step", {
+              autoAlpha: 1,
+              x: 0,
+              y: 0,
+              scale: 1
+            });
             return;
           }
 
-          const timeline = gsap.timeline({ defaults: { duration: 0.45, ease: "power2.out" } });
+          const timeline = gsap.timeline({ defaults: { duration: 0.46, ease: "power3.out" } });
           timeline
-            .from(".entry-copy", { y: 18, autoAlpha: 0 })
-            .from(".entry-visual", { y: 18, autoAlpha: 0 }, "<0.08")
-            .from(".workbench-panel", { y: 18, autoAlpha: 0, stagger: 0.06 }, "<0.12")
-            .from(".stage-step", { x: -16, autoAlpha: 0, stagger: 0.05 }, "<0.1");
+            .from(".topbar", { y: -16, autoAlpha: 0, duration: 0.36 })
+            .from(".entry-copy", { y: 24, autoAlpha: 0 }, "<0.08")
+            .from(".entry-visual", { y: 24, autoAlpha: 0, scale: 0.985 }, "<0.1")
+            .from(".pipeline-node, .pipeline-status", { x: 18, autoAlpha: 0, stagger: 0.045 }, "<0.08")
+            .from(".workbench-panel", { y: 24, autoAlpha: 0, stagger: 0.055 }, "<0.08")
+            .from(".stage-step", { x: -18, autoAlpha: 0, stagger: 0.045 }, "<0.05");
 
           return () => timeline.kill();
         }
@@ -636,57 +663,55 @@ function AppView({
 
       return () => mm.revert();
     },
-    { scope: rootRef }
+    { dependencies: [language], revertOnUpdate: true, scope: rootRef }
   );
 
   return (
     <div className="app-shell" ref={rootRef}>
       <header className="topbar">
-        <a className="brand" href="#overview" aria-label="AI JS Unpack overview">
+        <a className="brand" href="#overview" aria-label={t("app.aria.overview")}>
           <span className="brand-mark">
             <Binary size={18} aria-hidden="true" />
           </span>
           <span>AI JS Unpack</span>
         </a>
-        <nav className="topnav" aria-label="Primary">
-          <a href="#workflow">Workflow</a>
-          <a href="#audit">Audit</a>
-          <a href="#runtime">Runtime</a>
+        <nav className="topnav" aria-label={t("app.aria.primaryNav")}>
+          <a href="#workflow">{t("nav.workflow")}</a>
+          <a href="#audit">{t("nav.audit")}</a>
+          <a href="#runtime">{t("nav.runtime")}</a>
         </nav>
+        <LanguageToggle language={language} onLanguageChange={setLanguage} />
       </header>
 
       <main>
         <section className="entry-band" id="overview">
           <div className="entry-copy motion-item">
-            <p className="eyebrow">Authorized JavaScript restoration</p>
-            <h1>AI-assisted deobfuscation with browser runtime evidence.</h1>
-            <p className="entry-text">
-              Upload a production build, inspect recovered artifacts, trace every inference, and validate behavior in a
-              controlled browser runtime.
-            </p>
+            <p className="eyebrow">{t("hero.eyebrow")}</p>
+            <h1>{t("hero.title")}</h1>
+            <p className="entry-text">{t("hero.text")}</p>
             <div className="entry-actions">
               <button className="primary-action" type="button" onClick={() => fileInputRef.current?.click()}>
                 <Upload size={18} aria-hidden="true" />
-                Upload build
+                {t("action.uploadBuild")}
               </button>
               <button className="secondary-action" type="button" onClick={onRefreshJob} disabled={!currentJob || isRefreshing}>
                 <RefreshCw size={18} aria-hidden="true" />
-                Refresh job
+                {t("action.refreshJob")}
               </button>
             </div>
           </div>
 
-          <div className="entry-visual motion-item" aria-label="Pipeline overview">
+          <div className="entry-visual motion-item" aria-label={t("app.aria.pipelineOverview")}>
             <PipelineMap currentJob={currentJob} artifacts={artifacts} evidence={evidence} />
           </div>
         </section>
 
-        <section className="workbench" id="workflow" aria-label="Analysis workbench">
+        <section className="workbench" id="workflow" aria-label={t("app.aria.workbench")}>
           <section className="workbench-panel upload-panel motion-item">
             <div className="panel-heading">
               <div>
-                <p className="panel-kicker">Source intake</p>
-                <h2>Input package</h2>
+                <p className="panel-kicker">{t("panel.sourceKicker")}</p>
+                <h2>{t("panel.inputPackage")}</h2>
               </div>
               <ShieldCheck size={22} aria-hidden="true" />
             </div>
@@ -694,8 +719,8 @@ function AppView({
               <label className="dropzone" htmlFor="source-upload">
                 <Archive size={24} aria-hidden="true" />
                 <div>
-                  <strong>{selectedUploadFile?.name ?? "Select build artifact"}</strong>
-                  <span>{selectedUploadFile ? formatBytes(selectedUploadFile.size) : "HTML, chunks, CSS, assets, sourcemaps"}</span>
+                  <strong>{selectedUploadFile?.name ?? t("upload.selectArtifact")}</strong>
+                  <span>{selectedUploadFile ? formatBytes(selectedUploadFile.size) : t("upload.fileTypes")}</span>
                 </div>
               </label>
               <input
@@ -705,7 +730,7 @@ function AppView({
                 type="file"
                 onChange={(event: ChangeEvent<HTMLInputElement>) => onFileChange(event.currentTarget.files?.[0] ?? null)}
               />
-              <div className="mode-grid" aria-label="Processing modes">
+              <div className="mode-grid" aria-label={t("app.aria.processingModes")}>
                 {CLOUD_MODES.map((mode) => (
                   <ModePill
                     active={mode === selectedCloudMode}
@@ -718,7 +743,7 @@ function AppView({
               <div className="upload-actions">
                 <button className="primary-action compact" type="submit" disabled={isSubmitting}>
                   <Upload size={16} aria-hidden="true" />
-                  {isSubmitting ? "Uploading" : "Create job"}
+                  {isSubmitting ? t("action.uploading") : t("action.createJob")}
                 </button>
                 <button
                   className="secondary-action compact"
@@ -727,7 +752,7 @@ function AppView({
                   disabled={!currentJob || isRefreshing}
                 >
                   <RefreshCw size={16} aria-hidden="true" />
-                  {isRefreshing ? "Refreshing" : "Refresh"}
+                  {isRefreshing ? t("action.refreshing") : t("action.refresh")}
                 </button>
               </div>
             </form>
@@ -746,8 +771,8 @@ function AppView({
           <section className="workbench-panel timeline-panel motion-item">
             <div className="panel-heading">
               <div>
-                <p className="panel-kicker">Job state</p>
-                <h2>{currentJob ? currentJob.status : "No job"}</h2>
+                <p className="panel-kicker">{t("panel.jobKicker")}</p>
+                <h2>{currentJob ? currentJob.status : t("panel.noJob")}</h2>
               </div>
               <Workflow size={22} aria-hidden="true" />
             </div>
@@ -765,19 +790,19 @@ function AppView({
           <section className="workbench-panel tree-panel motion-item">
             <div className="panel-heading">
               <div>
-                <p className="panel-kicker">Artifact index</p>
-                <h2>{artifacts.length} records</h2>
+                <p className="panel-kicker">{t("panel.artifactKicker")}</p>
+                <h2>{artifacts.length} {t("panel.records")}</h2>
               </div>
               <FileCode2 size={22} aria-hidden="true" />
             </div>
             <ArtifactList artifacts={artifacts} selectedArtifact={selectedArtifact} onArtifactSelect={onArtifactSelect} />
           </section>
 
-          <section className="workbench-panel graph-panel motion-item" aria-label="Evidence graph">
+          <section className="workbench-panel graph-panel motion-item" aria-label={t("app.aria.graph")}>
             <div className="panel-heading padded-heading">
               <div>
-                <p className="panel-kicker">Evidence graph</p>
-                <h2>Lineage, chunks, agents</h2>
+                <p className="panel-kicker">{t("panel.graphKicker")}</p>
+                <h2>{t("panel.graphTitle")}</h2>
               </div>
               <GitBranch size={22} aria-hidden="true" />
             </div>
@@ -793,8 +818,8 @@ function AppView({
           <section className="workbench-panel code-panel motion-item" id="artifact-detail">
             <div className="panel-heading padded-heading">
               <div>
-                <p className="panel-kicker">Artifact detail</p>
-                <h2>{selectedArtifact ? selectedArtifact.kind : "No artifact selected"}</h2>
+                <p className="panel-kicker">{t("panel.detailKicker")}</p>
+                <h2>{selectedArtifact ? selectedArtifact.kind : t("panel.noArtifactSelected")}</h2>
               </div>
               <Braces size={22} aria-hidden="true" />
             </div>
@@ -811,8 +836,8 @@ function AppView({
           <section className="workbench-panel report-panel motion-item">
             <div className="panel-heading">
               <div>
-                <p className="panel-kicker">Reports and evidence</p>
-                <h2>{data.reportArtifacts.length} outputs</h2>
+                <p className="panel-kicker">{t("panel.reportKicker")}</p>
+                <h2>{data.reportArtifacts.length} {t("panel.outputs")}</h2>
               </div>
               <Archive size={22} aria-hidden="true" />
             </div>
@@ -828,8 +853,8 @@ function AppView({
           <section className="workbench-panel audit-panel motion-item" id="audit">
             <div className="panel-heading padded-heading">
               <div>
-                <p className="panel-kicker">Evidence ledger</p>
-                <h2>Agent audit</h2>
+                <p className="panel-kicker">{t("panel.auditKicker")}</p>
+                <h2>{t("panel.auditTitle")}</h2>
               </div>
               <SearchCode size={22} aria-hidden="true" />
             </div>
@@ -844,8 +869,8 @@ function AppView({
           <section className="workbench-panel runtime-panel motion-item" id="runtime">
             <div className="panel-heading">
               <div>
-                <p className="panel-kicker">Browser evidence</p>
-                <h2>Runtime validation</h2>
+                <p className="panel-kicker">{t("panel.runtimeKicker")}</p>
+                <h2>{t("panel.runtimeTitle")}</h2>
               </div>
               <Radar size={22} aria-hidden="true" />
             </div>
@@ -874,15 +899,44 @@ function ModePill({
   label: CloudMode;
   onClick: () => void;
 }) {
+  const { t } = useLocalization();
   return (
     <button
       aria-pressed={active}
       className={active ? "mode-pill mode-pill-active" : "mode-pill"}
       type="button"
       onClick={onClick}
+      title={label}
     >
-      {label}
+      {t(`cloud.${label}`)}
     </button>
+  );
+}
+
+function LanguageToggle({
+  language,
+  onLanguageChange
+}: {
+  language: Language;
+  onLanguageChange: (language: Language) => void;
+}) {
+  const { t } = useLocalization();
+  return (
+    <div className="language-toggle" aria-label={t("app.aria.toggleLanguage")}>
+      <Languages size={16} aria-hidden="true" />
+      <span className="visually-hidden">{t("language.current")}</span>
+      {(["en", "zh"] as const).map((option) => (
+        <button
+          aria-pressed={language === option}
+          className={language === option ? "language-option language-option-active" : "language-option"}
+          key={option}
+          type="button"
+          onClick={() => onLanguageChange(option)}
+        >
+          {t(`language.${option}`)}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -897,10 +951,11 @@ function JobSummaryPanel({
   currentJob: Job | null;
   evidence: JobEvidence;
 }) {
+  const { t } = useLocalization();
   if (!currentJob) {
     return (
       <div className="job-summary">
-        <span>API</span>
+        <span>{t("job.api")}</span>
         <strong>{apiBaseUrl}</strong>
       </div>
     );
@@ -908,19 +963,19 @@ function JobSummaryPanel({
 
   return (
     <div className="job-summary">
-      <span>Job</span>
+      <span>{t("job.job")}</span>
       <strong>{currentJob.id}</strong>
-      <span>Updated</span>
+      <span>{t("job.updated")}</span>
       <strong>{formatTimestamp(currentJob.updatedAt)}</strong>
-      <span>Artifacts</span>
+      <span>{t("job.artifacts")}</span>
       <strong>{artifacts.length}</strong>
-      <span>Audit</span>
+      <span>{t("job.audit")}</span>
       <strong>{evidence.inferenceRecords.length + evidence.reviewRuns.length + evidence.toolCalls.length}</strong>
-      <span>Runtime</span>
+      <span>{t("job.runtime")}</span>
       <strong>{evidence.runtimeValidations.length}</strong>
       {currentJob.failureReason ? (
         <>
-          <span>Failure</span>
+          <span>{t("job.failure")}</span>
           <strong>{currentJob.failureReason}</strong>
         </>
       ) : null}
@@ -941,9 +996,10 @@ function WorkspaceActions({
   isRerunning: boolean;
   onRerunJob: () => void;
 }) {
+  const { t } = useLocalization();
   const canRerun = Boolean(currentJob && artifacts.some((artifact) => artifact.kind === "source_input"));
   return (
-    <div className="workspace-actions" aria-label="Workspace actions">
+    <div className="workspace-actions" aria-label={t("app.aria.workspaceActions")}>
       <button
         className="secondary-action compact"
         type="button"
@@ -960,17 +1016,17 @@ function WorkspaceActions({
         }
       >
         <Download size={16} aria-hidden="true" />
-        Export JSON
+        {t("action.exportJson")}
       </button>
       <button
         className="secondary-action compact"
         type="button"
         disabled={!canRerun || isRerunning}
         onClick={onRerunJob}
-        title={canRerun ? "Create a new job from the current source input." : "Rerun requires a source input artifact."}
+        title={canRerun ? t("workspace.rerunTitle.ready") : t("workspace.rerunTitle.blocked")}
       >
         <RotateCcw size={16} aria-hidden="true" />
-        {isRerunning ? "Rerunning" : "Rerun"}
+        {isRerunning ? t("action.rerunning") : t("action.rerun")}
       </button>
     </div>
   );
@@ -985,12 +1041,13 @@ function ArtifactList({
   onArtifactSelect: (artifactId: string) => void;
   selectedArtifact: Artifact | null;
 }) {
+  const { t } = useLocalization();
   if (artifacts.length === 0) {
-    return <EmptyState title="No artifacts yet" detail="Create a job and run the worker to populate artifact metadata." />;
+    return <EmptyState title={t("empty.noArtifacts.title")} detail={t("empty.noArtifacts.detail")} />;
   }
 
   return (
-    <div className="file-list artifact-picker" role="listbox" aria-label="Artifacts">
+    <div className="file-list artifact-picker" role="listbox" aria-label={t("app.aria.artifacts")}>
       {artifacts.map((artifact) => (
         <button
           className={artifact.id === selectedArtifact?.id ? "file-row file-row-active" : "file-row"}
@@ -1022,10 +1079,11 @@ function ArtifactDetail({
   currentJob: Job | null;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   if (!artifact) {
     return (
       <div className="detail-surface">
-        <EmptyState title="Select an artifact" detail="Artifact metadata appears after upload or worker pipeline output." />
+        <EmptyState title={t("empty.selectArtifact.title")} detail={t("empty.selectArtifact.detail")} />
       </div>
     );
   }
@@ -1033,31 +1091,31 @@ function ArtifactDetail({
   return (
     <div className="detail-surface">
       <div className="detail-grid">
-        <DetailItem label="Artifact ID" value={artifact.id} />
-        <DetailItem label="Kind" value={artifact.kind} />
-        <DetailItem label="Stage" value={artifact.stage} />
-        <DetailItem label="Attempt" value={String(artifact.attempt)} />
-        <DetailItem label="Producer" value={artifact.producer} />
-        <DetailItem label="Content type" value={artifact.contentType} />
-        <DetailItem label="Size" value={formatBytes(artifact.size)} />
-        <DetailItem label="Hash" value={artifact.hash} />
-        <DetailItem label="Sensitivity" value={artifact.sensitivityClass} />
-        <DetailItem label="Retention" value={artifact.retentionClass} />
-        <DetailItem label="Created" value={formatTimestamp(artifact.createdAt)} />
-        <DetailItem label="Schema" value={artifact.schemaVersion} />
+        <DetailItem label={t("detail.artifactId")} value={artifact.id} />
+        <DetailItem label={t("detail.kind")} value={artifact.kind} />
+        <DetailItem label={t("detail.stage")} value={artifact.stage} />
+        <DetailItem label={t("detail.attempt")} value={String(artifact.attempt)} />
+        <DetailItem label={t("detail.producer")} value={artifact.producer} />
+        <DetailItem label={t("detail.contentType")} value={artifact.contentType} />
+        <DetailItem label={t("detail.size")} value={formatBytes(artifact.size)} />
+        <DetailItem label={t("detail.hash")} value={artifact.hash} />
+        <DetailItem label={t("detail.sensitivity")} value={artifact.sensitivityClass} />
+        <DetailItem label={t("detail.retention")} value={artifact.retentionClass} />
+        <DetailItem label={t("detail.created")} value={formatTimestamp(artifact.createdAt)} />
+        <DetailItem label={t("detail.schema")} value={artifact.schemaVersion} />
       </div>
       <div className="detail-block">
-        <span>Storage URI</span>
+        <span>{t("detail.storageUri")}</span>
         <code>{artifact.storageUri}</code>
       </div>
       <div className="detail-block">
-        <span>Parent artifacts</span>
-        <code>{formatIdList(artifact.parentArtifactIds)}</code>
+        <span>{t("detail.parentArtifacts")}</span>
+        <code>{formatIdList(artifact.parentArtifactIds, t)}</code>
       </div>
       <ArtifactLineage artifact={artifact} artifacts={artifacts} onArtifactSelect={onArtifactSelect} />
       <ArtifactPreviewPane artifact={artifact} preview={artifactPreview} />
       <div className="detail-actions">
-        <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download artifact" />
+        <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label={t("action.downloadArtifact")} />
       </div>
     </div>
   );
@@ -1072,6 +1130,7 @@ function ArtifactLineage({
   artifacts: Artifact[];
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   const parents = artifact.parentArtifactIds
     .map((artifactId) => artifacts.find((candidate) => candidate.id === artifactId))
     .filter((candidate): candidate is Artifact => Boolean(candidate));
@@ -1082,9 +1141,9 @@ function ArtifactLineage({
       <div className="lineage-panel">
         <div className="lineage-heading">
           <Link2 size={16} aria-hidden="true" />
-          <strong>Lineage</strong>
+          <strong>{t("lineage.title")}</strong>
         </div>
-        <EmptyState title="No linked artifacts" detail="Parent and child artifact relationships appear when lineage is recorded." />
+        <EmptyState title={t("empty.noLinkedArtifacts.title")} detail={t("empty.noLinkedArtifacts.detail")} />
       </div>
     );
   }
@@ -1093,10 +1152,10 @@ function ArtifactLineage({
     <div className="lineage-panel">
       <div className="lineage-heading">
         <Link2 size={16} aria-hidden="true" />
-        <strong>Lineage</strong>
+        <strong>{t("lineage.title")}</strong>
       </div>
-      <ArtifactLineageGroup label="Parents" artifacts={parents} onArtifactSelect={onArtifactSelect} />
-      <ArtifactLineageGroup label="Children" artifacts={children} onArtifactSelect={onArtifactSelect} />
+      <ArtifactLineageGroup label={t("lineage.parents")} artifacts={parents} onArtifactSelect={onArtifactSelect} />
+      <ArtifactLineageGroup label={t("lineage.children")} artifacts={children} onArtifactSelect={onArtifactSelect} />
     </div>
   );
 }
@@ -1110,6 +1169,7 @@ function ArtifactLineageGroup({
   label: string;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   return (
     <div className="lineage-group">
       <span>{label}</span>
@@ -1124,7 +1184,7 @@ function ArtifactLineageGroup({
           ))}
         </div>
       ) : (
-        <strong>None</strong>
+        <strong>{t("common.none")}</strong>
       )}
     </div>
   );
@@ -1143,6 +1203,7 @@ function EvidenceGraphPanel({
   onArtifactSelect: (artifactId: string) => void;
   selectedArtifactId: string | null;
 }) {
+  const { t } = useLocalization();
   const [mode, setMode] = useState<EvidenceGraphMode>("lineage");
   const inventoryArtifact = useMemo(() => latestArtifactOfKind(artifacts, "input_inventory"), [artifacts]);
   const astIndexArtifact = useMemo(() => latestArtifactOfKind(artifacts, "ast_index"), [artifacts]);
@@ -1190,38 +1251,38 @@ function EvidenceGraphPanel({
 
   const graph = useMemo(() => {
     if (mode === "chunks") {
-      return buildChunkEvidenceGraph(artifacts, sources.inventory, sources.astIndexes, sources.status);
+      return buildChunkEvidenceGraph(artifacts, sources.inventory, sources.astIndexes, sources.status, t);
     }
     if (mode === "agents") {
-      return buildAgentFlowGraph(artifacts, evidence);
+      return buildAgentFlowGraph(artifacts, evidence, t);
     }
-    return buildArtifactLineageGraph(artifacts, selectedArtifactId);
-  }, [artifacts, evidence, mode, selectedArtifactId, sources.astIndexes, sources.inventory, sources.status]);
+    return buildArtifactLineageGraph(artifacts, selectedArtifactId, t);
+  }, [artifacts, evidence, mode, selectedArtifactId, sources.astIndexes, sources.inventory, sources.status, t]);
 
   return (
     <div className="evidence-graph">
-      <div className="graph-toolbar" role="tablist" aria-label="Evidence graph views">
-        <GraphModeButton active={mode === "lineage"} icon={Link2} label="Lineage" onClick={() => setMode("lineage")} />
-        <GraphModeButton active={mode === "chunks"} icon={GitBranch} label="Chunks" onClick={() => setMode("chunks")} />
-        <GraphModeButton active={mode === "agents"} icon={Sparkles} label="Agents" onClick={() => setMode("agents")} />
+      <div className="graph-toolbar" role="tablist" aria-label={t("app.aria.graphViews")}>
+        <GraphModeButton active={mode === "lineage"} icon={Link2} label={t("graph.mode.lineage")} onClick={() => setMode("lineage")} />
+        <GraphModeButton active={mode === "chunks"} icon={GitBranch} label={t("graph.mode.chunks")} onClick={() => setMode("chunks")} />
+        <GraphModeButton active={mode === "agents"} icon={Sparkles} label={t("graph.mode.agents")} onClick={() => setMode("agents")} />
       </div>
 
-      <div className="graph-summary-grid" aria-label="Graph summary">
-        <GraphMetric label="Nodes" value={String(graph.nodes.length)} />
-        <GraphMetric label="Edges" value={String(graph.edges.length)} />
-        <GraphMetric label="Mode" value={graph.title} />
+      <div className="graph-summary-grid" aria-label={t("app.aria.graphSummary")}>
+        <GraphMetric label={t("graph.metric.nodes")} value={String(graph.nodes.length)} />
+        <GraphMetric label={t("graph.metric.edges")} value={String(graph.edges.length)} />
+        <GraphMetric label={t("graph.metric.mode")} value={graph.title} />
       </div>
 
       {mode === "chunks" && sources.status === "loading" ? (
         <div className="preview-message">
           <FileText size={18} aria-hidden="true" />
-          Loading inventory and AST index artifacts
+          {t("graph.loadingChunks")}
         </div>
       ) : null}
       {mode === "chunks" && sources.status === "error" ? (
         <div className="preview-message preview-error">
           <AlertCircle size={18} aria-hidden="true" />
-          {sources.error ?? "Chunk evidence could not be loaded; showing artifact-stage fallback."}
+          {sources.error ?? t("graph.chunkLoadError")}
         </div>
       ) : null}
 
@@ -1241,6 +1302,7 @@ function GraphModeButton({
   label: string;
   onClick: () => void;
 }) {
+  const { t } = useLocalization();
   return (
     <button aria-pressed={active} className={active ? "graph-mode graph-mode-active" : "graph-mode"} type="button" onClick={onClick}>
       <Icon size={16} aria-hidden="true" />
@@ -1267,6 +1329,7 @@ function EvidenceGraphCanvas({
   onArtifactSelect: (artifactId: string) => void;
   selectedArtifactId: string | null;
 }) {
+  const { t } = useLocalization();
   const layout = useMemo(() => layoutEvidenceGraph(graph), [graph]);
 
   if (graph.nodes.length === 0) {
@@ -1315,17 +1378,18 @@ function EvidenceGraphCanvas({
           );
         })}
       </div>
-      <div className="graph-edge-list" aria-label="Graph edge list">
+      <div className="graph-edge-list" aria-label={t("app.aria.graphEdges")}>
         {graph.edges.slice(0, 12).map((edge) => (
           <span key={edge.id}>{edge.label}</span>
         ))}
-        {graph.edges.length > 12 ? <span>{graph.edges.length - 12} more edges</span> : null}
+        {graph.edges.length > 12 ? <span>{graph.edges.length - 12} {t("graph.moreEdges")}</span> : null}
       </div>
     </div>
   );
 }
 
 function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; preview: ArtifactPreview }) {
+  const { t } = useLocalization();
   const isCurrentPreview = preview.artifactId === artifact.id;
   const status = isCurrentPreview ? preview.status : "idle";
   const language = preview.text ? artifactPreviewLanguage(artifact, preview.text) : "plaintext";
@@ -1334,7 +1398,7 @@ function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; previe
     <div className="preview-panel">
       <div className="preview-heading">
         <div>
-          <span>Content preview</span>
+          <span>{t("preview.content")}</span>
           <strong>{artifact.contentType}</strong>
         </div>
         <Eye size={18} aria-hidden="true" />
@@ -1342,7 +1406,7 @@ function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; previe
       {status === "loading" ? (
         <div className="preview-message">
           <FileText size={18} aria-hidden="true" />
-          Loading artifact content
+          {t("preview.loadingArtifact")}
         </div>
       ) : null}
       {status === "ready" && preview.text ? (
@@ -1350,29 +1414,29 @@ function ArtifactPreviewPane({ artifact, preview }: { artifact: Artifact; previe
           fallback={
             <div className="preview-message">
               <FileText size={18} aria-hidden="true" />
-              Loading editor
+              {t("preview.loadingEditor")}
             </div>
           }
         >
-          <ArtifactTextEditor ariaLabel={`${artifact.kind} artifact content preview`} language={language} text={preview.text} />
+          <ArtifactTextEditor ariaLabel={`${artifact.kind} ${t("preview.aria")}`} language={language} text={preview.text} />
         </Suspense>
       ) : null}
       {status === "unsupported" ? (
         <div className="preview-message preview-muted">
           <AlertCircle size={18} aria-hidden="true" />
-          {preview.reason ?? "This artifact is not previewable in the browser."}
+          {preview.reason ?? t("preview.unsupported")}
         </div>
       ) : null}
       {status === "error" ? (
         <div className="preview-message preview-error">
           <AlertCircle size={18} aria-hidden="true" />
-          {preview.error ?? "Artifact preview failed."}
+          {preview.error ?? t("preview.failed")}
         </div>
       ) : null}
       {status === "idle" ? (
         <div className="preview-message preview-muted">
           <FileText size={18} aria-hidden="true" />
-          Select a text or JSON artifact to load a preview.
+          {t("preview.idle")}
         </div>
       ) : null}
     </div>
@@ -1392,6 +1456,7 @@ function ReportArtifactList({
   evidence: JobEvidence;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   const evidenceIndexArtifact = artifacts.find((artifact) => artifact.kind === "evidence_index") ?? null;
   const artifactsById = useMemo(() => new Map(artifacts.map((artifact) => [artifact.id, artifact])), [artifacts]);
   const [evidenceIndex, setEvidenceIndex] = useState<{
@@ -1436,7 +1501,7 @@ function ReportArtifactList({
   }, [currentJob?.id, evidenceIndexArtifact?.id]);
 
   if (artifacts.length === 0) {
-    return <EmptyState title="No report outputs" detail="Runtime, audit, review, and package artifacts appear here when produced." />;
+    return <EmptyState title={t("empty.noReportOutputs.title")} detail={t("empty.noReportOutputs.detail")} />;
   }
 
   const markdownReports = artifacts.filter((artifact) => artifact.kind === "audit_report").length;
@@ -1458,28 +1523,28 @@ function ReportArtifactList({
 
   return (
     <div className="report-list">
-      <div className="report-summary-grid" aria-label="Report output summary">
-        <ReportMetric label="Markdown" value={String(markdownReports)} />
-        <ReportMetric label="HTML" value={String(htmlReports)} />
-        <ReportMetric label="Packages" value={String(packages)} />
-        <ReportMetric label="Evidence files" value={String(evidenceIndex.payload?.includedCount ?? 0)} />
+      <div className="report-summary-grid" aria-label={t("app.aria.reportSummary")}>
+        <ReportMetric label={t("report.metric.markdown")} value={String(markdownReports)} />
+        <ReportMetric label={t("report.metric.html")} value={String(htmlReports)} />
+        <ReportMetric label={t("report.metric.packages")} value={String(packages)} />
+        <ReportMetric label={t("report.metric.evidenceFiles")} value={String(evidenceIndex.payload?.includedCount ?? 0)} />
       </div>
 
       <div className={riskCount > 0 ? "report-risk-strip warning" : "report-risk-strip"}>
         <AlertCircle size={17} aria-hidden="true" />
         <div>
-          <strong>{currentJob?.failureClass === "none" ? "No job failure class" : currentJob?.failureClass ?? "Awaiting job"}</strong>
+          <strong>{currentJob?.failureClass === "none" ? t("report.noFailureClass") : currentJob?.failureClass ?? t("report.awaitingJob")}</strong>
           <span>
             {riskCount > 0
-              ? `${riskCount} packaged failure or review item${riskCount === 1 ? "" : "s"} need attention.`
-              : currentJob?.failureReason ?? "Build, review, and runtime evidence decide final package confidence."}
+              ? `${riskCount} ${t("report.attention")}`
+              : currentJob?.failureReason ?? t("report.confidence")}
           </span>
         </div>
       </div>
 
-      <section className="report-detail-block" aria-label="Failure summary">
+      <section className="report-detail-block" aria-label={t("app.aria.failureSummary")}>
         <div className="section-heading">
-          <h3>Failure summary</h3>
+          <h3>{t("report.failureSummary")}</h3>
           <span>{failureSummary.length}</span>
         </div>
         {failureSummary.length > 0 ? (
@@ -1496,13 +1561,13 @@ function ReportArtifactList({
             ))}
           </div>
         ) : (
-          <EmptyState title="No packaged failures" detail="The latest packaged build, runtime, and review evidence did not add failure observations." />
+          <EmptyState title={t("empty.noPackagedFailures.title")} detail={t("empty.noPackagedFailures.detail")} />
         )}
       </section>
 
-      <section className="report-detail-block" aria-label="Report downloads">
+      <section className="report-detail-block" aria-label={t("app.aria.reportDownloads")}>
         <div className="section-heading">
-          <h3>Report artifacts</h3>
+          <h3>{t("report.artifacts")}</h3>
           <span>{artifacts.length}</span>
         </div>
         {artifacts.map((artifact) => (
@@ -1516,17 +1581,17 @@ function ReportArtifactList({
             <div className="report-actions">
               <button className="secondary-action compact" type="button" onClick={() => onArtifactSelect(artifact.id)}>
                 <Eye size={16} aria-hidden="true" />
-                Inspect
+                {t("action.inspect")}
               </button>
-              <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download" />
+              <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label={t("action.download")} />
             </div>
           </div>
         ))}
       </section>
 
-      <section className="report-detail-block" aria-label="Package contents">
+      <section className="report-detail-block" aria-label={t("app.aria.packageContents")}>
         <div className="section-heading">
-          <h3>Package contents</h3>
+          <h3>{t("report.packageContents")}</h3>
           <span>{evidenceIndex.status === "ready" ? indexedPackageContents.length : evidenceIndex.status}</span>
         </div>
         {evidenceIndex.status === "ready" && indexedPackageContents.length > 0 ? (
@@ -1553,7 +1618,7 @@ function ReportArtifactList({
                       onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
                     >
                       <Link2 size={16} aria-hidden="true" />
-                      Locate
+                      {t("action.locate")}
                     </button>
                   </div>
                 </div>
@@ -1562,13 +1627,13 @@ function ReportArtifactList({
           </div>
         ) : null}
         {evidenceIndex.status === "ready" && indexedPackageContents.length === 0 ? (
-          <EmptyState title="No package index" detail="Older evidence indexes do not expose structured package contents." />
+          <EmptyState title={t("empty.noPackageIndex.title")} detail={t("empty.noPackageIndex.detail")} />
         ) : null}
       </section>
 
-      <section className="report-detail-block" aria-label="Report evidence map">
+      <section className="report-detail-block" aria-label={t("app.aria.reportMap")}>
         <div className="section-heading">
-          <h3>Report evidence map</h3>
+          <h3>{t("report.evidenceMap")}</h3>
           <span>
             {evidenceIndex.status === "ready"
               ? reportDetailFilterActive
@@ -1581,16 +1646,16 @@ function ReportArtifactList({
           <>
             <div className="report-detail-filter">
               <Filter size={16} aria-hidden="true" />
-              <span className="visually-hidden">Filter report details</span>
+              <span className="visually-hidden">{t("report.filterHidden")}</span>
               <input
-                aria-label="Filter report details"
-                placeholder="Filter details, status, artifacts"
+                aria-label={t("report.filterHidden")}
+                placeholder={t("report.filterPlaceholder")}
                 type="search"
                 value={reportDetailQuery}
                 onChange={(event) => setReportDetailQuery(event.target.value)}
               />
               {reportDetailFilterActive ? (
-                <button className="secondary-action compact" type="button" onClick={() => setReportDetailQuery("")}>Clear</button>
+                <button className="secondary-action compact" type="button" onClick={() => setReportDetailQuery("")}>{t("action.clear")}</button>
               ) : null}
             </div>
             {filteredReportSections.length > 0 ? (
@@ -1634,43 +1699,43 @@ function ReportArtifactList({
                           </button>
                         );
                       })}
-                      {section.artifactIds.length > 5 ? <span className="report-overflow-note">{section.artifactIds.length - 5} more</span> : null}
+                      {section.artifactIds.length > 5 ? <span className="report-overflow-note">{section.artifactIds.length - 5} {t("report.more")}</span> : null}
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <EmptyState title="No matching report details" detail="Adjust the report evidence map filter to show packaged section details." />
+              <EmptyState title={t("empty.noMatchingReportDetails.title")} detail={t("empty.noMatchingReportDetails.detail")} />
             )}
           </>
         ) : null}
         {evidenceIndex.status === "ready" && indexedReportSections.length === 0 ? (
-          <EmptyState title="No report map" detail="Older evidence indexes do not expose report section mappings." />
+          <EmptyState title={t("empty.noReportMap.title")} detail={t("empty.noReportMap.detail")} />
         ) : null}
       </section>
 
-      <section className="report-detail-block" aria-label="Evidence attachment index">
+      <section className="report-detail-block" aria-label={t("app.aria.attachmentIndex")}>
         <div className="section-heading">
-          <h3>Evidence attachments</h3>
+          <h3>{t("report.evidenceAttachments")}</h3>
           <span>{evidenceIndex.status === "ready" ? attachments.length : evidenceIndex.status}</span>
         </div>
         {evidenceIndex.status === "loading" ? (
           <div className="preview-message">
             <FileText size={18} aria-hidden="true" />
-            Loading evidence index
+            {t("report.loadingEvidence")}
           </div>
         ) : null}
         {evidenceIndex.status === "error" ? (
           <div className="preview-message preview-error">
             <AlertCircle size={18} aria-hidden="true" />
-            {evidenceIndex.error ?? "Evidence index could not be loaded."}
+            {evidenceIndex.error ?? t("report.evidenceLoadFailed")}
           </div>
         ) : null}
         {evidenceIndex.status === "idle" ? (
-          <EmptyState title="No evidence index" detail="Packaging will add screenshot, trace, and log attachment indexes." />
+          <EmptyState title={t("empty.noEvidenceIndex.title")} detail={t("empty.noEvidenceIndex.detail")} />
         ) : null}
         {evidenceIndex.status === "ready" && attachments.length === 0 ? (
-          <EmptyState title="No indexed attachments" detail="No screenshot, trace, or log artifacts were available at packaging time." />
+          <EmptyState title={t("empty.noIndexedAttachments.title")} detail={t("empty.noIndexedAttachments.detail")} />
         ) : null}
         {evidenceIndex.status === "ready" && attachments.length > 0 ? (
           <div className="evidence-index-list">
@@ -1692,12 +1757,12 @@ function ReportArtifactList({
                       onClick={() => (linkedArtifact ? onArtifactSelect(linkedArtifact.id) : undefined)}
                     >
                       <Link2 size={16} aria-hidden="true" />
-                      Locate
+                      {t("action.locate")}
                     </button>
                     {linkedArtifact ? (
-                      <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={linkedArtifact} currentJob={currentJob} label="Download" />
+                      <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={linkedArtifact} currentJob={currentJob} label={t("action.download")} />
                     ) : (
-                      <span className="download-disabled">Missing</span>
+                      <span className="download-disabled">{t("action.missing")}</span>
                     )}
                   </div>
                 </div>
@@ -1730,6 +1795,7 @@ function AuditPanel({
   evidence: JobEvidence;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   const [filters, setFilters] = useState<AuditFilterState>(defaultAuditFilters);
   const [savedFilters, setSavedFilters] = useState<SavedAuditFilter[]>(() => readSavedAuditFilters());
   const [selectedSavedFilterId, setSelectedSavedFilterId] = useState("");
@@ -1758,7 +1824,7 @@ function AuditPanel({
   }, [auditRecords]);
 
   const handleFilterSave = () => {
-    const name = filterName.trim() || auditFilterLabel(filters);
+    const name = filterName.trim() || auditFilterLabel(filters, t);
     const existingId = selectedSavedFilterId && savedFilters.some((saved) => saved.id === selectedSavedFilterId)
       ? selectedSavedFilterId
       : "";
@@ -1825,23 +1891,23 @@ function AuditPanel({
 
   return (
     <div className="audit-sections">
-      <section className="audit-section" aria-label="Audit filters">
+      <section className="audit-section" aria-label={t("app.aria.auditFilters")}>
         <div className="audit-toolbar">
           <div className="audit-filter-icon">
             <Filter size={18} aria-hidden="true" />
           </div>
           <label htmlFor="audit-search">
-            <span>Search</span>
+            <span>{t("audit.search")}</span>
             <input
               id="audit-search"
               name="audit-search"
               value={filters.query}
               onChange={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
-              placeholder="Agent, decision, artifact, evidence"
+              placeholder={t("audit.searchPlaceholder")}
             />
           </label>
           <label htmlFor="audit-category">
-            <span>Record type</span>
+            <span>{t("audit.recordType")}</span>
             <select
               id="audit-category"
               name="audit-category"
@@ -1850,14 +1916,14 @@ function AuditPanel({
                 setFilters((current) => ({ ...current, category: event.currentTarget.value as AuditCategory }))
               }
             >
-              <option value="all">All records</option>
-              <option value="inference">Inference</option>
-              <option value="review">Review</option>
-              <option value="tool">Tool calls</option>
+              <option value="all">{t("audit.allRecords")}</option>
+              <option value="inference">{t("audit.inference")}</option>
+              <option value="review">{t("audit.review")}</option>
+              <option value="tool">{t("audit.toolCalls")}</option>
             </select>
           </label>
           <label htmlFor="audit-status">
-            <span>Status</span>
+            <span>{t("audit.status")}</span>
             <select
               id="audit-status"
               name="audit-status"
@@ -1866,10 +1932,10 @@ function AuditPanel({
                 setFilters((current) => ({ ...current, status: event.currentTarget.value as AuditStatusFilter }))
               }
             >
-              <option value="all">All statuses</option>
-              <option value="attention">Needs attention</option>
-              <option value="pass">Passing</option>
-              <option value="fail">Failing</option>
+              <option value="all">{t("audit.allStatuses")}</option>
+              <option value="attention">{t("audit.needsAttention")}</option>
+              <option value="pass">{t("audit.passing")}</option>
+              <option value="fail">{t("audit.failing")}</option>
             </select>
           </label>
           <button
@@ -1889,19 +1955,19 @@ function AuditPanel({
             }
           >
             <Download size={16} aria-hidden="true" />
-            Export view
+            {t("action.exportView")}
           </button>
         </div>
-        <div className="audit-saved-toolbar" aria-label="Saved audit filters">
+        <div className="audit-saved-toolbar" aria-label={t("app.aria.savedFilters")}>
           <label htmlFor="audit-saved-filter">
-            <span>Saved filter</span>
+            <span>{t("audit.savedFilter")}</span>
             <select
               id="audit-saved-filter"
               name="audit-saved-filter"
               value={selectedSavedFilterId}
               onChange={(event) => handleSavedFilterLoad(event.currentTarget.value)}
             >
-              <option value="">Manual filters</option>
+              <option value="">{t("audit.manualFilters")}</option>
               {savedFilters.map((saved) => (
                 <option key={saved.id} value={saved.id}>
                   {saved.name}
@@ -1910,18 +1976,18 @@ function AuditPanel({
             </select>
           </label>
           <label htmlFor="audit-filter-name">
-            <span>Filter name</span>
+            <span>{t("audit.filterName")}</span>
             <input
               id="audit-filter-name"
               name="audit-filter-name"
               value={filterName}
               onChange={(event) => setFilterName(event.currentTarget.value)}
-              placeholder={auditFilterLabel(filters)}
+              placeholder={auditFilterLabel(filters, t)}
             />
           </label>
           <button className="secondary-action compact" type="button" onClick={handleFilterSave}>
             <Save size={16} aria-hidden="true" />
-            Save filter
+            {t("action.saveFilter")}
           </button>
           <button
             className="secondary-action compact"
@@ -1930,17 +1996,17 @@ function AuditPanel({
             onClick={handleSavedFilterDelete}
           >
             <Trash2 size={16} aria-hidden="true" />
-            Delete
+            {t("action.delete")}
           </button>
         </div>
-        <div className="audit-bulk-toolbar" aria-label="Audit bulk actions">
+        <div className="audit-bulk-toolbar" aria-label={t("app.aria.bulkAudit")}>
           <button className="secondary-action compact" type="button" disabled={filteredRecords.length === 0} onClick={handleVisibleSelectionToggle}>
             <Filter size={16} aria-hidden="true" />
-            {allVisibleSelected ? "Clear visible" : "Select visible"}
+            {allVisibleSelected ? t("action.clearVisible") : t("action.selectVisible")}
           </button>
           <button className="secondary-action compact" type="button" disabled={selectedRecordIds.size === 0} onClick={() => setSelectedRecordIds(new Set())}>
             <XCircle size={16} aria-hidden="true" />
-            Clear selection
+            {t("action.clearSelection")}
           </button>
           <button
             className="secondary-action compact"
@@ -1959,35 +2025,35 @@ function AuditPanel({
             }
           >
             <Download size={16} aria-hidden="true" />
-            Export selected
+            {t("action.exportSelected")}
           </button>
           <span>
-            {visibleSelectedCount} visible selected / {selectedRecords.length} total selected
+            {visibleSelectedCount} {t("audit.visibleSelected")} / {selectedRecords.length} {t("audit.totalSelected")}
           </span>
         </div>
         <div className="audit-summary-grid">
           <div>
-            <span>Total</span>
+            <span>{t("audit.total")}</span>
             <strong>{auditRecords.length}</strong>
           </div>
           <div>
-            <span>Attention</span>
+            <span>{t("audit.attention")}</span>
             <strong>{attentionCount}</strong>
           </div>
           <div>
-            <span>Visible</span>
+            <span>{t("audit.visible")}</span>
             <strong>{filteredRecords.length}</strong>
           </div>
           <div>
-            <span>Selected</span>
+            <span>{t("audit.selected")}</span>
             <strong>{selectedRecords.length}</strong>
           </div>
         </div>
       </section>
 
-      <section className="audit-section" aria-label="Filtered audit records">
+      <section className="audit-section" aria-label={t("app.aria.filteredAudit")}>
         <div className="section-heading">
-          <h3>Audit records</h3>
+          <h3>{t("audit.records")}</h3>
           <span>{filteredRecords.length}</span>
         </div>
         {filteredRecords.length > 0 ? (
@@ -1997,18 +2063,18 @@ function AuditPanel({
                 <tr>
                   <th>
                     <input
-                      aria-label={allVisibleSelected ? "Clear all visible audit records" : "Select all visible audit records"}
+                      aria-label={allVisibleSelected ? t("audit.clearAll") : t("audit.selectAll")}
                       checked={allVisibleSelected}
                       disabled={filteredRecords.length === 0}
                       onChange={handleVisibleSelectionToggle}
                       type="checkbox"
                     />
                   </th>
-                  <th>Type</th>
-                  <th>Subject</th>
-                  <th>Status</th>
-                  <th>Evidence</th>
-                  <th>Artifacts</th>
+                  <th>{t("audit.table.type")}</th>
+                  <th>{t("audit.table.subject")}</th>
+                  <th>{t("audit.table.status")}</th>
+                  <th>{t("audit.table.evidence")}</th>
+                  <th>{t("audit.table.artifacts")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2027,7 +2093,7 @@ function AuditPanel({
             </table>
           </div>
         ) : (
-          <EmptyState title="No matching audit records" detail="Adjust filters or wait for worker audit artifacts." />
+          <EmptyState title={t("empty.noMatchingAudit.title")} detail={t("empty.noMatchingAudit.detail")} />
         )}
       </section>
     </div>
@@ -2045,13 +2111,14 @@ function AuditRiskGroupRows({
   onRecordSelectionToggle: (recordId: string) => void;
   selectedRecordIds: Set<string>;
 }) {
+  const { t } = useLocalization();
   return (
     <>
       <tr className={`audit-group-row audit-group-${group.id}`}>
         <td colSpan={6}>
           <strong>{group.title}</strong>
           <span>
-            {group.records.length} record{group.records.length === 1 ? "" : "s"} / {group.detail}
+            {group.records.length} {group.records.length === 1 ? t("audit.record") : t("audit.recordsPlural")} / {group.detail}
           </span>
         </td>
       </tr>
@@ -2080,7 +2147,7 @@ function AuditRiskGroupRows({
           <td>
             <EvidenceRefButtons refs={record.evidenceRefs} onArtifactSelect={onArtifactSelect} />
           </td>
-          <td>{record.artifactIds.length > 0 ? formatIdList(record.artifactIds) : "None"}</td>
+          <td>{record.artifactIds.length > 0 ? formatIdList(record.artifactIds, t) : t("common.none")}</td>
         </tr>
       ))}
     </>
@@ -2099,8 +2166,9 @@ function EvidenceRefButtons({
   onArtifactSelect: (artifactId: string) => void;
   refs: EvidenceRef[];
 }) {
+  const { t } = useLocalization();
   if (refs.length === 0) {
-    return <span className="muted-inline">None</span>;
+    return <span className="muted-inline">{t("common.none")}</span>;
   }
 
   return (
@@ -2139,6 +2207,7 @@ function RuntimePanel({
   runtimeMetrics: RuntimeMetric[];
   runtimeValidations: RuntimeValidationRun[];
 }) {
+  const { t } = useLocalization();
   return (
     <>
       <div className="runtime-grid">
@@ -2151,10 +2220,10 @@ function RuntimePanel({
       </div>
       {latestRuntime ? (
         <div className="runtime-detail">
-          <DetailItem label="Latest status" value={latestRuntime.status} />
-          <DetailItem label="Target" value={latestRuntime.target} />
-          <DetailItem label="Entry URL" value={latestRuntime.entryUrl} />
-          <DetailItem label="Attempt" value={String(latestRuntime.attempt)} />
+          <DetailItem label={t("runtime.latestStatus")} value={latestRuntime.status} />
+          <DetailItem label={t("runtime.target")} value={latestRuntime.target} />
+          <DetailItem label={t("runtime.entryUrl")} value={latestRuntime.entryUrl} />
+          <DetailItem label={t("runtime.attempt")} value={String(latestRuntime.attempt)} />
           <EvidenceArtifactLinks
             apiBaseUrl={apiBaseUrl}
             artifactIds={[
@@ -2172,17 +2241,17 @@ function RuntimePanel({
             currentJob={currentJob}
             onArtifactSelect={onArtifactSelect}
           />
-          <RuntimeIssueList title="Console errors" items={latestRuntime.consoleErrors} />
-          <RuntimeIssueList title="Page errors" items={latestRuntime.pageErrors} />
-          <RuntimeIssueList title="Failed requests" items={latestRuntime.failedRequests} />
+          <RuntimeIssueList title={t("runtime.consoleErrors")} items={latestRuntime.consoleErrors} />
+          <RuntimeIssueList title={t("runtime.pageErrors")} items={latestRuntime.pageErrors} />
+          <RuntimeIssueList title={t("runtime.failedRequests")} items={latestRuntime.failedRequests} />
         </div>
       ) : (
-        <EmptyState title="No runtime evidence" detail="Runtime validation reports appear after the runtime_smoke stage." />
+        <EmptyState title={t("empty.noRuntime.title")} detail={t("empty.noRuntime.detail")} />
       )}
       {runtimeValidations.length > 1 ? (
         <div className="runtime-history">
           <div className="section-heading">
-            <h3>Runtime history</h3>
+            <h3>{t("runtime.history")}</h3>
             <span>{runtimeValidations.length}</span>
           </div>
           {runtimeValidations.map((run) => (
@@ -2212,6 +2281,7 @@ function RuntimeCompareStatus({
   currentJob: Job | null;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   const comparisonArtifacts = useMemo(
     () => artifacts.filter((artifact) => artifact.kind === "runtime_comparison"),
     [artifacts]
@@ -2279,11 +2349,11 @@ function RuntimeCompareStatus({
     <div className="runtime-compare-status runtime-compare-detail">
       <div className="runtime-compare-heading">
         <div>
-          <span>Runtime diff</span>
+          <span>{t("runtime.diff")}</span>
           <strong>
             {comparisonArtifacts.length > 0
-              ? `${comparisonArtifacts.length} comparison artifact${comparisonArtifacts.length === 1 ? "" : "s"} recorded`
-              : "Waiting for runtime_compare evidence"}
+              ? `${comparisonArtifacts.length} ${t("runtime.comparisonRecorded")}`
+              : t("runtime.waitingCompare")}
           </strong>
         </div>
         {report ? <StatusToken status={report.status} /> : null}
@@ -2292,23 +2362,23 @@ function RuntimeCompareStatus({
       {comparison.status === "loading" ? (
         <div className="preview-message">
           <FileText size={18} aria-hidden="true" />
-          Loading comparison detail
+          {t("runtime.loadingComparison")}
         </div>
       ) : null}
       {comparison.status === "error" ? (
         <div className="preview-message preview-error">
           <AlertCircle size={18} aria-hidden="true" />
-          {comparison.error ?? "Runtime comparison could not be loaded."}
+          {comparison.error ?? t("runtime.comparisonLoadFailed")}
         </div>
       ) : null}
       {comparisonArtifacts.length === 0 ? (
-        <span className="runtime-compare-note">Runtime compare has not produced a linked artifact yet.</span>
+        <span className="runtime-compare-note">{t("runtime.noLinkedCompare")}</span>
       ) : null}
       {comparison.reports.length > 1 ? (
         <>
-          <div className="runtime-filter-grid" aria-label="Runtime comparison filters">
+          <div className="runtime-filter-grid" aria-label={t("app.aria.runtimeFilters")}>
             <label htmlFor="runtime-scenario-filter">
-              <span>Scenario</span>
+              <span>{t("runtime.scenario")}</span>
               <select
                 id="runtime-scenario-filter"
                 value={filters.scenario}
@@ -2317,7 +2387,7 @@ function RuntimeCompareStatus({
                   setFilters((current) => ({ ...current, scenario: event.currentTarget.value }));
                 }}
               >
-                <option value="all">All scenarios</option>
+                <option value="all">{t("runtime.allScenarios")}</option>
                 {scenarioOptions.map((scenario) => (
                   <option key={scenario} value={scenario}>
                     {scenario}
@@ -2326,7 +2396,7 @@ function RuntimeCompareStatus({
               </select>
             </label>
             <label htmlFor="runtime-viewport-filter">
-              <span>Viewport</span>
+              <span>{t("runtime.viewport")}</span>
               <select
                 id="runtime-viewport-filter"
                 value={filters.viewport}
@@ -2335,7 +2405,7 @@ function RuntimeCompareStatus({
                   setFilters((current) => ({ ...current, viewport: event.currentTarget.value }));
                 }}
               >
-                <option value="all">All viewports</option>
+                <option value="all">{t("runtime.allViewports")}</option>
                 {viewportOptions.map((viewport) => (
                   <option key={viewport.value} value={viewport.value}>
                     {viewport.label}
@@ -2344,7 +2414,7 @@ function RuntimeCompareStatus({
               </select>
             </label>
             <label htmlFor="runtime-status-filter">
-              <span>Status</span>
+              <span>{t("audit.status")}</span>
               <select
                 id="runtime-status-filter"
                 value={filters.status}
@@ -2356,16 +2426,16 @@ function RuntimeCompareStatus({
                   }));
                 }}
               >
-                <option value="all">All statuses</option>
-                <option value="pass">Pass</option>
-                <option value="best_effort">Best effort</option>
-                <option value="retry">Retry</option>
-                <option value="fail">Fail</option>
+                <option value="all">{t("audit.allStatuses")}</option>
+                <option value="pass">{t("runtime.pass")}</option>
+                <option value="best_effort">{t("runtime.bestEffort")}</option>
+                <option value="retry">{t("runtime.retry")}</option>
+                <option value="fail">{t("runtime.fail")}</option>
               </select>
             </label>
           </div>
           <div className="runtime-compare-note">
-            Showing {filteredReports.length} of {comparison.reports.length} comparison rows.
+            {t("runtime.showing")} {filteredReports.length} {t("runtime.of")} {comparison.reports.length} {t("runtime.comparisonRows")}
           </div>
           {filteredReports.length > 0 ? (
             <div
@@ -2374,7 +2444,7 @@ function RuntimeCompareStatus({
               style={{ maxHeight: runtimeComparisonListHeight }}
             >
               <div className="runtime-comparison-spacer" style={{ height: filteredReports.length * runtimeComparisonRowHeight }}>
-                <div className="runtime-comparison-list" style={{ transform: `translateY(${virtualRange.start * runtimeComparisonRowHeight}px)` }} aria-label="Runtime comparison matrix">
+                <div className="runtime-comparison-list" style={{ transform: `translateY(${virtualRange.start * runtimeComparisonRowHeight}px)` }} aria-label={t("app.aria.runtimeMatrix")}>
                   {visibleReports.map((item) => (
                     <button
                       className={
@@ -2386,7 +2456,7 @@ function RuntimeCompareStatus({
                       onClick={() => setSelectedComparisonId(item.artifactId)}
                     >
                       <Eye size={15} aria-hidden="true" />
-                      <span>{runtimeComparisonScopeLabel(item.report)}</span>
+                      <span>{runtimeComparisonScopeLabel(item.report, t)}</span>
                       <small>{formatScreenshotDiff(item.report.differences)}</small>
                       <StatusToken status={item.report.status} />
                     </button>
@@ -2395,19 +2465,19 @@ function RuntimeCompareStatus({
               </div>
             </div>
           ) : (
-            <EmptyState title="No comparison rows" detail="Adjust the runtime comparison filters." />
+            <EmptyState title={t("empty.noComparisonRows.title")} detail={t("empty.noComparisonRows.detail")} />
           )}
         </>
       ) : null}
       {selectedComparison && report && differences ? (
         <>
-          <div className="runtime-diff-grid" aria-label="Runtime comparison difference summary">
-            <RuntimeDiffMetric label="Scope" value={runtimeComparisonScopeLabel(report)} />
-            <RuntimeDiffMetric label="Screenshot" value={formatScreenshotDiff(differences)} />
-            <RuntimeDiffMetric label="Pixels" value={formatPixelDiff(differences)} />
-            <RuntimeDiffMetric label="DOM paths" value={String(differences.domDifferences.length)} />
-            <RuntimeDiffMetric label="Network groups" value={formatRuntimeGroups(differences.networkDiff.groups)} />
-            <RuntimeDiffMetric label="Console groups" value={formatRuntimeGroups(differences.consoleDiff.groups)} />
+          <div className="runtime-diff-grid" aria-label={t("app.aria.runtimeDiff")}>
+            <RuntimeDiffMetric label={t("runtime.scope")} value={runtimeComparisonScopeLabel(report, t)} />
+            <RuntimeDiffMetric label={t("runtime.screenshot")} value={formatScreenshotDiff(differences)} />
+            <RuntimeDiffMetric label={t("runtime.pixels")} value={formatPixelDiff(differences, t)} />
+            <RuntimeDiffMetric label={t("runtime.domPaths")} value={String(differences.domDifferences.length)} />
+            <RuntimeDiffMetric label={t("runtime.networkGroups")} value={formatRuntimeGroups(differences.networkDiff.groups, t)} />
+            <RuntimeDiffMetric label={t("runtime.consoleGroups")} value={formatRuntimeGroups(differences.consoleDiff.groups, t)} />
           </div>
           <RuntimeComparisonEvidenceButtons
             artifacts={artifacts}
@@ -2424,12 +2494,12 @@ function RuntimeCompareStatus({
           />
           <RuntimeDomDifferenceList differences={differences.domDifferences} />
           <RuntimeCollectionDifferenceList
-            title="Network differences"
+            title={t("runtime.networkDifferences")}
             originalOnly={differences.networkDiff.originalOnly}
             reconstructedOnly={differences.networkDiff.reconstructedOnly}
           />
           <RuntimeCollectionDifferenceList
-            title="Console differences"
+            title={t("runtime.consoleDifferences")}
             originalOnly={differences.consoleDiff.originalOnly}
             reconstructedOnly={differences.consoleDiff.reconstructedOnly}
           />
@@ -2462,6 +2532,7 @@ function RuntimeComparisonEvidenceButtons({
   onArtifactSelect: (artifactId: string) => void;
   report: RuntimeComparisonReport;
 }) {
+  const { t } = useLocalization();
   const linkedIds = [
     comparisonArtifactId,
     report.scenarioArtifactId,
@@ -2472,7 +2543,7 @@ function RuntimeComparisonEvidenceButtons({
   const knownArtifactIds = new Set(artifacts.map((artifact) => artifact.id));
 
   return (
-    <div className="runtime-evidence-buttons" aria-label="Runtime comparison evidence links">
+    <div className="runtime-evidence-buttons" aria-label={t("app.aria.runtimeEvidence")}>
       {linkedIds.map((artifactId) => (
         <button
           className="evidence-ref-chip"
@@ -2483,7 +2554,7 @@ function RuntimeComparisonEvidenceButtons({
           title={artifactId}
         >
           <Link2 size={14} aria-hidden="true" />
-          <span>{runtimeEvidenceLabel(artifactId, report)}</span>
+          <span>{runtimeEvidenceLabel(artifactId, report, t)}</span>
           <small>{artifactId}</small>
         </button>
       ))}
@@ -2504,7 +2575,8 @@ function RuntimeScreenshotPreview({
   onArtifactSelect: (artifactId: string) => void;
   report: RuntimeComparisonReport;
 }) {
-  const screenshotItems = runtimeScreenshotPreviewItems(report)
+  const { t } = useLocalization();
+  const screenshotItems = runtimeScreenshotPreviewItems(report, t)
     .map((item) => ({
       ...item,
       artifact: artifacts.find((artifact) => artifact.id === item.artifactId) ?? null
@@ -2512,15 +2584,15 @@ function RuntimeScreenshotPreview({
     .filter((item) => item.artifact);
 
   if (!currentJob || screenshotItems.length === 0) {
-    return <RuntimeDiffSection title="Screenshot previews" items={["No linked screenshot artifacts are available for inline preview."]} />;
+    return <RuntimeDiffSection title={t("runtime.screenshotPreviews")} items={[t("runtime.noScreenshots")]} />;
   }
 
   return (
-    <div className="runtime-screenshot-grid" aria-label="Runtime screenshot previews">
+    <div className="runtime-screenshot-grid" aria-label={t("app.aria.runtimeScreenshots")}>
       {screenshotItems.map((item) => (
         <figure className="runtime-screenshot-card" key={`${item.label}-${item.artifactId}`}>
           <img
-            alt={`${item.label} screenshot evidence`}
+            alt={`${item.label} ${t("runtime.screenshotAlt")}`}
             loading="lazy"
             src={artifactDownloadUrl(apiBaseUrl, currentJob.id, item.artifactId)}
           />
@@ -2529,7 +2601,7 @@ function RuntimeScreenshotPreview({
             <span>{item.detail}</span>
             <button className="download-link" type="button" onClick={() => onArtifactSelect(item.artifactId)}>
               <Link2 size={14} aria-hidden="true" />
-              Locate artifact
+              {t("action.locateArtifact")}
             </button>
           </figcaption>
         </figure>
@@ -2539,13 +2611,14 @@ function RuntimeScreenshotPreview({
 }
 
 function RuntimeDomDifferenceList({ differences }: { differences: RuntimeComparisonReport["differences"]["domDifferences"] }) {
+  const { t } = useLocalization();
   if (differences.length === 0) {
-    return <RuntimeDiffSection title="DOM differences" items={["No DOM summary paths changed."]} />;
+    return <RuntimeDiffSection title={t("runtime.domDifferences")} items={[t("runtime.noDomChanges")]} />;
   }
 
   return (
     <div className="runtime-diff-section">
-      <span>DOM differences</span>
+      <span>{t("runtime.domDifferences")}</span>
       {differences.slice(0, 8).map((difference) => (
         <code key={difference.path}>
           {difference.path}: {formatUnknownValue(difference.original)}
@@ -2553,7 +2626,7 @@ function RuntimeDomDifferenceList({ differences }: { differences: RuntimeCompari
           {formatUnknownValue(difference.reconstructed)}
         </code>
       ))}
-      {differences.length > 8 ? <small>{differences.length - 8} more DOM path changes in the comparison artifact.</small> : null}
+      {differences.length > 8 ? <small>{differences.length - 8} {t("runtime.moreDomChanges")}</small> : null}
     </div>
   );
 }
@@ -2567,12 +2640,13 @@ function RuntimeCollectionDifferenceList({
   reconstructedOnly: string[];
   title: string;
 }) {
+  const { t } = useLocalization();
   const items = [
-    ...originalOnly.slice(0, 4).map((item) => `original only: ${item}`),
-    ...reconstructedOnly.slice(0, 4).map((item) => `reconstructed only: ${item}`)
+    ...originalOnly.slice(0, 4).map((item) => `${t("runtime.originalOnly")}: ${item}`),
+    ...reconstructedOnly.slice(0, 4).map((item) => `${t("runtime.reconstructedOnly")}: ${item}`)
   ];
   if (items.length === 0) {
-    return <RuntimeDiffSection title={title} items={["No unique entries."]} />;
+    return <RuntimeDiffSection title={title} items={[t("runtime.noUniqueEntries")]} />;
   }
   return <RuntimeDiffSection title={title} items={items} />;
 }
@@ -2601,6 +2675,7 @@ function RuntimeRunDetail({
   onArtifactSelect: (artifactId: string) => void;
   run: RuntimeValidationRun;
 }) {
+  const { t } = useLocalization();
   return (
     <div className="runtime-run-card">
       <div className="history-row">
@@ -2609,9 +2684,9 @@ function RuntimeRunDetail({
         <small>{run.entryUrl}</small>
       </div>
       <div className="runtime-run-issues">
-        <RuntimeIssueList title="Console" items={run.consoleErrors} />
-        <RuntimeIssueList title="Page" items={run.pageErrors} />
-        <RuntimeIssueList title="Requests" items={run.failedRequests} />
+        <RuntimeIssueList title={t("runtime.console")} items={run.consoleErrors} />
+        <RuntimeIssueList title={t("runtime.page")} items={run.pageErrors} />
+        <RuntimeIssueList title={t("runtime.requests")} items={run.failedRequests} />
       </div>
       <EvidenceArtifactLinks
         apiBaseUrl={apiBaseUrl}
@@ -2637,6 +2712,7 @@ function EvidenceArtifactLinks({
   currentJob: Job | null;
   onArtifactSelect: (artifactId: string) => void;
 }) {
+  const { t } = useLocalization();
   const linkedArtifacts = artifactIds
     .filter((artifactId): artifactId is string => Boolean(artifactId))
     .map((artifactId) => artifacts.find((artifact) => artifact.id === artifactId))
@@ -2647,14 +2723,14 @@ function EvidenceArtifactLinks({
   }
 
   return (
-    <div className="evidence-links" aria-label="Runtime evidence artifact downloads">
+    <div className="evidence-links" aria-label={t("app.aria.runtimeLinks")}>
       {linkedArtifacts.map((artifact) => (
         <div className="evidence-link-group" key={artifact.id}>
           <button className="download-link" type="button" onClick={() => onArtifactSelect(artifact.id)}>
             <Link2 size={15} aria-hidden="true" />
             {artifact.kind}
           </button>
-          <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label="Download" />
+          <ArtifactDownloadLink apiBaseUrl={apiBaseUrl} artifact={artifact} currentJob={currentJob} label={t("action.download")} />
         </div>
       ))}
     </div>
@@ -2662,11 +2738,12 @@ function EvidenceArtifactLinks({
 }
 
 function RuntimeIssueList({ items, title }: { items: string[]; title: string }) {
+  const { t } = useLocalization();
   if (items.length === 0) {
     return (
       <div className="issue-list">
         <span>{title}</span>
-        <strong>None</strong>
+        <strong>{t("common.none")}</strong>
       </div>
     );
   }
@@ -2692,6 +2769,7 @@ function ArtifactDownloadLink({
   currentJob: Job | null;
   label: string;
 }) {
+  const { t } = useLocalization();
   if (!currentJob) {
     return null;
   }
@@ -2700,7 +2778,7 @@ function ArtifactDownloadLink({
     return (
       <span className="download-disabled">
         <AlertCircle size={15} aria-hidden="true" />
-        Package required
+        {t("action.packageRequired")}
       </span>
     );
   }
@@ -3137,51 +3215,51 @@ function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"
   return `changed ${String(changed)} / ${status}`;
 }
 
-function formatPixelDiff(differences: RuntimeComparisonReport["differences"]): string {
+function formatPixelDiff(differences: RuntimeComparisonReport["differences"], t: (key: string) => string): string {
   const changed = differences.screenshotDiff.changedPixelCount;
   const total = differences.screenshotDiff.pixelCount;
   if (changed === undefined || changed === null || total === undefined || total === null) {
-    return "unavailable";
+    return t("status.unavailable");
   }
   const ratio = differences.screenshotDiff.changedPixelRatio;
   const percent = typeof ratio === "number" ? ` (${formatPercent(ratio)})` : "";
   return `${changed}/${total}${percent}`;
 }
 
-function runtimeComparisonScopeLabel(report: RuntimeComparisonReport): string {
+function runtimeComparisonScopeLabel(report: RuntimeComparisonReport, t: (key: string) => string): string {
   const scope = report.differences.comparisonScope;
   const viewport = scope.viewport;
   const viewportLabel = viewport
     ? `${viewport.name ? `${viewport.name} ` : ""}${viewport.width}x${viewport.height}`
-    : "default viewport";
+    : t("status.defaultViewport");
   return `${scope.scenarioName} / ${viewportLabel}`;
 }
 
-function formatRuntimeGroups(groups: Record<string, string[]>): string {
+function formatRuntimeGroups(groups: Record<string, string[]>, t: (key: string) => string): string {
   const keys = Object.keys(groups);
   if (keys.length === 0) {
-    return "none";
+    return t("status.noneLower");
   }
   return keys.slice(0, 3).join(", ");
 }
 
-function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparisonReport): string {
+function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparisonReport, t: (key: string) => string): string {
   if (artifactId === report.scenarioArtifactId) {
-    return "scenario";
+    return t("runtime.scenario").toLowerCase();
   }
   if (report.traceArtifactIds.includes(artifactId)) {
     return "trace";
   }
   if (report.screenshotArtifactIds.includes(artifactId)) {
-    return artifactId === report.differences.screenshotDiff.diffArtifactId ? "pixel diff" : "screenshot";
+    return artifactId === report.differences.screenshotDiff.diffArtifactId ? t("runtime.pixelDiff") : t("runtime.screenshot");
   }
   if (artifactId === report.differences.screenshotDiff.diffArtifactId) {
-    return "pixel diff";
+    return t("runtime.pixelDiff");
   }
   return "comparison";
 }
 
-function buildArtifactLineageGraph(artifacts: Artifact[], selectedArtifactId: string | null): EvidenceGraph {
+function buildArtifactLineageGraph(artifacts: Artifact[], selectedArtifactId: string | null, t: (key: string) => string): EvidenceGraph {
   const sortedArtifacts = [...artifacts].sort(compareArtifactsForGraph);
   const nodes = sortedArtifacts.map((artifact) => ({
     artifactId: artifact.id,
@@ -3206,10 +3284,10 @@ function buildArtifactLineageGraph(artifacts: Artifact[], selectedArtifactId: st
 
   return {
     edges,
-    emptyDetail: "Create a job and run the worker to populate parent and child artifact evidence.",
+    emptyDetail: t("graph.empty.lineage"),
     nodes,
     summary: `${nodes.length} artifacts with ${edges.length} lineage links`,
-    title: "Artifact lineage"
+    title: t("graph.title.lineage")
   };
 }
 
@@ -3217,7 +3295,8 @@ function buildChunkEvidenceGraph(
   artifacts: Artifact[],
   inventory: InputInventory | null,
   astIndexes: AstIndex[] | null,
-  sourceStatus: EvidenceGraphSourceState["status"]
+  sourceStatus: EvidenceGraphSourceState["status"],
+  t: (key: string) => string
 ): EvidenceGraph {
   if (!inventory && !astIndexes) {
     const fallbackArtifacts = artifacts.filter((artifact) =>
@@ -3234,8 +3313,8 @@ function buildChunkEvidenceGraph(
       ),
       emptyDetail:
         sourceStatus === "loading"
-          ? "Inventory and AST index artifacts are loading."
-          : "No input inventory or AST index artifact is available yet.",
+          ? t("graph.empty.chunkLoading")
+          : t("graph.empty.noInputIndex"),
       nodes: fallbackArtifacts.map((artifact) => ({
         artifactId: artifact.id,
         column: artifactGraphColumn(artifact),
@@ -3245,30 +3324,30 @@ function buildChunkEvidenceGraph(
         title: artifact.kind,
         tone: "warn" as const
       })),
-      summary: "Fallback graph from artifact metadata",
-      title: "Chunk graph"
+      summary: t("graph.summary.fallback"),
+      title: t("graph.title.chunk")
     };
   }
 
   const nodes: EvidenceGraphNode[] = [
     {
       column: 0,
-      detail: inventory?.isSingleBundle ? "single bundle" : "input package",
+      detail: inventory?.isSingleBundle ? t("graph.detail.singleBundle") : t("graph.detail.inputPackage"),
       id: "chunk:root",
       kind: "resource",
-      title: "Input package",
+      title: t("graph.node.inputPackage"),
       tone: inventory?.warnings.length ? "warn" : "neutral"
     }
   ];
   const edges: EvidenceGraphEdge[] = [];
 
   if (inventory) {
-    addResourceNodes(nodes, edges, "entry", inventory.entries, 1, "HTML entry");
-    addResourceNodes(nodes, edges, "script", inventory.scripts, 2, "Script chunk");
-    addResourceNodes(nodes, edges, "style", inventory.styles, 2, "Stylesheet");
-    addResourceNodes(nodes, edges, "asset", inventory.assets, 3, "Asset");
-    addResourceNodes(nodes, edges, "sourcemap", inventory.sourceMaps, 3, "Source map");
-    addResourceNodes(nodes, edges, "manifest", inventory.manifests, 3, "Manifest");
+    addResourceNodes(nodes, edges, "entry", inventory.entries, 1, t("graph.node.htmlEntry"));
+    addResourceNodes(nodes, edges, "script", inventory.scripts, 2, t("graph.node.scriptChunk"));
+    addResourceNodes(nodes, edges, "style", inventory.styles, 2, t("graph.node.stylesheet"));
+    addResourceNodes(nodes, edges, "asset", inventory.assets, 3, t("graph.node.asset"));
+    addResourceNodes(nodes, edges, "sourcemap", inventory.sourceMaps, 3, t("graph.node.sourceMap"));
+    addResourceNodes(nodes, edges, "manifest", inventory.manifests, 3, t("graph.node.manifest"));
   }
 
   if (astIndexes) {
@@ -3296,23 +3375,23 @@ function buildChunkEvidenceGraph(
         detail: `${astIndexes.length - 10} additional AST indexes`,
         id: "chunk:ast:more",
         kind: "analysis",
-        title: "More AST files",
+        title: t("graph.node.moreAst"),
         tone: "warn"
       });
-      edges.push({ from: "chunk:root", id: "chunk-edge:ast:more", label: "additional AST indexes", to: "chunk:ast:more" });
+      edges.push({ from: "chunk:root", id: "chunk-edge:ast:more", label: t("graph.edge.additionalAst"), to: "chunk:ast:more" });
     }
   }
 
   return {
     edges,
-    emptyDetail: "No chunk, resource, or AST evidence is available.",
+    emptyDetail: t("graph.empty.noChunkEvidence"),
     nodes,
     summary: `${nodes.length} chunk/resource nodes built from inventory and AST artifacts`,
-    title: "Chunk graph"
+    title: t("graph.title.chunk")
   };
 }
 
-function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence): EvidenceGraph {
+function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence, t: (key: string) => string): EvidenceGraph {
   const nodes = new Map<string, EvidenceGraphNode>();
   const edges: EvidenceGraphEdge[] = [];
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
@@ -3344,11 +3423,11 @@ function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence): Evid
     });
     for (const artifactId of record.inputArtifactIds) {
       ensureArtifactNode(artifactId, 0);
-      edges.push({ from: artifactNodeId(artifactId), id: `agent-edge:${artifactId}:${record.id}:in`, label: "agent input", to: nodeId });
+      edges.push({ from: artifactNodeId(artifactId), id: `agent-edge:${artifactId}:${record.id}:in`, label: t("graph.edge.agentInput"), to: nodeId });
     }
     for (const artifactId of record.outputArtifactIds) {
       ensureArtifactNode(artifactId, 2);
-      edges.push({ from: nodeId, id: `agent-edge:${record.id}:${artifactId}:out`, label: "agent output", to: artifactNodeId(artifactId) });
+      edges.push({ from: nodeId, id: `agent-edge:${record.id}:${artifactId}:out`, label: t("graph.edge.agentOutput"), to: artifactNodeId(artifactId) });
     }
     for (const ref of record.evidenceRefs) {
       ensureArtifactNode(ref.artifactId, 3);
@@ -3368,11 +3447,11 @@ function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence): Evid
     });
     for (const artifactId of call.inputArtifactIds) {
       ensureArtifactNode(artifactId, 0);
-      edges.push({ from: artifactNodeId(artifactId), id: `tool-edge:${artifactId}:${call.id}:in`, label: "tool input", to: nodeId });
+      edges.push({ from: artifactNodeId(artifactId), id: `tool-edge:${artifactId}:${call.id}:in`, label: t("graph.edge.toolInput"), to: nodeId });
     }
     for (const artifactId of call.outputArtifactIds) {
       ensureArtifactNode(artifactId, 2);
-      edges.push({ from: nodeId, id: `tool-edge:${call.id}:${artifactId}:out`, label: "tool output", to: artifactNodeId(artifactId) });
+      edges.push({ from: nodeId, id: `tool-edge:${call.id}:${artifactId}:out`, label: t("graph.edge.toolOutput"), to: artifactNodeId(artifactId) });
     }
   }
 
@@ -3388,7 +3467,7 @@ function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence): Evid
     });
     for (const artifactId of [run.logsArtifactId, ...run.repairInstructionIds].filter((value): value is string => Boolean(value))) {
       ensureArtifactNode(artifactId, 2);
-      edges.push({ from: artifactNodeId(artifactId), id: `review-edge:${artifactId}:${run.id}`, label: "review evidence", to: nodeId });
+      edges.push({ from: artifactNodeId(artifactId), id: `review-edge:${artifactId}:${run.id}`, label: t("graph.edge.reviewEvidence"), to: nodeId });
     }
     for (const ref of run.evidenceRefs) {
       ensureArtifactNode(ref.artifactId, 2);
@@ -3398,10 +3477,10 @@ function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence): Evid
 
   return {
     edges,
-    emptyDetail: "Agent, review, and tool-call evidence appears after the worker records audit artifacts.",
+    emptyDetail: t("graph.empty.agent"),
     nodes: [...nodes.values()],
     summary: `${nodes.size} agent evidence nodes with ${edges.length} links`,
-    title: "Agent flow"
+    title: t("graph.title.agent")
   };
 }
 
@@ -3763,11 +3842,11 @@ function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {
   ];
 }
 
-function auditFilterLabel(filters: AuditFilterState): string {
+function auditFilterLabel(filters: AuditFilterState, t: (key: string) => string): string {
   const parts = [
-    filters.category === "all" ? "all records" : filters.category,
-    filters.status === "all" ? "all statuses" : filters.status,
-    filters.query.trim() ? `"${filters.query.trim()}"` : "no search"
+    filters.category === "all" ? t("audit.label.allRecords") : filters.category,
+    filters.status === "all" ? t("audit.label.allStatuses") : filters.status,
+    filters.query.trim() ? `"${filters.query.trim()}"` : t("audit.label.noSearch")
   ];
   return parts.join(" / ");
 }
@@ -3910,28 +3989,31 @@ function virtualListRange(totalItems: number, scrollTop: number, rowHeight: numb
   };
 }
 
-function runtimeScreenshotPreviewItems(report: RuntimeComparisonReport): Array<{ artifactId: string; detail: string; label: string }> {
+function runtimeScreenshotPreviewItems(
+  report: RuntimeComparisonReport,
+  t: (key: string) => string
+): Array<{ artifactId: string; detail: string; label: string }> {
   const items = [
     {
       artifactId: report.original.screenshotArtifactId ?? null,
-      detail: "Original runtime capture",
-      label: "Original"
+      detail: t("runtime.originalDetail"),
+      label: t("runtime.original")
     },
     {
       artifactId: report.reconstructed.screenshotArtifactId ?? null,
-      detail: "Reconstructed runtime capture",
-      label: "Reconstructed"
+      detail: t("runtime.reconstructedDetail"),
+      label: t("runtime.reconstructed")
     },
     {
       artifactId: report.differences.screenshotDiff.diffArtifactId ?? null,
-      detail: "Pixel difference capture",
-      label: "Pixel diff"
+      detail: t("runtime.pixelDiffDetail"),
+      label: t("runtime.pixelDiff")
     }
   ];
   return items.filter((item): item is { artifactId: string; detail: string; label: string } => Boolean(item.artifactId));
 }
 
-function buildStageItems(currentStatus: JobStatus | undefined): StageItem[] {
+function buildStageItems(currentStatus: JobStatus | undefined, t: (key: string) => string): StageItem[] {
   const activeStatus = visibleStageFor(currentStatus);
   const activeIndex = activeStatus ? statusIndex(activeStatus) : -1;
   const failed = currentStatus === "failed" || currentStatus === "cancelled";
@@ -3948,7 +4030,7 @@ function buildStageItems(currentStatus: JobStatus | undefined): StageItem[] {
     } else if (activeIndex >= 0 && stageIndex < activeIndex) {
       state = "done";
     }
-    return { ...stage, state };
+    return { ...stage, label: t(stage.labelKey), state };
   });
 }
 
@@ -3958,27 +4040,31 @@ function buildReportArtifacts(artifacts: Artifact[]): Artifact[] {
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
 }
 
-function buildRuntimeMetrics(latestRuntime: RuntimeValidationRun | null, runtimeCount: number): RuntimeMetric[] {
+function buildRuntimeMetrics(
+  latestRuntime: RuntimeValidationRun | null,
+  runtimeCount: number,
+  t: (key: string) => string
+): RuntimeMetric[] {
   if (!latestRuntime) {
     return [
-      { label: "Runs", value: String(runtimeCount), status: "warn" },
-      { label: "Entry load", value: "Pending", status: "warn" },
-      { label: "Console errors", value: "Pending", status: "warn" },
-      { label: "Failed requests", value: "Pending", status: "warn" }
+      { label: t("runtime.runs"), value: String(runtimeCount), status: "warn" },
+      { label: t("runtime.entryLoad"), value: t("runtime.pending"), status: "warn" },
+      { label: t("runtime.consoleErrors"), value: t("runtime.pending"), status: "warn" },
+      { label: t("runtime.failedRequests"), value: t("runtime.pending"), status: "warn" }
     ];
   }
 
   const status = runStatusToMetricStatus(latestRuntime.status);
   return [
-    { label: "Runs", value: String(runtimeCount), status },
-    { label: "Entry load", value: latestRuntime.status, status },
+    { label: t("runtime.runs"), value: String(runtimeCount), status },
+    { label: t("runtime.entryLoad"), value: latestRuntime.status, status },
     {
-      label: "Console errors",
+      label: t("runtime.consoleErrors"),
       value: String(latestRuntime.consoleErrors.length + latestRuntime.pageErrors.length),
       status: latestRuntime.consoleErrors.length + latestRuntime.pageErrors.length > 0 ? "fail" : "pass"
     },
     {
-      label: "Failed requests",
+      label: t("runtime.failedRequests"),
       value: String(latestRuntime.failedRequests.length),
       status: latestRuntime.failedRequests.length > 0 ? "fail" : "pass"
     }
@@ -4053,8 +4139,8 @@ function formatDuration(seconds: number): string {
   return `${seconds.toFixed(2)} s`;
 }
 
-function formatIdList(ids: string[]): string {
-  return ids.length > 0 ? ids.join(", ") : "None";
+function formatIdList(ids: string[], t?: (key: string) => string): string {
+  return ids.length > 0 ? ids.join(", ") : t ? t("common.none") : "None";
 }
 
 function artifactDownloadUrl(apiBaseUrl: string, jobId: string, artifactId: string): string {
