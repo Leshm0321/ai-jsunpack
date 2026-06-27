@@ -275,6 +275,7 @@ class SandboxResourcePolicy:
     capabilities: tuple[SandboxRuntimeCapability, ...] = field(default_factory=_local_capabilities)
     limitations: tuple[str, ...] = (
         "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation.",
+        "Local sandbox runner is a development and audit-only boundary; do not treat it as production multi-tenant isolation.",
     )
 
 

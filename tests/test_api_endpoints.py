@@ -105,6 +105,25 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(fetched_body["job"]["status"], "intake")
         self.assertEqual(fetched_body["artifacts"][0]["contentType"], "application/zip")
 
+    def test_upload_rejects_payloads_over_configured_limit(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+
+        with patch.dict(os.environ, {"AI_JSUNPACK_MAX_UPLOAD_BYTES": "3"}, clear=False):
+            uploaded = self.client.post(
+                f"/jobs/{job_id}/upload",
+                files={"file": ("dist.zip", b"over-limit", "application/zip")},
+                headers=self.access_headers,
+            )
+
+        self.assertEqual(uploaded.status_code, 413)
+        self.assertEqual(self.store.list_artifacts(job_id), [])
+
     def test_missing_job_returns_404(self):
         fetched = self.client.get("/jobs/job_missing", headers=self.access_headers)
         uploaded = self.client.post(
@@ -498,7 +517,7 @@ class ApiEndpointTest(unittest.TestCase):
             job_id,
             kind="audit_report",
             stage="packaging",
-            filename="audit-report.md",
+            filename='..\\bad\r\nname";x=.md',
             content=b"# Object Audit\n",
             content_type="text/markdown; charset=utf-8",
             producer="test.api",
@@ -509,6 +528,14 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.content, b"# Object Audit\n")
         self.assertEqual(downloaded.headers["content-type"], "text/markdown; charset=utf-8")
+        disposition = downloaded.headers["content-disposition"]
+        self.assertIn("attachment;", disposition)
+        self.assertIn('filename="artifact_', disposition)
+        self.assertIn('bad__name__x=.md"', disposition)
+        self.assertIn("filename*=UTF-8''artifact_", disposition)
+        self.assertIn("bad__name%22%3Bx%3D.md", disposition)
+        self.assertNotIn("\r", disposition)
+        self.assertNotIn("\n", disposition)
 
     def test_retention_cleanup_endpoint_previews_and_deletes_artifacts(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
@@ -950,6 +977,87 @@ class ApiEndpointTest(unittest.TestCase):
         sent_payload = json.loads(mocked_urlopen.call_args.args[0].data.decode("utf-8"))
         self.assertIn("events", sent_payload)
         self.assertGreaterEqual(len(sent_payload["events"]), 2)
+
+    def test_ops_alert_webhook_rejects_insecure_targets_by_default(self):
+        with patch.dict(
+            os.environ,
+            {"AI_JSUNPACK_ALERT_WEBHOOK_URL": "http://127.0.0.1:9999/webhook"},
+            clear=False,
+        ), patch("apps.api.app.main.urlopen") as mocked_urlopen:
+            heartbeat = self.client.post(
+                "/ops/heartbeats",
+                json={
+                    "serviceRole": "worker",
+                    "instanceId": "worker-service-a",
+                    "status": "degraded",
+                    "ttlSeconds": 30,
+                    "metrics": {"jobCount": 1},
+                    "alerts": [
+                        {
+                            "code": "worker_overloaded",
+                            "severity": "warning",
+                            "message": "Worker is approaching capacity.",
+                            "field": "jobCount",
+                            "value": 1,
+                            "threshold": 0,
+                        }
+                    ],
+                    "metadata": {},
+                },
+                headers=self.worker_service_headers,
+            )
+            alerts = self.client.get("/ops/alerts", headers=self.access_headers)
+
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(alerts.json()["delivery"]["status"], "failed")
+        self.assertFalse(alerts.json()["delivery"]["attempted"])
+        self.assertTrue(alerts.json()["delivery"]["webhookUrlConfigured"])
+        self.assertIn("https", alerts.json()["delivery"]["error"])
+        self.assertFalse(mocked_urlopen.called)
+
+    def test_ops_alert_webhook_allows_insecure_targets_when_explicitly_enabled(self):
+        webhook_response = MagicMock()
+        webhook_response.__enter__.return_value = webhook_response
+        webhook_response.__exit__.return_value = False
+        webhook_response.read.return_value = b"{}"
+
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_ALERT_WEBHOOK_URL": "http://127.0.0.1:9999/webhook",
+                "AI_JSUNPACK_ALLOW_INSECURE_WEBHOOK_URLS": "true",
+            },
+            clear=False,
+        ), patch("apps.api.app.main.urlopen", return_value=webhook_response) as mocked_urlopen:
+            heartbeat = self.client.post(
+                "/ops/heartbeats",
+                json={
+                    "serviceRole": "worker",
+                    "instanceId": "worker-service-a",
+                    "status": "degraded",
+                    "ttlSeconds": 30,
+                    "metrics": {"jobCount": 1},
+                    "alerts": [
+                        {
+                            "code": "worker_overloaded",
+                            "severity": "warning",
+                            "message": "Worker is approaching capacity.",
+                            "field": "jobCount",
+                            "value": 1,
+                            "threshold": 0,
+                        }
+                    ],
+                    "metadata": {},
+                },
+                headers=self.worker_service_headers,
+            )
+            alerts = self.client.get("/ops/alerts", headers=self.access_headers)
+
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(alerts.json()["delivery"]["status"], "delivered")
+        self.assertTrue(mocked_urlopen.called)
 
 
 if __name__ == "__main__":

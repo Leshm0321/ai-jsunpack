@@ -1863,7 +1863,7 @@ class AgentRuntime:
                     locator=f"memory:{record.memory_type}",
                     excerpt=record.content[:240],
                 )
-                for artifact, record in zip(memory_artifacts, memory_records)
+                for artifact, record in zip(memory_artifacts, memory_records, strict=True)
             ],
             *[
                 EvidenceRef(

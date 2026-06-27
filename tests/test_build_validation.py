@@ -50,6 +50,12 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual({payload["reviewType"] for payload in build_payloads}, {"build", "typecheck"})
         self.assertTrue(all(payload["status"] == "best_effort" for payload in build_payloads))
         self.assertTrue(all(payload["resourcePolicy"]["enforcement"] == "local_best_effort" for payload in build_payloads))
+        self.assertTrue(
+            all(
+                "production multi-tenant isolation" in payload["resourcePolicy"]["limitations"][1]
+                for payload in build_payloads
+            )
+        )
         self.assertTrue(all(payload["logsArtifactId"] for payload in build_payloads))
         self.assertEqual({payload["reviewType"] for payload in log_payloads}, {"build", "typecheck"})
         self.assertTrue(all(payload["status"] == "best_effort" for payload in log_payloads))

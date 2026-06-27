@@ -306,7 +306,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                     filename="ast-index.json",
                     payload=ast_index_payload,
                 )
-                historical_repair = self._write_json_artifact(
+                self._write_json_artifact(
                     store=store,
                     job_id=historical_job.id,
                     kind="repair_instruction",
@@ -322,7 +322,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                         "attempt": 0,
                     },
                 )
-                historical_review = self._write_json_artifact(
+                self._write_json_artifact(
                     store=store,
                     job_id=historical_job.id,
                     kind="review_run",

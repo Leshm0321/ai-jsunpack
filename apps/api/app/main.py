@@ -3,8 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+from ipaddress import ip_address, ip_network
 from datetime import datetime, timezone
+from pathlib import PurePath
 from urllib.error import URLError
+from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -60,9 +63,12 @@ REPORT_DOWNLOAD_FILENAMES = {
 AUDIT_RECORD_CATEGORIES = ("all", "inference", "review", "tool")
 OPS_WEBHOOK_URL_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_URL"
 OPS_WEBHOOK_TIMEOUT_SECONDS_ENV = "AI_JSUNPACK_ALERT_WEBHOOK_TIMEOUT_SECONDS"
+OPS_ALLOW_INSECURE_WEBHOOK_URLS_ENV = "AI_JSUNPACK_ALLOW_INSECURE_WEBHOOK_URLS"
 OPS_ALERT_RULES_JSON_ENV = "AI_JSUNPACK_ALERT_RULES_JSON"
 OPS_HEARTBEAT_TTL_SECONDS_ENV = "AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS"
 OPS_INSTANCE_ID_ENV = "AI_JSUNPACK_INSTANCE_ID"
+MAX_UPLOAD_BYTES_ENV = "AI_JSUNPACK_MAX_UPLOAD_BYTES"
+DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 try:
@@ -173,7 +179,7 @@ async def upload_source(
 ) -> JobSummary:
     job = require_job(job_id, access, minimum_role="maintainer")
 
-    content = await file.read()
+    content = await read_upload_content(file)
     store.write_artifact(
         job_id,
         kind="source_input",
@@ -392,8 +398,8 @@ def cancel_job(
     cancel_request = request or CancelJobRequest()
     try:
         job = store.request_cancel(job_id, cancel_request.reason)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Job not found")
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Job not found") from error
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
 
@@ -407,9 +413,9 @@ def cleanup_retention(
     try:
         return store.cleanup_retention(job_id, request)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Job not found") from error
 
 
 @app.get("/jobs/{job_id}/artifacts/{artifact_id}/download")
@@ -440,17 +446,52 @@ def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = 
         raise HTTPException(status_code=400, detail="Directory artifact download requires a result package")
     artifact_path = store.artifact_local_path(artifact)
     response_filename = filename or store.artifact_filename(artifact)
+    headers = {"Content-Disposition": content_disposition_attachment(response_filename)}
     if artifact_path is None:
         return Response(
             content=store.read_artifact_record(artifact),
             media_type=artifact.content_type,
-            headers={"Content-Disposition": f'attachment; filename="{response_filename}"'},
+            headers=headers,
         )
     return FileResponse(
         artifact_path,
         media_type=artifact.content_type,
-        filename=response_filename,
+        headers=headers,
     )
+
+
+async def read_upload_content(file: UploadFile) -> bytes:
+    limit = configured_max_upload_bytes()
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum size of {limit} bytes")
+    return content
+
+
+def configured_max_upload_bytes() -> int:
+    raw_value = os.getenv(MAX_UPLOAD_BYTES_ENV)
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return DEFAULT_MAX_UPLOAD_BYTES
+    return max(1, parsed)
+
+
+def content_disposition_attachment(filename: str) -> str:
+    safe_name = safe_download_filename(filename)
+    ascii_name = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";"} else "_" for char in safe_name)
+    ascii_name = ascii_name.strip(" .") or "artifact.bin"
+    encoded_name = quote(safe_name, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
+
+
+def safe_download_filename(filename: str | None) -> str:
+    normalized = unquote(filename or "artifact.bin").replace("\\", "/")
+    candidate = PurePath(normalized).name
+    candidate = candidate.replace("\r", "_").replace("\n", "_").replace("\0", "_").strip()
+    return candidate or "artifact.bin"
 
 
 def source_filename(source_artifact: ArtifactRecord) -> str:
@@ -965,6 +1006,16 @@ def deliver_ops_alerts(
             delivered_at=None,
             error=None,
         )
+    webhook_error = validate_webhook_url(webhook_url)
+    if webhook_error is not None:
+        return OpsAlertDelivery(
+            status="failed",
+            attempted=False,
+            webhook_url_configured=True,
+            event_id=events[0].id if events else None,
+            delivered_at=None,
+            error=webhook_error,
+        )
     payload = {
         "checkedAt": checked_at,
         "alerts": [alert.model_dump(by_alias=True) for alert in alerts],
@@ -972,14 +1023,14 @@ def deliver_ops_alerts(
         "metrics": metrics,
     }
     timeout_seconds = parse_float_env(OPS_WEBHOOK_TIMEOUT_SECONDS_ENV, 2.0)
-    request = Request(
+    request = Request(  # noqa: S310 - validate_webhook_url constrains webhook schemes and local targets.
         webhook_url,
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310  # nosec B310
             response.read()
     except (URLError, TimeoutError, ValueError) as error:
         return OpsAlertDelivery(
@@ -998,6 +1049,40 @@ def deliver_ops_alerts(
         delivered_at=utc_now(),
         error=None,
     )
+
+
+def validate_webhook_url(webhook_url: str) -> str | None:
+    if insecure_webhook_urls_allowed():
+        return None
+    parsed = urlparse(webhook_url)
+    if parsed.scheme != "https":
+        return "Webhook URL must use https unless insecure webhook URLs are explicitly allowed."
+    hostname = parsed.hostname
+    if not hostname:
+        return "Webhook URL must include a hostname."
+    if hostname.lower() in {"localhost"} or hostname.endswith(".localhost"):
+        return "Webhook URL must not target localhost unless insecure webhook URLs are explicitly allowed."
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return None
+    blocked_networks = (
+        ip_network("127.0.0.0/8"),
+        ip_network("10.0.0.0/8"),
+        ip_network("172.16.0.0/12"),
+        ip_network("192.168.0.0/16"),
+        ip_network("169.254.0.0/16"),
+        ip_network("::1/128"),
+        ip_network("fc00::/7"),
+        ip_network("fe80::/10"),
+    )
+    if any(address in network for network in blocked_networks):
+        return "Webhook URL must not target local or private addresses unless insecure webhook URLs are explicitly allowed."
+    return None
+
+
+def insecure_webhook_urls_allowed() -> bool:
+    return os.getenv(OPS_ALLOW_INSECURE_WEBHOOK_URLS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def api_instance_id() -> str:

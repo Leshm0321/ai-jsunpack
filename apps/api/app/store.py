@@ -28,7 +28,6 @@ from .models import (
     OpsAlert,
     OpsAlertDelivery,
     OpsAlertEvent,
-    OpsAlertRule,
     OpsHeartbeatRecord,
     OpsHeartbeatRequest,
     RetentionCategory,

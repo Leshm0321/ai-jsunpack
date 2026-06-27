@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from packages.deployment import DeploymentConfigurationError, validate_current_e
 from .pipeline import PipelineEvent, WorkerPipeline
 
 
+logger = logging.getLogger(__name__)
 WORKER_ID_ENV = "AI_JSUNPACK_WORKER_ID"
 WORKER_LEASE_SECONDS_ENV = "AI_JSUNPACK_WORKER_LEASE_SECONDS"
 WORKER_POLL_SECONDS_ENV = "AI_JSUNPACK_WORKER_POLL_SECONDS"
@@ -82,8 +84,8 @@ class LeaseRenewer:
             if self.on_renew is not None:
                 try:
                     self.on_renew()
-                except Exception:
-                    pass
+                except Exception as error:
+                    logger.debug("Lease renew callback failed for job %s: %s", self.job_id, error, exc_info=True)
 
 
 class WorkerQueueRunner:
@@ -308,7 +310,8 @@ class WorkerQueueRunner:
                     },
                 )
             )
-        except Exception:
+        except Exception as error:
+            logger.debug("Worker ops heartbeat could not be recorded: %s", error, exc_info=True)
             return
 
 

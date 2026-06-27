@@ -15,6 +15,43 @@ dependencies = [
   "boto3>=1.43,<2"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.8,<1",
+  "bandit>=1.7,<2"
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["apps/api", "apps/worker", "packages"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+  ".venv",
+  "node_modules",
+  "artifacts",
+  "tmp"
+]
+
+[tool.ruff.lint]
+select = ["F", "B904", "B905", "S310"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S310"]
+"deploy/**/*.py" = ["S603", "S607"]
+"apps/worker/worker/core_bridge.py" = ["S603", "S607"]
+"packages/sandbox/runner.py" = ["S603", "S607"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "node_modules", "artifacts", "tmp"]
+skips = [
+  "B101",
+  "B105",
+  "B112",
+  "B404",
+  "B603",
+  "B607"
+]

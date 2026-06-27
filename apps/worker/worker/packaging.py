@@ -335,7 +335,7 @@ class PackagingRunner:
         attachments = evidence_index["attachments"]
 
         lines = [
-            f"# AI JS Unpack Audit Report",
+            "# AI JS Unpack Audit Report",
             "",
             f"- Job: `{job['id']}`",
             f"- Final status: `{decision['status']}`",

@@ -466,7 +466,8 @@ class RemoteBrowserRunnerAdapter:
         poll_seconds: float | None = None,
         timeout_ms: int | None = None,
     ) -> None:
-        self.base_url = (base_url or os.getenv(REMOTE_BROWSER_RUNNER_URL_ENV) or "").rstrip("/")
+        raw_base_url = base_url or os.getenv(REMOTE_BROWSER_RUNNER_URL_ENV) or ""
+        self.base_url = self._validated_base_url(raw_base_url) if raw_base_url.strip() else ""
         self.token = token if token is not None else os.getenv(REMOTE_BROWSER_RUNNER_TOKEN_ENV)
         self.poll_seconds = poll_seconds if poll_seconds is not None else self._float_env(REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV, 0.25)
         self.timeout_ms = timeout_ms if timeout_ms is not None else self._int_env(REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV, 60_000)
@@ -474,6 +475,17 @@ class RemoteBrowserRunnerAdapter:
             raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} is not configured.", "policy_denied")
         if not self.token:
             raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} is not configured.", "policy_denied")
+
+    def _validated_base_url(self, value: str) -> str:
+        base_url = value.strip().rstrip("/")
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must use http or https.", "policy_denied")
+        if not parsed.hostname:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must include a hostname.", "policy_denied")
+        if parsed.username or parsed.password:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must not include credentials.", "policy_denied")
+        return base_url
 
     @classmethod
     def from_environment(cls) -> "RemoteBrowserRunnerAdapter | None":
@@ -542,7 +554,7 @@ class RemoteBrowserRunnerAdapter:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
-        request = Request(
+        request = Request(  # noqa: S310 - base_url is validated in __init__.
             f"{self.base_url}{path}",
             data=body,
             headers={
@@ -555,7 +567,7 @@ class RemoteBrowserRunnerAdapter:
         return self._json_request(request)
 
     def _get(self, path: str) -> dict[str, Any]:
-        request = Request(
+        request = Request(  # noqa: S310 - base_url is validated in __init__.
             f"{self.base_url}{path}",
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -567,7 +579,7 @@ class RemoteBrowserRunnerAdapter:
 
     def _json_request(self, request: Request) -> dict[str, Any]:
         try:
-            with urlopen(request, timeout=max(1, self.timeout_ms / 1000)) as response:
+            with urlopen(request, timeout=max(1, self.timeout_ms / 1000)) as response:  # noqa: S310  # nosec B310
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
             failure_class: FailureClass = "policy_denied" if error.code in {401, 403} else "runtime_error"

@@ -137,6 +137,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertTrue(result.resource_policy.host_platform)
         self.assertEqual(result.resource_policy.process_limit, 8)
         self.assertIn("does not enforce", result.resource_policy.limitations[0])
+        self.assertIn("production multi-tenant isolation", result.resource_policy.limitations[1])
         capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
         self.assertEqual(capabilities["network"].status, "best_effort")
         self.assertEqual(capabilities["cpu"].status, "best_effort")
