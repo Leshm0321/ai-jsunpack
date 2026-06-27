@@ -1918,10 +1918,6 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
   }
 }
 
-export async function runHeadlessPipeline(inputPath: string, config: AnalyzeInputConfig = {}): Promise<CoreAnalysisResult> {
-  return analyzeInputPackage(inputPath, config);
-}
-
 async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Promise<SourceMapArtifactAnalysis> {
   const bundleAnalyses: SourceMapBundleAnalysis[] = [];
   const sourceCandidates = new Set<string>();

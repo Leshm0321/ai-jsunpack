@@ -4053,13 +4053,6 @@ function formatDuration(seconds: number): string {
   return `${seconds.toFixed(2)} s`;
 }
 
-function formatEvidenceRefs(refs: EvidenceRef[]): string {
-  if (refs.length === 0) {
-    return "None";
-  }
-  return refs.map((ref) => [ref.label, ref.locator].filter(Boolean).join(" / ")).join("; ");
-}
-
 function formatIdList(ids: string[]): string {
   return ids.length > 0 ? ids.join(", ") : "None";
 }
