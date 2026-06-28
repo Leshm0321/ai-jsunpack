@@ -1,17 +1,30 @@
 # 本地启动与验证
 
-本文档说明 API、Web、Worker 以及可选 Browser Runner 服务的本地开发流程。
+本文档说明 API、Web、Worker 以及可选 Browser Runner 的本地开发流程。推荐优先使用 `scripts/dev.mjs` 或对应 npm script；只有排查环境变量时才手动启动服务。
+
+## 环境要求
+
+- Node.js 20 兼容版本和 npm
+- Python 3.11+
+- 可选：Playwright browsers，用于本地或远程浏览器验证
+- 可选：Docker 或 Podman，用于容器 sandbox、Compose smoke 和部署演练
 
 ## 环境变量文件
 
-仓库包含以下本地环境文件：
+仓库包含两个本地环境入口：
 
-- `.env`：本地开发默认值。该文件已被 Git 忽略，只应包含本地占位值。
-- `.example.env`：提交到仓库的新环境模板。
+- `.example.env`：提交到仓库的模板。
+- `.env`：本地开发值，已被 Git 忽略，只应包含本地占位 secret 和本机路径。
 
-不要把 `AI_JSUNPACK_SERVICE_ROLE`、`AI_JSUNPACK_SANDBOX_*`、`AI_JSUNPACK_AGENT_*` 或 `AI_JSUNPACK_BROWSER_RUNNER_*` 写入根目录 `.env`。API 以 `AI_JSUNPACK_SERVICE_ROLE=api` 启动时会拒绝 Worker 或 Browser Runner 变量，因此每个服务终端应在启动前临时设置对应服务变量。
+创建本地文件：
 
-在 PowerShell 中加载 `.env`：
+```powershell
+Copy-Item .example.env .env
+```
+
+不要把 `AI_JSUNPACK_SERVICE_ROLE`、`AI_JSUNPACK_SANDBOX_*`、`AI_JSUNPACK_AGENT_*`、`AI_JSUNPACK_LOCAL_AGENT_*` 或 `AI_JSUNPACK_BROWSER_RUNNER_*` 写入根目录 `.env`。API 以 `AI_JSUNPACK_SERVICE_ROLE=api` 启动时会拒绝 Worker、Browser Runner、sandbox、Core CLI 或模型 provider 侧配置，因此每个服务终端应在启动前临时设置自己的服务变量。
+
+PowerShell 手动加载 `.env`：
 
 ```powershell
 Get-Content .env | ForEach-Object {
@@ -28,69 +41,68 @@ Get-Content .env | ForEach-Object {
 npm install
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+如需运行 Playwright 浏览器验证：
+
+```powershell
 .venv\Scripts\python.exe -m playwright install
 ```
 
-如需运行静态检查：
+如需运行 Ruff 或 Bandit：
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -e .[dev]
 ```
 
-## 推荐：使用脚本启动
+## 推荐启动方式
 
-根目录的 `scripts/dev.mjs` 会自动加载 `.env`，并按服务补齐本地开发需要的环境变量。Web 启动时如果 `VITE_API_AUTH_TOKEN` 为空，脚本会用 `.env` 中的 `AI_JSUNPACK_AUTH_SECRET` 自动生成本地 owner token。
-
-API：
-
-```powershell
-node scripts/dev.mjs api
-```
-
-Web：
-
-```powershell
-node scripts/dev.mjs web
-```
-
-Worker：
-
-```powershell
-node scripts/dev.mjs worker
-```
-
-可选 Browser Runner：
-
-```powershell
-node scripts/dev.mjs browser-runner
-```
-
-如果要让 Worker 使用远程 Browser Runner，先启动 Browser Runner，再启动 Worker：
-
-```powershell
-node scripts/dev.mjs worker --use-browser-runner
-```
-
-也可以使用 npm 便捷命令：
+`scripts/dev.mjs` 会自动加载 `.env`，按服务补齐本地开发所需环境变量。Web 启动时如果 `VITE_API_AUTH_TOKEN` 为空，脚本会使用 `AI_JSUNPACK_AUTH_SECRET` 生成本地 owner token。
 
 ```powershell
 npm run dev:api
 npm run dev:web
 npm run dev:worker
-npm run dev:browser-runner
-npm run dev:check
 ```
 
-PowerShell 和 Windows cmd 也提供 wrapper：
+可选 Browser Runner：
+
+```powershell
+npm run dev:browser-runner
+```
+
+如果要让 Worker 使用 Browser Runner，先启动 Browser Runner，再启动 Worker：
+
+```powershell
+node scripts/dev.mjs worker --use-browser-runner
+```
+
+等价的直接脚本入口：
+
+```powershell
+node scripts/dev.mjs api
+node scripts/dev.mjs web
+node scripts/dev.mjs worker
+node scripts/dev.mjs browser-runner
+node scripts/dev.mjs check
+```
+
+Windows wrapper：
 
 ```powershell
 .\scripts\dev.ps1 api
 .\scripts\dev.cmd api
 ```
 
+默认地址：
+
+- Web：`http://127.0.0.1:5173`
+- API：`http://127.0.0.1:8000`
+- Browser Runner：`http://127.0.0.1:8001`
+
 ## 生成本地 Token
 
-API 使用由 `AI_JSUNPACK_AUTH_SECRET` 签名的 HMAC Bearer token。
+API 使用由 `AI_JSUNPACK_AUTH_SECRET` 签名的 HMAC-SHA256 Bearer token。
 
 Web/API 用户 token：
 
@@ -106,25 +118,31 @@ $env:AI_JSUNPACK_BROWSER_RUNNER_TOKEN = .venv\Scripts\python.exe -c "from apps.a
 
 ## 手动启动服务
 
-通常优先使用上面的脚本。需要排查环境变量问题时，可加载 `.env` 后，在独立终端中手动启动每个服务。
+通常优先使用脚本。需要排查环境变量问题时，可在独立终端中手动启动每个服务。
 
-API:
+API：
 
 ```powershell
 $env:AI_JSUNPACK_SERVICE_ROLE = "api"
+$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
 .venv\Scripts\python.exe -m uvicorn apps.api.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Web:
+Web：
 
 ```powershell
+$env:VITE_API_BASE_URL = "http://127.0.0.1:8000"
+$env:VITE_API_USER_ID = "local-user"
+$env:VITE_API_PROJECT_ID = "default"
+$env:VITE_API_AUTH_TOKEN = "<user bearer token>"
 npm run dev:web
 ```
 
-Worker:
+Worker：
 
 ```powershell
 $env:AI_JSUNPACK_SERVICE_ROLE = "worker"
+$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
 $env:AI_JSUNPACK_WORKER_ID = "worker-local-1"
 $env:AI_JSUNPACK_WORKER_LEASE_SECONDS = "300"
 $env:AI_JSUNPACK_WORKER_POLL_SECONDS = "5"
@@ -134,10 +152,11 @@ $env:AI_JSUNPACK_CREWAI_DATA_ROOT = ".crewai-data"
 .venv\Scripts\python.exe -m apps.worker.worker.queue
 ```
 
-可选 Browser Runner：
+Browser Runner：
 
 ```powershell
 $env:AI_JSUNPACK_SERVICE_ROLE = "browser-runner"
+$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
 $env:AI_JSUNPACK_BROWSER_RUNNER_QUEUE_BACKEND = "sqlite"
 $env:AI_JSUNPACK_BROWSER_RUNNER_WORKDIR = "tmp/local-dev/browser-runner"
 $env:AI_JSUNPACK_BROWSER_RUNNER_DB_PATH = "tmp/local-dev/browser-runner/browser-runs.sqlite3"
@@ -145,6 +164,7 @@ $env:AI_JSUNPACK_BROWSER_RUNNER_WORKERS = "2"
 $env:AI_JSUNPACK_BROWSER_RUNNER_MAX_ATTEMPTS = "3"
 $env:AI_JSUNPACK_BROWSER_RUNNER_LEASE_SECONDS = "120"
 $env:AI_JSUNPACK_BROWSER_RUNNER_RETRY_BACKOFF_SECONDS = "1"
+$env:AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS = "0.25"
 $env:AI_JSUNPACK_BROWSER_RUNNER_MAX_QUEUE_AGE_MS = "60000"
 $env:AI_JSUNPACK_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS = "60000"
 $env:AI_JSUNPACK_BROWSER_RUNNER_MAX_EXPIRED_RUNNING = "0"
@@ -152,7 +172,7 @@ $env:AI_JSUNPACK_BROWSER_RUNNER_MAX_RETRY_RATE = "0.25"
 .venv\Scripts\python.exe -m uvicorn apps.browser_runner.app.main:app --host 127.0.0.1 --port 8001
 ```
 
-如果要让 Worker 使用 Browser Runner，在启动 Worker 前在 Worker 终端设置以下变量：
+让 Worker 使用 Browser Runner：
 
 ```powershell
 $env:AI_JSUNPACK_BROWSER_RUNNER_URL = "http://127.0.0.1:8001"
@@ -161,7 +181,7 @@ $env:AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS = "0.25"
 $env:AI_JSUNPACK_BROWSER_RUNNER_TIMEOUT_MS = "60000"
 ```
 
-如果 Browser Runner 未运行，在 Worker 终端保持 `AI_JSUNPACK_BROWSER_RUNNER_URL` 未设置，使 Worker 使用本地 Playwright adapter：
+让 Worker 回到本地 Playwright adapter：
 
 ```powershell
 Remove-Item Env:AI_JSUNPACK_BROWSER_RUNNER_URL -ErrorAction SilentlyContinue
@@ -170,19 +190,19 @@ Remove-Item Env:AI_JSUNPACK_BROWSER_RUNNER_TOKEN -ErrorAction SilentlyContinue
 
 ## 健康检查
 
-API:
+API：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Browser Runner:
+Browser Runner：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8001/health
 ```
 
-Web:
+Web：
 
 ```powershell
 Start-Process http://127.0.0.1:5173
@@ -190,28 +210,36 @@ Start-Process http://127.0.0.1:5173
 
 ## 回归验证
 
-交付代码改动前运行：
+基础验证：
 
 ```powershell
 npm run check
 npm run test:core
-.venv\Scripts\python.exe -m unittest discover tests
+npm run build:web
+.venv\Scripts\python.exe -m compileall apps packages tests deploy
+.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-运行静态检查：
+脚本封装：
+
+```powershell
+npm run dev:check
+```
+
+静态检查：
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check apps packages tests deploy
 .venv\Scripts\python.exe -m bandit -c pyproject.toml -r apps packages deploy -x tests
 ```
 
-运行编译检查：
+## 端到端 Smoke
+
+不依赖 Docker 的轻量 API/Worker smoke：
 
 ```powershell
-.venv\Scripts\python.exe -m compileall apps packages tests
+.venv\Scripts\python.exe -m apps.api.app.deployment_smoke --output tmp\deployment-smoke.json
 ```
-
-## 端到端 Smoke
 
 Docker Compose 演练：
 
@@ -222,15 +250,9 @@ Docker Compose 演练：
   --soak-runs 10
 ```
 
-报告中 `status` 为 `pass` 时表示通过。
+报告中 `status=pass` 表示通过。
 
-不依赖 Docker 的轻量 API/Worker smoke：
-
-```powershell
-.venv\Scripts\python.exe -m apps.api.app.deployment_smoke --output tmp\deployment-smoke.json
-```
-
-## 预期本地产物位置
+## 预期本地产物
 
 - Metadata DB：`tmp/local-dev/metadata.db`
 - Artifact 文件：`tmp/local-dev/artifacts`
@@ -239,7 +261,7 @@ Docker Compose 演练：
 
 ## 注意事项
 
-- `.env` 仅用于本地开发。
-- `.example.env` 是提交到仓库的模板。
+- `.env` 只用于本地开发，不提交真实 secret。
+- `.example.env` 是可提交模板。
 - 生产 secret 必须来自 CI 或 secret manager。
 - 本地 sandbox runner 只用于开发和审计，不提供生产多租户隔离。

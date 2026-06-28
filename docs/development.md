@@ -1,16 +1,36 @@
 # 开发指南
 
-本文档说明 AI JS Unpack 的本地环境搭建、服务启动、调试和验证流程。
+本文档说明 AI JS Unpack 的仓库结构、开发流程、验证命令和调试建议。本地服务启动细节放在 [本地启动与验证](local-startup.md)。
 
-## 环境要求
+## 仓库结构
 
-- Node.js 20 或兼容版本
-- npm
-- Python 3.11+
-- 可选：Playwright browsers
-- 可选：Docker 或 Podman，用于容器 sandbox 和部署演练
+```text
+apps/
+  api/              FastAPI API、认证、store、Ops、deployment smoke
+  browser_runner/   独立 Playwright capture 服务
+  web/              React + Vite 工作台
+  worker/           Worker queue、pipeline、Agent/runtime/build/package
+packages/
+  core/             Headless TypeScript 分析与重建 CLI
+  shared/           TypeScript 共享契约与示例 fixtures
+  sandbox/          sandbox runner 策略和执行边界
+  memory/           memory service/context
+  knowledge/        knowledge evidence/rules/retriever
+  deployment/       服务角色环境变量校验
+deploy/
+  docker/           服务镜像 Dockerfile
+  env/              Compose 环境变量模板
+  firecracker/      Firecracker launcher 模板和部署清单
+  *.py              compose smoke、release gate、归档校验
+tests/              Python 单元和集成测试
+docs/               公开文档
+```
 
-## 安装依赖
+公开、可长期维护的文档放在 `README.md` 和 `docs/`。本地方案草稿、迁移资料和未公开分析材料放在被忽略的 `dev_docs/`，不要从公开文档链接到该目录。
+
+## 开发环境
+
+安装依赖：
 
 ```powershell
 npm install
@@ -18,69 +38,54 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-如果需要运行浏览器验证：
+可选依赖：
 
 ```powershell
 .venv\Scripts\python.exe -m playwright install
+.venv\Scripts\python.exe -m pip install -e .[dev]
 ```
 
-## 本地认证 Token
-
-API 使用 HMAC-SHA256 Bearer token。开发环境可以使用固定 secret 生成临时 token。
-
-用户 token：
+创建本地环境文件：
 
 ```powershell
-$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
-$env:VITE_API_AUTH_TOKEN = .venv\Scripts\python.exe -c "from apps.api.app.auth import create_auth_token; print(create_auth_token(subject='local-user', projects={'default':'owner'}, secret='dev-secret', ttl_seconds=86400))"
+Copy-Item .example.env .env
 ```
 
-Worker service token：
+本地服务启动优先使用：
 
 ```powershell
-$env:AI_JSUNPACK_BROWSER_RUNNER_TOKEN = .venv\Scripts\python.exe -c "from apps.api.app.auth import create_auth_token; print(create_auth_token(subject='worker-local', kind='service', projects={'default':'owner'}, service_roles=['worker'], secret='dev-secret', ttl_seconds=86400))"
-```
-
-## 启动服务
-
-API：
-
-```powershell
-$env:AI_JSUNPACK_SERVICE_ROLE = "api"
-$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
-.venv\Scripts\python.exe -m uvicorn apps.api.app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-Web：
-
-```powershell
-$env:VITE_API_BASE_URL = "http://127.0.0.1:8000"
-$env:VITE_API_USER_ID = "local-user"
-$env:VITE_API_PROJECT_ID = "default"
+npm run dev:api
 npm run dev:web
+npm run dev:worker
+npm run dev:browser-runner
 ```
 
-Worker：
+## 常用验证
+
+基础验证：
 
 ```powershell
-$env:AI_JSUNPACK_SERVICE_ROLE = "worker"
-$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
-.venv\Scripts\python.exe -m apps.worker.worker.queue
+npm run check
+npm run test:core
+npm run build:web
+.venv\Scripts\python.exe -m compileall apps packages tests deploy
+.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-Browser Runner：
+脚本封装：
 
 ```powershell
-$env:AI_JSUNPACK_SERVICE_ROLE = "browser-runner"
-$env:AI_JSUNPACK_AUTH_SECRET = "dev-secret"
-.venv\Scripts\python.exe -m uvicorn apps.browser_runner.app.main:app --host 127.0.0.1 --port 8001
+npm run dev:check
 ```
 
-默认 Web 地址是 `http://127.0.0.1:5173`，默认 API 地址是 `http://127.0.0.1:8000`。
+静态检查：
 
-## Core CLI 调试
+```powershell
+.venv\Scripts\python.exe -m ruff check apps packages tests deploy
+.venv\Scripts\python.exe -m bandit -c pyproject.toml -r apps packages deploy -x tests
+```
 
-Core 可以独立分析输入目录或压缩包：
+Core CLI smoke：
 
 ```powershell
 npm run build
@@ -88,24 +93,49 @@ node packages/core/dist/cli.js analyze <inputPath> --job-id <jobId>
 node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output-dir <dir>
 ```
 
-支持目录、`.zip`、`.tar`、`.tar.gz` 和 `.tgz`。压缩包会执行路径安全检查，拒绝绝对路径、Windows drive/UNC 路径、路径穿越、zip symlink、tar link 和不支持的压缩成员。
+## 范围化测试
 
-## 常用验证
+- API 改动：运行 `tests/test_api_endpoints.py` 相关测试，并检查认证、项目角色、错误响应和下载路径。
+- Worker 改动：运行 queue、pipeline、runtime smoke、packaging 和 agent runtime 相关测试。
+- Shared contract 改动：同步 TypeScript 类型、Python models 和契约一致性测试。
+- Core 改动：运行 `npm run test:core`，必要时补充 CLI analyze/reconstruct fixture。
+- Sandbox 改动：验证 runner kind、failure class、resource policy、超时和不降级行为。
+- Browser Runner 改动：运行服务测试和 benchmark 相关测试，记录容量或兼容性影响。
+- Web 改动：运行 `npm run build:web`，并在桌面和移动宽度做 smoke。
+- 部署改动：检查 `deploy/`、`deploy/env/`、Compose 和 release gate 相关测试。
 
-```powershell
-npm run check
-npm run test:core
-npm run build:web
-.venv\Scripts\python.exe -m compileall apps packages tests
-.venv\Scripts\python.exe -m unittest discover -s tests
-```
-
-前端改动后建议启动 `npm run dev:web`，在浏览器检查无应用错误、无资源 404，桌面和移动宽度下内容不重叠。
+无法运行某项验证时，在最终说明或 PR 描述中写明原因、影响范围和替代检查。
 
 ## 调试建议
 
-- 先确认 `AI_JSUNPACK_AUTH_SECRET` 和前端 `VITE_API_AUTH_TOKEN` 使用同一个 secret 生成。
-- 本地开发未显式配置数据库时，后端会使用项目默认的轻量存储路径。
-- Worker 需要能读取 source input artifact，并能写入生成的 analysis、runtime 和 packaging artifacts。
-- Browser Runner 是可选边界；没有配置远程 runner 时，Worker 会使用本地 Playwright adapter。
-- CrewAI provider 未配置或策略拒绝时，系统应保留 schema-valid 的 best-effort evidence。
+- 先确认 `.env` 中的 `AI_JSUNPACK_AUTH_SECRET` 与生成 token 使用的 secret 一致。
+- Web 若返回 401，检查 `VITE_API_AUTH_TOKEN` 是否为空、过期或不是 `projects.default=owner/maintainer/viewer`。
+- API 在 `AI_JSUNPACK_SERVICE_ROLE=api` 下会拒绝 Worker、sandbox、Browser Runner、Core CLI 和模型 provider 配置；启动失败时先检查环境变量污染。
+- Worker 空转时，检查 source input artifact、Metadata DB、Artifact Store 路径或 S3/MinIO 配置是否共享。
+- Browser Runner 未配置时，Worker 使用本地 Playwright adapter；配置了 `AI_JSUNPACK_BROWSER_RUNNER_URL` 后会走远程服务。
+- CrewAI provider 未配置或策略拒绝时，系统应保留 schema-valid best-effort evidence，而不是阻断 deterministic pipeline 的可审计输出。
+
+## 生成产物与忽略目录
+
+以下目录属于本地或生成产物，默认不进入 Git：
+
+- `.venv/`
+- `node_modules/`
+- `.crewai-data/`
+- `artifacts/`
+- `uploads/`
+- `tmp/`
+- `dev_docs/`
+- `coverage/`
+- `playwright-report/`
+- `test-results/`
+
+如果需要保留验证证据，优先写入 `tmp/` 或外部归档位置，再在说明中引用路径和 hash；不要提交真实客户输入、secret、token、生产日志或敏感截图。
+
+## 文档维护
+
+- README 保持项目名片、快速启动、核心能力和文档导航。
+- `docs/local-startup.md` 是本地启动细节的唯一详细入口。
+- `docs/api.md` 必须与 FastAPI 路由和 Browser Runner 路由一致。
+- `docs/deployment.md` 记录服务边界、环境变量、release gate、证据归档和回滚。
+- 文档命令必须对应当前 `package.json`、`pyproject.toml`、`deploy/` 或源码入口。
