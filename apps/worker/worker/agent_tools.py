@@ -60,6 +60,7 @@ class AgentToolRegistryBuilder:
                 input_artifact_kinds=["input_inventory", "ast_index", "memory_record", "knowledge_evidence"],
                 output_artifact_kinds=[
                     "agent_plan",
+                    "agent_execution",
                     "inference_record",
                     "runtime_diagnosis",
                     "report_section",

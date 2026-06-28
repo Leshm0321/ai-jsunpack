@@ -18,18 +18,26 @@ from .agent_contracts import (
     AGENT_PROVIDER_ENV,
     AGENT_TOOL_VERSION,
     CREWAI_DATA_ROOT_ENV,
+    CREW_AGENT_NAMES,
+    CrewAgentExecution,
+    CrewAgentPassOutput,
+    CrewAgentSpec,
+    CrewExecutionStatus,
+    CrewInferenceOutput,
+    CrewRepairInstructionOutput,
+    CrewReportSectionOutput,
+    CrewReviewOutput,
+    CrewRuntimeDiagnosisOutput,
+    CrewStructuredAgentOutput,
     LOCAL_AGENT_MODEL_ENV,
     LOCAL_AGENT_PROVIDER_ENV,
     AgentInferenceDraft,
     AgentModelPolicy,
-    AgentProviderDraft,
     AgentRepairInstructionDraft,
     AgentReportSectionDraft,
     AgentReviewDraft,
     AgentRuntimeDiagnosisDraft,
     AgentRuntimeRequest,
-    CrewAgentPassOutput,
-    CrewInferenceOutput,
 )
 from .agent_feedback import AgentFeedbackRefiner
 
@@ -123,198 +131,47 @@ class ModelPolicyResolver:
         return None
 
 
-class CrewAIAgentProvider:
-    """由 CrewAI 支撑的 provider，提供可审计策略和失败 fallback。"""
+class CrewAIBackend:
+    """Encapsulates raw CrewAI calls for a single agent execution."""
 
-    tool_name = "crewai.agent_pass"
-    tool_version = AGENT_TOOL_VERSION
+    def __init__(self) -> None:
+        self._prepared = False
 
-    def __init__(
-        self,
-        policy_resolver: ModelPolicyResolver | None = None,
-        redactor: AgentContextRedactor | None = None,
-        feedback_refiner: AgentFeedbackRefiner | None = None,
-        context_builder: AgentContextBuilder | None = None,
-    ) -> None:
-        self.policy_resolver = policy_resolver or ModelPolicyResolver()
-        self.redactor = redactor or AgentContextRedactor()
-        self.feedback_refiner = feedback_refiner or AgentFeedbackRefiner()
-        self.context_builder = context_builder or AgentContextBuilder()
-
-    def run(
+    def run_agent(
         self,
         *,
-        request: AgentRuntimeRequest,
-        memory_context: JobMemoryContext,
-        memory_artifact_ids: list[str],
-        knowledge_hits: list[KnowledgeHit],
-        knowledge_artifact_id: str,
-        evidence_refs: list[EvidenceRef],
-    ) -> AgentProviderDraft:
-        policy = self.policy_resolver.resolve(request)
-        redaction = self.redactor.redact(
-            policy=policy,
-            input_summary=self.context_builder.input_summary(request),
-            memory_excerpt=memory_context.prompt_excerpt,
-            evidence_refs=evidence_refs,
-        )
-        plan_payload = self._plan_payload(
-            request=request,
-            policy=policy,
-            memory_artifact_ids=memory_artifact_ids,
-            knowledge_artifact_id=knowledge_artifact_id,
-            knowledge_hits=knowledge_hits,
-            input_summary=redaction.input_summary,
-            evidence_refs=redaction.evidence_refs,
-            redaction_metadata=redaction.metadata,
-        )
-        feedback = self.feedback_refiner.refine(knowledge_hits=knowledge_hits)
-        if not policy.allowed:
-            return self.feedback_refiner.merge(
-                self._policy_denied_draft(
-                    request=request,
-                    policy=policy,
-                    plan_payload=plan_payload,
-                    evidence_refs=redaction.evidence_refs,
-                ),
-                feedback,
-            )
-
-        prompt_context = self._prompt_context(
-            request=request,
-            policy=policy,
-            memory_excerpt=redaction.memory_excerpt,
-            input_summary=redaction.input_summary,
-            knowledge_hits=knowledge_hits,
-            evidence_refs=redaction.evidence_refs,
-            redaction_metadata=redaction.metadata,
-        )
-        try:
-            crew_output = self._run_crewai(prompt_context=prompt_context, policy=policy)
-        except Exception as error:
-            return self.feedback_refiner.merge(
-                self._agent_failed_draft(
-                    policy=policy,
-                    plan_payload={
-                        **plan_payload,
-                        "runtimeStatus": "agent_failed",
-                        "limitations": [*plan_payload["limitations"], str(error)],
-                    },
-                    error=error,
-                    evidence_refs=redaction.evidence_refs,
-                ),
-                feedback,
-            )
-
-        crew_output = crew_output if crew_output.inferences else self._empty_crewai_output()
-        return self.feedback_refiner.merge(
-            AgentProviderDraft(
-                plan_payload={
-                    **plan_payload,
-                    "runtimeStatus": "completed",
-                    "plannedAgents": crew_output.planned_agents or plan_payload["plannedAgents"],
-                    "limitations": [*plan_payload["limitations"], *crew_output.limitations],
-                },
-                evidence_refs=redaction.evidence_refs,
-                inferences=[self._draft_from_crewai(inference) for inference in crew_output.inferences],
-                runtime_diagnoses=self._runtime_diagnoses(
-                    status=self._run_status(crew_output.review_status, default="best_effort"),
-                    failure_class="none",
-                    uncertainty=crew_output.limitations or ["Runtime Agent output is based on available Core evidence."],
-                ),
-                report_sections=self._report_sections(
-                    status=self._run_status(crew_output.review_status, default="best_effort"),
-                    summary=crew_output.review_decision,
-                    uncertainty=crew_output.limitations or ["Report Agent section is generated from Agent pass evidence."],
-                ),
-                repair_instructions=self._repair_instructions(
-                    status=self._run_status(crew_output.review_status, default="best_effort"),
-                    failure_class="none",
-                    decision=crew_output.review_decision,
-                ),
-                review=AgentReviewDraft(
-                    status=self._run_status(crew_output.review_status, default="best_effort"),
-                    decision=crew_output.review_decision,
-                    failure_class="none",
-                ),
-                model_provider=policy.model_provider,
-                model_name=policy.model_name,
-                prompt_version=policy.prompt_version,
-                tool_name=self.tool_name,
-                tool_version=self.tool_version,
-                tool_status="pass",
-                tool_failure_class="none",
-                message="CrewAI runtime produced schema-valid Agent inference and review records.",
-            ),
-            feedback,
-        )
-
-    def _run_crewai(self, *, prompt_context: dict[str, Any], policy: AgentModelPolicy) -> CrewAgentPassOutput:
+        spec: CrewAgentSpec,
+        prompt_context: dict[str, Any],
+        policy: AgentModelPolicy,
+    ) -> CrewStructuredAgentOutput:
         self._prepare_crewai_storage()
         from crewai import Agent, Crew, Process, Task
 
-        planner = Agent(
-            role="Planner Agent",
-            goal="Plan a safe JavaScript reconstruction analysis pass from audited artifacts.",
-            backstory="You create schema-first plans for artifact-driven reverse analysis.",
-            llm=policy.model_name,
-            allow_delegation=False,
-            verbose=False,
-        )
-        analysis = Agent(
-            role="Analysis Agent",
-            goal="Identify module, framework, runtime, and uncertainty evidence from Core artifacts.",
-            backstory="You reason only from provided evidence references and deterministic summaries.",
-            llm=policy.model_name,
-            allow_delegation=False,
-            verbose=False,
-        )
-        review = Agent(
-            role="Review Agent",
-            goal="Return validated structured findings for downstream deterministic writers.",
-            backstory="You reject unsupported conclusions and preserve uncertainty in audit records.",
+        agent = Agent(
+            role=spec.role,
+            goal=spec.goal,
+            backstory=spec.backstory,
             llm=policy.model_name,
             allow_delegation=False,
             verbose=False,
         )
         context_json = json.dumps(prompt_context, ensure_ascii=False, indent=2, sort_keys=True)
-        plan_task = Task(
+        task = Task(
             description=(
-                "Read this audited context and outline the Agent pass. "
-                "Do not request source text outside evidence references.\n\n{agent_context}"
+                "Read the structured, audited runtime context and return only schema-valid JSON for your role. "
+                "Preserve uncertainty. Do not request source text outside provided evidence references.\n\n{agent_context}"
             ),
-            expected_output="A concise plan naming the evidence-backed Agent checks.",
-            agent=planner,
+            expected_output=f"Structured {spec.output_kind} records for {spec.name}.",
+            agent=agent,
+            output_pydantic=CrewStructuredAgentOutput,
         )
-        analysis_task = Task(
-            description=(
-                "Analyze module split, framework, runtime, and uncertainty evidence. "
-                "Use only the context provided by the planner and input artifacts."
-            ),
-            expected_output="Evidence-backed findings with confidence and uncertainty.",
-            agent=analysis,
-            context=[plan_task],
-        )
-        review_task = Task(
-            description=(
-                "Return a structured Agent pass output. Include plannedAgents, inferences, "
-                "reviewStatus, reviewDecision, and limitations. Keep every inference evidence-bound."
-            ),
-            expected_output="A CrewAgentPassOutput-compatible object.",
-            agent=review,
-            context=[plan_task, analysis_task],
-            output_pydantic=CrewAgentPassOutput,
-        )
-        crew = Crew(
-            agents=[planner, analysis, review],
-            tasks=[plan_task, analysis_task, review_task],
-            process=Process.sequential,
-            verbose=False,
-        )
+        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
         result = crew.kickoff(inputs={"agent_context": context_json})
         return self._parse_crewai_result(result)
 
     def _prepare_crewai_storage(self) -> None:
+        if self._prepared:
+            return
         data_root = Path(os.getenv(CREWAI_DATA_ROOT_ENV, Path.cwd() / ".crewai-data")).resolve()
         data_root.mkdir(parents=True, exist_ok=True)
         os.environ["LOCALAPPDATA"] = str(data_root)
@@ -336,22 +193,288 @@ class CrewAIAgentProvider:
 
             appdirs.user_data_dir = project_user_data_dir
         except Exception:
-            return
+            pass
+        self._prepared = True
 
-    def _parse_crewai_result(self, result: Any) -> CrewAgentPassOutput:
+    def _parse_crewai_result(self, result: Any) -> CrewStructuredAgentOutput:
         structured = getattr(result, "pydantic", None)
-        if isinstance(structured, CrewAgentPassOutput):
+        if isinstance(structured, CrewStructuredAgentOutput):
             return structured
         if isinstance(structured, BaseModel):
-            return CrewAgentPassOutput.model_validate(structured.model_dump())
-        if isinstance(result, CrewAgentPassOutput):
+            return CrewStructuredAgentOutput.model_validate(structured.model_dump())
+        if isinstance(result, CrewStructuredAgentOutput):
             return result
         if isinstance(result, BaseModel):
-            return CrewAgentPassOutput.model_validate(result.model_dump())
+            return CrewStructuredAgentOutput.model_validate(result.model_dump())
         if isinstance(result, dict):
-            return CrewAgentPassOutput.model_validate(result)
+            return CrewStructuredAgentOutput.model_validate(result)
         raw = getattr(result, "raw", None) or str(result)
-        return CrewAgentPassOutput.model_validate(json.loads(raw))
+        return CrewStructuredAgentOutput.model_validate(json.loads(raw))
+
+
+class CrewAIExecutionAdapter:
+    """Converts policy-checked prompt context into isolated CrewAI agent executions."""
+
+    tool_name = "crewai.agent_pass"
+    tool_version = AGENT_TOOL_VERSION
+
+    def __init__(
+        self,
+        *,
+        policy_resolver: ModelPolicyResolver | None = None,
+        redactor: AgentContextRedactor | None = None,
+        feedback_refiner: AgentFeedbackRefiner | None = None,
+        context_builder: AgentContextBuilder | None = None,
+        backend: CrewAIBackend | None = None,
+    ) -> None:
+        self.policy_resolver = policy_resolver or ModelPolicyResolver()
+        self.redactor = redactor or AgentContextRedactor()
+        self.feedback_refiner = feedback_refiner or AgentFeedbackRefiner()
+        self.context_builder = context_builder or AgentContextBuilder()
+        self.backend = backend or CrewAIBackend()
+        self._cached_backend_failures: dict[str, str] = {}
+
+    def prepare_context(
+        self,
+        *,
+        request: AgentRuntimeRequest,
+        memory_context: JobMemoryContext,
+        memory_artifact_ids: list[str],
+        knowledge_hits: list[KnowledgeHit],
+        knowledge_artifact_id: str,
+        evidence_refs: list[EvidenceRef],
+    ) -> tuple[AgentModelPolicy, dict[str, Any], dict[str, Any], Any, Any]:
+        policy = self.policy_resolver.resolve(request)
+        redaction = self.redactor.redact(
+            policy=policy,
+            input_summary=self.context_builder.input_summary(request),
+            memory_excerpt=memory_context.prompt_excerpt,
+            evidence_refs=evidence_refs,
+        )
+        plan_payload = self._plan_payload(
+            request=request,
+            policy=policy,
+            memory_artifact_ids=memory_artifact_ids,
+            knowledge_artifact_id=knowledge_artifact_id,
+            knowledge_hits=knowledge_hits,
+            input_summary=redaction.input_summary,
+            evidence_refs=redaction.evidence_refs,
+            redaction_metadata=redaction.metadata,
+        )
+        feedback = self.feedback_refiner.refine(knowledge_hits=knowledge_hits)
+        prompt_context = self._prompt_context(
+            request=request,
+            policy=policy,
+            memory_excerpt=redaction.memory_excerpt,
+            input_summary=redaction.input_summary,
+            knowledge_hits=knowledge_hits,
+            evidence_refs=redaction.evidence_refs,
+            redaction_metadata=redaction.metadata,
+        )
+        return policy, prompt_context, plan_payload, feedback, redaction
+
+    def execute_agent(
+        self,
+        *,
+        spec: CrewAgentSpec,
+        policy: AgentModelPolicy,
+        prompt_context: dict[str, Any],
+        input_artifact_ids: list[str],
+        evidence_refs: list[EvidenceRef],
+    ) -> CrewAgentExecution:
+        if not policy.allowed:
+            return self._policy_denied_execution(
+                spec=spec,
+                policy=policy,
+                input_artifact_ids=input_artifact_ids,
+                evidence_refs=evidence_refs,
+            )
+        cached_failure = self._cached_backend_failures.get(policy.model_name)
+        if cached_failure:
+            return self._failed_execution(
+                spec=spec,
+                policy=policy,
+                input_artifact_ids=input_artifact_ids,
+                evidence_refs=evidence_refs,
+                error=RuntimeError(cached_failure),
+            )
+
+        try:
+            output = self.backend.run_agent(spec=spec, prompt_context=prompt_context, policy=policy)
+        except Exception as error:
+            self._cached_backend_failures[policy.model_name] = str(error)
+            return self._failed_execution(
+                spec=spec,
+                policy=policy,
+                input_artifact_ids=input_artifact_ids,
+                evidence_refs=evidence_refs,
+                error=error,
+            )
+        return self._execution_from_output(
+            spec=spec,
+            policy=policy,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            output=output,
+        )
+
+    def _execution_from_output(
+        self,
+        *,
+        spec: CrewAgentSpec,
+        policy: AgentModelPolicy,
+        input_artifact_ids: list[str],
+        evidence_refs: list[EvidenceRef],
+        output: CrewStructuredAgentOutput,
+    ) -> CrewAgentExecution:
+        review = self._review_from_output(output.review)
+        inferences = [self._draft_from_crewai(inference) for inference in output.inferences]
+        runtime_diagnoses = [self._runtime_diagnosis_from_output(item) for item in output.runtime_diagnoses]
+        report_sections = [self._report_section_from_output(item) for item in output.report_sections]
+        repair_instructions = [self._repair_instruction_from_output(item) for item in output.repair_instructions]
+        status = self._execution_status(review.status if review is not None else "best_effort")
+        failure_class = review.failure_class if review is not None else "none"
+        message = review.decision if review is not None else f"{spec.name} completed with no explicit review decision."
+        return CrewAgentExecution(
+            spec=spec,
+            status=status,
+            failure_class=failure_class,
+            attempt=0,
+            duration_ms=0.0,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            message=message,
+            raw_output=output.model_dump(by_alias=True, exclude_none=True),
+            inferences=inferences,
+            runtime_diagnoses=runtime_diagnoses,
+            report_sections=report_sections,
+            repair_instructions=repair_instructions,
+            review=review,
+            model_provider=policy.model_provider,
+            model_name=policy.model_name,
+        )
+
+    def _policy_denied_execution(
+        self,
+        *,
+        spec: CrewAgentSpec,
+        policy: AgentModelPolicy,
+        input_artifact_ids: list[str],
+        evidence_refs: list[EvidenceRef],
+    ) -> CrewAgentExecution:
+        reason = policy.denial_reason or "Agent model policy denied execution."
+        review = AgentReviewDraft(
+            status="best_effort",
+            decision=f"{spec.name} skipped because model policy denied execution: {reason}",
+            failure_class="policy_denied",
+        ) if spec.name == "ReviewAgent" else None
+        return CrewAgentExecution(
+            spec=spec,
+            status="best_effort",
+            failure_class="policy_denied",
+            attempt=0,
+            duration_ms=0.0,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            message=f"{spec.name} skipped because model policy denied execution: {reason}",
+            raw_output={"limitations": [reason], "policyDenied": True},
+            review=review,
+            model_provider=policy.model_provider,
+            model_name=policy.model_name,
+        )
+
+    def _failed_execution(
+        self,
+        *,
+        spec: CrewAgentSpec,
+        policy: AgentModelPolicy,
+        input_artifact_ids: list[str],
+        evidence_refs: list[EvidenceRef],
+        error: Exception,
+    ) -> CrewAgentExecution:
+        detail = f"CrewAI runtime failed: {error}"
+        review = AgentReviewDraft(
+            status="fail",
+            decision=detail,
+            failure_class="agent_failed",
+        ) if spec.name == "ReviewAgent" else None
+        return CrewAgentExecution(
+            spec=spec,
+            status="fail",
+            failure_class="agent_failed",
+            attempt=0,
+            duration_ms=0.0,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            message=detail,
+            raw_output={"limitations": [detail], "agentFailed": True},
+            review=review,
+            model_provider=policy.model_provider,
+            model_name=policy.model_name,
+        )
+
+    def _execution_status(self, value: str) -> CrewExecutionStatus:
+        allowed = {"pass", "retry", "best_effort", "fail", "skipped"}
+        return value if value in allowed else "best_effort"  # type: ignore[return-value]
+
+    def _review_from_output(self, review: CrewReviewOutput | None) -> AgentReviewDraft | None:
+        if review is None:
+            return None
+        return AgentReviewDraft(
+            status=self._run_status(review.status, default="best_effort"),
+            decision=review.decision,
+            failure_class=self._failure_class(review.failure_class),
+            repair_instruction_ids=list(review.repair_instruction_ids),
+        )
+
+    def _runtime_diagnosis_from_output(self, output: CrewRuntimeDiagnosisOutput) -> AgentRuntimeDiagnosisDraft:
+        return AgentRuntimeDiagnosisDraft(
+            target_stage=output.target_stage,
+            status=self._run_status(output.status, default="best_effort"),
+            failure_class=self._failure_class(output.failure_class),
+            diagnosis=output.diagnosis,
+            recommended_actions=list(output.recommended_actions),
+            confidence=max(0, min(1, output.confidence)),
+            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI output did not include uncertainty details."],
+            agent_name=output.agent_name,
+        )
+
+    def _report_section_from_output(self, output: CrewReportSectionOutput) -> AgentReportSectionDraft:
+        return AgentReportSectionDraft(
+            title=output.title,
+            anchor=output.anchor,
+            summary=output.summary,
+            content=output.content,
+            status=self._run_status(output.status, default="best_effort"),
+            confidence=max(0, min(1, output.confidence)),
+            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI output did not include uncertainty details."],
+            details=[(detail.label, detail.value) for detail in output.details],
+            agent_name=output.agent_name,
+        )
+
+    def _repair_instruction_from_output(self, output: CrewRepairInstructionOutput) -> AgentRepairInstructionDraft:
+        actions = [
+            RepairActionLike.to_model(action_name=item.action, path=item.path, value=item.value, reason=item.reason)
+            for item in output.actions
+        ]
+        return AgentRepairInstructionDraft(
+            target_stage=output.target_stage,
+            failure_class=self._failure_class(output.failure_class),
+            decision=output.decision,
+            status=output.status,
+            risk_level=output.risk_level,
+            actions=actions,
+        )
+
+    def _draft_from_crewai(self, inference: CrewInferenceOutput) -> AgentInferenceDraft:
+        return AgentInferenceDraft(
+            type=self._inference_type(inference.type),
+            agent_name=inference.agent_name,
+            confidence=max(0, min(1, inference.confidence)),
+            uncertainty_reasons=inference.uncertainty_reasons or ["CrewAI output did not include uncertainty details."],
+            alternatives=inference.alternatives or ["keep deterministic Core evidence unchanged"],
+            validation_status=self._validation_status(inference.validation_status),
+        )
 
     def _plan_payload(
         self,
@@ -377,18 +500,7 @@ class CrewAIAgentProvider:
             "memoryRecordArtifactId": memory_artifact_ids[0] if memory_artifact_ids else None,
             "memoryRecordArtifactIds": memory_artifact_ids,
             "knowledgeEvidenceArtifactId": knowledge_artifact_id,
-            "plannedAgents": [
-                "PlannerAgent",
-                "AnalysisAgent",
-                "NamingAgent",
-                "TypeAgent",
-                "FrameworkAgent",
-                "DeadCodeAgent",
-                "RuntimeAgent",
-                "RepairAgent",
-                "ReportAgent",
-                "ReviewAgent",
-            ],
+            "plannedAgents": list(CREW_AGENT_NAMES),
             "inputSummary": input_summary,
             "knowledgeHitIds": [hit.id for hit in knowledge_hits],
             "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in evidence_refs],
@@ -435,262 +547,6 @@ class CrewAIAgentProvider:
             "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in evidence_refs],
         }
 
-
-    def _policy_denied_draft(
-        self,
-        *,
-        request: AgentRuntimeRequest,
-        policy: AgentModelPolicy,
-        plan_payload: dict[str, Any],
-        evidence_refs: list[EvidenceRef],
-    ) -> AgentProviderDraft:
-        reason = policy.denial_reason or "Agent model policy denied execution."
-        return AgentProviderDraft(
-            plan_payload={
-                **plan_payload,
-                "runtimeStatus": "policy_denied",
-                "limitations": [reason],
-            },
-            evidence_refs=evidence_refs,
-            inferences=self._best_effort_inferences(
-                uncertainty=[
-                    reason,
-                    "CrewAI model execution was not attempted because model policy was not satisfied.",
-                ]
-            ),
-            runtime_diagnoses=self._runtime_diagnoses(
-                status="best_effort",
-                failure_class="policy_denied",
-                uncertainty=[reason],
-            ),
-            report_sections=self._report_sections(
-                status="best_effort",
-                summary=f"CrewAI runtime was blocked by model policy: {reason}",
-                uncertainty=[reason],
-            ),
-            repair_instructions=self._repair_instructions(
-                status="best_effort",
-                failure_class="policy_denied",
-                decision="No Agent repair action was generated because model policy denied execution.",
-            ),
-            review=AgentReviewDraft(
-                status="best_effort",
-                decision=f"CrewAI runtime was blocked by model policy: {reason}",
-                failure_class="policy_denied",
-            ),
-            model_provider=policy.model_provider,
-            model_name=policy.model_name,
-            prompt_version=policy.prompt_version,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            tool_status="fail",
-            tool_failure_class="policy_denied",
-            message="CrewAI runtime blocked by model policy and persisted best-effort audit records.",
-        )
-
-    def _agent_failed_draft(
-        self,
-        *,
-        policy: AgentModelPolicy,
-        plan_payload: dict[str, Any],
-        error: Exception,
-        evidence_refs: list[EvidenceRef],
-    ) -> AgentProviderDraft:
-        detail = f"CrewAI runtime failed: {error}"
-        return AgentProviderDraft(
-            plan_payload=plan_payload,
-            evidence_refs=evidence_refs,
-            inferences=self._best_effort_inferences(
-                uncertainty=[
-                    detail,
-                    "Deterministic Core evidence remains available for later Agent retry.",
-                ]
-            ),
-            runtime_diagnoses=self._runtime_diagnoses(
-                status="fail",
-                failure_class="agent_failed",
-                uncertainty=[detail],
-            ),
-            report_sections=self._report_sections(
-                status="fail",
-                summary=detail,
-                uncertainty=[detail],
-            ),
-            repair_instructions=self._repair_instructions(
-                status="fail",
-                failure_class="agent_failed",
-                decision="No Agent repair action was generated because Agent execution failed.",
-            ),
-            review=AgentReviewDraft(status="fail", decision=detail, failure_class="agent_failed"),
-            model_provider=policy.model_provider,
-            model_name=policy.model_name,
-            prompt_version=policy.prompt_version,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            tool_status="fail",
-            tool_failure_class="agent_failed",
-            message="CrewAI runtime failed and persisted failure audit records.",
-        )
-
-    def _best_effort_inferences(self, *, uncertainty: list[str]) -> list[AgentInferenceDraft]:
-        return [
-            AgentInferenceDraft(
-                type="naming",
-                agent_name="NamingAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["preserve original symbol names until NamingAgent can run"],
-            ),
-            AgentInferenceDraft(
-                type="module_split",
-                agent_name="AnalysisAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["retry with an allowed CrewAI model provider"],
-            ),
-            AgentInferenceDraft(
-                type="type_inference",
-                agent_name="TypeAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["emit unknown TypeScript boundaries until TypeAgent can run"],
-            ),
-            AgentInferenceDraft(
-                type="framework",
-                agent_name="FrameworkAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["classify framework after CrewAI execution succeeds"],
-            ),
-            AgentInferenceDraft(
-                type="dead_code",
-                agent_name="DeadCodeAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["retain suspected dead code until evidence-backed review succeeds"],
-            ),
-            AgentInferenceDraft(
-                type="runtime",
-                agent_name="RuntimeAgent",
-                confidence=0.25,
-                uncertainty_reasons=uncertainty,
-                alternatives=["re-evaluate after runtime smoke and model review evidence are available"],
-            ),
-            AgentInferenceDraft(
-                type="repair",
-                agent_name="RepairAgent",
-                confidence=0.2,
-                uncertainty_reasons=uncertainty,
-                alternatives=["defer repair planning to deterministic build/runtime gates"],
-            ),
-        ]
-
-    def _runtime_diagnoses(
-        self,
-        *,
-        status: RunStatus,
-        failure_class: FailureClass,
-        uncertainty: list[str],
-    ) -> list[AgentRuntimeDiagnosisDraft]:
-        return [
-            AgentRuntimeDiagnosisDraft(
-                target_stage="runtime_compare",
-                status=status,
-                failure_class=failure_class,
-                diagnosis=(
-                    "Runtime Agent preserved browser validation uncertainty as structured diagnosis "
-                    "for downstream review and report generation."
-                ),
-                recommended_actions=[
-                    "Inspect runtime_validation and runtime_comparison artifacts when available.",
-                    "Keep deterministic build/runtime gates as the authority for applied repairs.",
-                ],
-                confidence=0.35 if status != "pass" else 0.7,
-                uncertainty_reasons=uncertainty,
-            )
-        ]
-
-    def _report_sections(
-        self,
-        *,
-        status: RunStatus,
-        summary: str,
-        uncertainty: list[str],
-    ) -> list[AgentReportSectionDraft]:
-        return [
-            AgentReportSectionDraft(
-                title="Agent Runtime Summary",
-                anchor="agent-runtime-summary",
-                summary=summary,
-                content=(
-                    "Planner, Analysis, Naming, Type, Framework, Dead-Code, Runtime, Repair, "
-                    "Report, and Review Agent surfaces are represented as schema-valid audit records."
-                ),
-                status=status,
-                confidence=0.35 if status != "pass" else 0.75,
-                uncertainty_reasons=uncertainty,
-            )
-        ]
-
-    def _repair_instructions(
-        self,
-        *,
-        status: RunStatus,
-        failure_class: FailureClass,
-        decision: str,
-    ) -> list[AgentRepairInstructionDraft]:
-        return [
-            AgentRepairInstructionDraft(
-                target_stage="runtime_compare",
-                failure_class=failure_class,
-                decision=(
-                    f"Repair Agent recorded no free-form source mutation. {decision} "
-                    "Deterministic build/runtime repair loops remain responsible for applied changes."
-                ),
-                status="skipped" if status != "pass" else "planned",
-                risk_level="low",
-            )
-        ]
-
-
-    def _draft_from_crewai(self, inference: CrewInferenceOutput) -> AgentInferenceDraft:
-        return AgentInferenceDraft(
-            type=self._inference_type(inference.type),
-            agent_name=inference.agent_name,
-            confidence=max(0, min(1, inference.confidence)),
-            uncertainty_reasons=inference.uncertainty_reasons or ["CrewAI output did not include uncertainty details."],
-            alternatives=inference.alternatives or ["keep deterministic Core evidence unchanged"],
-            validation_status=self._validation_status(inference.validation_status),
-        )
-
-    def _empty_crewai_output(self) -> CrewAgentPassOutput:
-        return CrewAgentPassOutput(
-            plannedAgents=[
-                "PlannerAgent",
-                "AnalysisAgent",
-                "NamingAgent",
-                "TypeAgent",
-                "FrameworkAgent",
-                "DeadCodeAgent",
-                "RuntimeAgent",
-                "RepairAgent",
-                "ReportAgent",
-                "ReviewAgent",
-            ],
-            inferences=[
-                CrewInferenceOutput(
-                    type="module_split",
-                    agentName="AnalysisAgent",
-                    confidence=0.35,
-                    uncertaintyReasons=["CrewAI returned no inference records."],
-                    alternatives=["retry Agent pass with stricter structured-output prompting"],
-                )
-            ],
-            reviewStatus="best_effort",
-            reviewDecision="CrewAI runtime completed but returned no inference records.",
-            limitations=["No CrewAI inferences were returned."],
-        )
-
     def _inference_type(self, value: str) -> InferenceType:
         allowed = {"naming", "module_split", "type_inference", "framework", "dead_code", "runtime", "repair"}
         return value if value in allowed else "module_split"  # type: ignore[return-value]
@@ -703,3 +559,39 @@ class CrewAIAgentProvider:
         allowed = {"pass", "retry", "best_effort", "fail"}
         return value if value in allowed else default  # type: ignore[return-value]
 
+    def _failure_class(self, value: str | FailureClass) -> FailureClass:
+        allowed = {
+            "none",
+            "invalid_input",
+            "parse_error",
+            "agent_failed",
+            "dependency_missing",
+            "install_failed",
+            "type_error",
+            "build_error",
+            "runtime_error",
+            "sandbox_denied",
+            "policy_denied",
+            "timeout",
+            "resource_limit",
+            "unknown",
+        }
+        normalized = str(value)
+        return normalized if normalized in allowed else "unknown"  # type: ignore[return-value]
+
+
+class RepairActionLike:
+    @staticmethod
+    def to_model(*, action_name: str, path: str | None, value: str | None, reason: str):
+        from apps.api.app.models import RepairAction
+
+        allowed = {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+        action = action_name if action_name in allowed else "mirror_original_static_entry"
+        return RepairAction(action=action, path=path, value=value, reason=reason)
+
+
+__all__ = [
+    "CrewAIBackend",
+    "CrewAIExecutionAdapter",
+    "ModelPolicyResolver",
+]

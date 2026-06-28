@@ -532,6 +532,25 @@ class PackagingRunnerTest(unittest.TestCase):
                     content_type="application/json",
                     producer="test",
                 )
+                agent_execution = store.write_artifact(
+                    job.id,
+                    kind="agent_execution",
+                    stage="agent_pass",
+                    filename="agent-execution-runtime.json",
+                    content=json.dumps(
+                        {
+                            "kind": "agent_execution",
+                            "jobId": job.id,
+                            "stage": "specialists",
+                            "name": "RuntimeAgent",
+                            "status": "best_effort",
+                            "failureClass": "runtime_error",
+                            "message": "RuntimeAgent preserved runtime compare uncertainty.",
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
@@ -577,10 +596,12 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn(f"artifact://{review_run.id}", report_sections["risk-and-failure-groups"]["evidenceLinks"])
                 self.assertIn(f"artifact://{memory_record.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{tool_registry.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
+                self.assertIn(f"artifact://{agent_execution.id}", report_sections["agent-runtime-audit"]["evidenceLinks"])
                 self.assertIn(f"artifact://{runtime_trace.id}", report_sections["evidence-attachment-index"]["evidenceLinks"])
                 self.assertIn(f"artifact://{matrix_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
                 self.assertIn(f"artifact://{retry_summary_trace.id}", report_sections["runtime-compare-difference-summary"]["evidenceLinks"])
                 self.assertEqual(audit_payload["reviewFixSummary"]["finalOutcome"], "budget_exhausted_best_effort")
+                self.assertIn("agent-executions.json", package_contents)
                 self.assertIn("review-fix-summary.json", package_contents)
                 build_section = report_sections["build-and-typecheck"]
                 self.assertTrue(build_section["details"])

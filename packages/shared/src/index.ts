@@ -33,6 +33,7 @@ export const ARTIFACT_KINDS = [
   "source_index",
   "ast_index",
   "agent_plan",
+  "agent_execution",
   "inference_record",
   "reconstruction_plan",
   "generated_project",

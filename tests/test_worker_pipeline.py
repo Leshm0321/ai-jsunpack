@@ -133,6 +133,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("input_inventory", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
                 self.assertIn("agent_plan", artifact_by_kind)
+                self.assertIn("agent_execution", artifact_by_kind)
                 self.assertIn("reconstruction_plan", artifact_by_kind)
                 self.assertIn("generated_project", artifact_by_kind)
                 self.assertIn("memory_record", artifact_by_kind)
@@ -172,6 +173,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 tool_registry_artifact = artifact_by_kind["tool_registry"]
                 knowledge_artifact = artifact_by_kind["knowledge_evidence"]
                 agent_plan_artifact = artifact_by_kind["agent_plan"]
+                agent_execution_artifacts = [artifact for artifact in artifacts if artifact.kind == "agent_execution"]
                 reconstruction_plan_artifact = artifact_by_kind["reconstruction_plan"]
                 generated_project_artifact = artifact_by_kind["generated_project"]
                 tool_call_artifact = artifact_by_kind["tool_call"]
@@ -255,8 +257,13 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(knowledge_payload["kind"], "knowledge_evidence")
                 self.assertTrue(knowledge_payload["hits"])
                 self.assertEqual(agent_plan_payload["provider"], "crewai")
-                self.assertEqual(agent_plan_payload["runtimeStatus"], "policy_denied")
+                self.assertEqual(agent_plan_payload["runtimeStatus"], "completed_best_effort")
                 self.assertFalse(agent_plan_payload["modelPolicy"]["allowed"])
+                self.assertIn("agentGraph", agent_plan_payload)
+                self.assertIn("stagePlan", agent_plan_payload)
+                self.assertIn("stageSummaries", agent_plan_payload)
+                self.assertTrue(any(item["stage"] == "specialists" for item in agent_plan_payload["stagePlan"]))
+                self.assertGreaterEqual(len(agent_execution_artifacts), 5)
                 self.assertEqual(agent_plan_payload["memoryRecordArtifactId"], memory_artifact.id)
                 self.assertEqual(set(agent_plan_payload["memoryRecordArtifactIds"]), {artifact.id for artifact in memory_artifacts})
                 self.assertEqual(agent_plan_payload["toolRegistryArtifactId"], tool_registry_artifact.id)
@@ -377,6 +384,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("evidence-index.json", names)
                 self.assertIn("artifact-manifest.json", names)
                 self.assertIn("build-artifacts.json", names)
+                self.assertIn("agent-executions.json", names)
                 self.assertIn("inference-records.json", names)
                 self.assertIn("runtime-report.json", names)
                 self.assertIn("runtime-comparisons.json", names)

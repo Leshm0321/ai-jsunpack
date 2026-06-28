@@ -383,6 +383,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 )
 
                 result = AgentRuntime().run(job_id=job.id, store=store, request=request)
+                plan_payload = json.loads(store.read_artifact(job.id, result.plan_artifact.id))
                 knowledge_payload = json.loads(store.read_artifact(job.id, result.knowledge_artifact.id))
                 hit_by_id = {hit["id"]: hit for hit in knowledge_payload["hits"]}
                 retrieval_sources = knowledge_payload["retrievalSources"]
@@ -415,6 +416,8 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                     {item["jobId"] for item in retrieval_sources["historicalProjectArtifacts"]},
                     {historical_job.id},
                 )
+                self.assertTrue(result.agent_execution_artifacts)
+                self.assertIn("agentGraph", plan_payload)
                 self.assertTrue(
                     any(
                         ref["locator"].startswith("knowledge:repair_case/historical/")
@@ -587,6 +590,8 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 self.assertEqual(agent_plan_payload["reviewFixFeedback"]["lowRiskRepairCount"], 1)
                 self.assertEqual(agent_plan_payload["reviewFixFeedback"]["auditOnlyRepairCount"], 0)
                 self.assertEqual(agent_plan_payload["reviewFixFeedback"]["crossJobHistory"], False)
+                self.assertIn("stagePlan", agent_plan_payload)
+                self.assertTrue(result.agent_execution_artifacts)
                 self.assertTrue(low_risk_action_repairs)
                 self.assertEqual(low_risk_action_repairs[0]["targetStage"], "runtime_compare")
                 self.assertEqual(low_risk_action_repairs[0]["status"], "planned")

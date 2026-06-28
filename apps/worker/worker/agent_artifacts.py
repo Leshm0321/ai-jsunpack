@@ -20,12 +20,19 @@ from apps.api.app.models import (
 )
 from packages.knowledge import KnowledgeHit, StaticKnowledgeRetriever
 
-from .agent_contracts import AgentProviderDraft, AgentRuntimeRequest
+from .agent_contracts import (
+    AgentProviderDraft,
+    AgentRunSummary,
+    AgentRuntimeRequest,
+    CrewConflictRecord,
+    CrewStageExecution,
+)
 
 
 @dataclass(frozen=True)
 class PersistedAgentOutputs:
     plan_artifact: ArtifactRecord
+    agent_execution_artifacts: list[ArtifactRecord]
     inference_artifacts: list[ArtifactRecord]
     runtime_diagnosis_artifacts: list[ArtifactRecord]
     report_section_artifacts: list[ArtifactRecord]
@@ -112,46 +119,54 @@ class AgentArtifactWriter:
             parent_artifact_ids=parent_artifact_ids,
         )
 
-    def persist_provider_outputs(
+    def persist_runtime_outputs(
         self,
         *,
         job_id: str,
         store,
         request: AgentRuntimeRequest,
         provider_draft: AgentProviderDraft,
+        stages: list[CrewStageExecution],
         memory_artifact_ids: list[str],
         knowledge_artifact: ArtifactRecord,
         tool_registry_artifact: ArtifactRecord,
         started_at: float,
     ) -> PersistedAgentOutputs:
-        provider_plan_payload = {
-            **provider_draft.plan_payload,
-            "toolRegistryArtifactId": tool_registry_artifact.id,
-        }
-        plan_artifact = store.write_artifact(
-            job_id,
-            kind="agent_plan",
-            stage="agent_planning",
-            filename="agent-plan.json",
-            content=self._json_bytes(provider_plan_payload),
-            content_type="application/json",
-            producer="worker.agent_runtime",
-            parent_artifact_ids=[
-                *request.input_artifact_ids,
-                *memory_artifact_ids,
-                knowledge_artifact.id,
-                tool_registry_artifact.id,
-            ],
-        )
-
-        store.update_status(job_id, "agent_pass")
-        agent_input_artifact_ids = [
+        base_input_artifact_ids = [
             *request.input_artifact_ids,
             *memory_artifact_ids,
             knowledge_artifact.id,
             tool_registry_artifact.id,
         ]
+        plan_artifact = store.write_artifact(
+            job_id,
+            kind="agent_plan",
+            stage="agent_planning",
+            filename="agent-plan.json",
+            content=self._json_bytes({**provider_draft.plan_payload, "toolRegistryArtifactId": tool_registry_artifact.id}),
+            content_type="application/json",
+            producer="worker.agent_runtime",
+            parent_artifact_ids=base_input_artifact_ids,
+        )
+
+        store.update_status(job_id, "agent_pass")
+        agent_execution_artifacts = self._write_agent_execution_artifacts(
+            job_id=job_id,
+            store=store,
+            stages=stages,
+            plan_artifact=plan_artifact,
+            tool_registry_artifact=tool_registry_artifact,
+            knowledge_artifact=knowledge_artifact,
+            base_input_artifact_ids=base_input_artifact_ids,
+            model_provider=provider_draft.model_provider,
+            model_name=provider_draft.model_name,
+        )
+        stage_artifact_ids = [artifact.id for artifact in agent_execution_artifacts]
         inference_artifacts: list[ArtifactRecord] = []
+        runtime_diagnosis_artifacts: list[ArtifactRecord] = []
+        report_section_artifacts: list[ArtifactRecord] = []
+        repair_instruction_artifacts: list[ArtifactRecord] = []
+        agent_input_artifact_ids = base_input_artifact_ids
         for index, draft in enumerate(provider_draft.inferences, start=1):
             record = InferenceRecord(
                 id=f"inference_{uuid4().hex[:12]}",
@@ -179,12 +194,10 @@ class AgentArtifactWriter:
                     content=record.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                     content_type="application/json",
                     producer="worker.agent_runtime",
-                    parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id],
+                    parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id, *stage_artifact_ids],
                 )
             )
 
-        inference_artifact_ids = [artifact.id for artifact in inference_artifacts]
-        runtime_diagnosis_artifacts: list[ArtifactRecord] = []
         for index, draft in enumerate(provider_draft.runtime_diagnoses, start=1):
             diagnosis = RuntimeDiagnosis(
                 id=f"runtime_diagnosis_{uuid4().hex[:12]}",
@@ -210,12 +223,11 @@ class AgentArtifactWriter:
                     content=diagnosis.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                     content_type="application/json",
                     producer="worker.agent_runtime",
-                    parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id],
+                    parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id, *stage_artifact_ids],
                 )
             )
-        runtime_diagnosis_artifact_ids = [artifact.id for artifact in runtime_diagnosis_artifacts]
 
-        report_section_artifacts: list[ArtifactRecord] = []
+        runtime_diagnosis_artifact_ids = [artifact.id for artifact in runtime_diagnosis_artifacts]
         for index, draft in enumerate(provider_draft.report_sections, start=1):
             report_section = ReportSection(
                 id=f"report_section_{uuid4().hex[:12]}",
@@ -241,12 +253,16 @@ class AgentArtifactWriter:
                     content=report_section.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
                     content_type="application/json",
                     producer="worker.agent_runtime",
-                    parent_artifact_ids=[*agent_input_artifact_ids, plan_artifact.id, *runtime_diagnosis_artifact_ids],
+                    parent_artifact_ids=[
+                        *agent_input_artifact_ids,
+                        plan_artifact.id,
+                        *stage_artifact_ids,
+                        *runtime_diagnosis_artifact_ids,
+                    ],
                 )
             )
-        report_section_artifact_ids = [artifact.id for artifact in report_section_artifacts]
 
-        repair_instruction_artifacts: list[ArtifactRecord] = []
+        report_section_artifact_ids = [artifact.id for artifact in report_section_artifacts]
         for index, draft in enumerate(provider_draft.repair_instructions, start=1):
             repair_instruction = RepairInstruction(
                 id=f"repair_{uuid4().hex[:12]}",
@@ -273,14 +289,15 @@ class AgentArtifactWriter:
                     parent_artifact_ids=[
                         *agent_input_artifact_ids,
                         plan_artifact.id,
+                        *stage_artifact_ids,
                         *runtime_diagnosis_artifact_ids,
                         *report_section_artifact_ids,
                     ],
                 )
             )
-        repair_instruction_artifact_ids = [artifact.id for artifact in repair_instruction_artifacts]
 
-        review_run = ReviewRun(
+        repair_instruction_artifact_ids = [artifact.id for artifact in repair_instruction_artifacts]
+        review_artifact_payload = ReviewRun(
             id=f"review_{uuid4().hex[:12]}",
             job_id=job_id,
             attempt=0,
@@ -292,29 +309,32 @@ class AgentArtifactWriter:
             repair_instruction_ids=[*provider_draft.review.repair_instruction_ids, *repair_instruction_artifact_ids],
             logs_artifact_id=provider_draft.review.logs_artifact_id,
         )
+
         review_artifact = store.write_artifact(
             job_id,
             kind="review_run",
             stage="agent_pass",
             filename="agent-review-run.json",
-            content=review_run.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
+            content=review_artifact_payload.model_dump_json(by_alias=True, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="worker.agent_runtime",
             parent_artifact_ids=[
                 plan_artifact.id,
-                *inference_artifact_ids,
-                *runtime_diagnosis_artifact_ids,
-                *report_section_artifact_ids,
-                *repair_instruction_artifact_ids,
+                *stage_artifact_ids,
+                *[artifact.id for artifact in inference_artifacts],
+                *[artifact.id for artifact in runtime_diagnosis_artifacts],
+                *[artifact.id for artifact in report_section_artifacts],
+                *[artifact.id for artifact in repair_instruction_artifacts],
             ],
         )
 
         output_artifact_ids = [
             plan_artifact.id,
-            *inference_artifact_ids,
-            *runtime_diagnosis_artifact_ids,
-            *report_section_artifact_ids,
-            *repair_instruction_artifact_ids,
+            *stage_artifact_ids,
+            *[artifact.id for artifact in inference_artifacts],
+            *[artifact.id for artifact in runtime_diagnosis_artifacts],
+            *[artifact.id for artifact in report_section_artifacts],
+            *[artifact.id for artifact in repair_instruction_artifacts],
             review_artifact.id,
         ]
         tool_call = ToolCall(
@@ -323,7 +343,7 @@ class AgentArtifactWriter:
             caller="WorkerPipeline",
             tool_name=provider_draft.tool_name,
             tool_version=provider_draft.tool_version,
-            input_artifact_ids=agent_input_artifact_ids,
+            input_artifact_ids=base_input_artifact_ids,
             output_artifact_ids=output_artifact_ids,
             status=provider_draft.tool_status,
             duration=self._duration_ms(started_at),
@@ -342,6 +362,7 @@ class AgentArtifactWriter:
 
         return PersistedAgentOutputs(
             plan_artifact=plan_artifact,
+            agent_execution_artifacts=agent_execution_artifacts,
             inference_artifacts=inference_artifacts,
             runtime_diagnosis_artifacts=runtime_diagnosis_artifacts,
             report_section_artifacts=report_section_artifacts,
@@ -350,8 +371,122 @@ class AgentArtifactWriter:
             tool_call_artifact=tool_call_artifact,
         )
 
+    def _write_agent_execution_artifacts(
+        self,
+        *,
+        job_id: str,
+        store,
+        stages: list[CrewStageExecution],
+        plan_artifact: ArtifactRecord,
+        tool_registry_artifact: ArtifactRecord,
+        knowledge_artifact: ArtifactRecord,
+        base_input_artifact_ids: list[str],
+        model_provider: str,
+        model_name: str,
+    ) -> list[ArtifactRecord]:
+        artifacts: list[ArtifactRecord] = []
+        for stage_index, stage in enumerate(stages, start=1):
+            stage_payload = {
+                "kind": "agent_execution",
+                "jobId": job_id,
+                "stage": stage.stage,
+                "status": stage.status,
+                "failureClass": stage.failure_class,
+                "durationMs": stage.duration_ms,
+                "notes": list(stage.notes),
+                "conflicts": [self._conflict_payload(conflict) for conflict in stage.conflict_summary],
+                "agents": [],
+            }
+            for execution in stage.agent_executions:
+                execution_payload = {
+                    "name": execution.spec.name,
+                    "responsibility": execution.spec.responsibility,
+                    "outputKind": execution.spec.output_kind,
+                    "allowParallel": execution.spec.allow_parallel,
+                    "dependencies": execution.spec.dependencies,
+                    "status": execution.status,
+                    "failureClass": execution.failure_class,
+                    "attempt": execution.attempt,
+                    "durationMs": execution.duration_ms,
+                    "modelProvider": execution.model_provider or model_provider,
+                    "modelName": execution.model_name or model_name,
+                    "inputArtifactIds": execution.input_artifact_ids,
+                    "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in execution.evidence_refs],
+                    "message": execution.message,
+                    "rawOutput": execution.raw_output,
+                    "inferenceCount": len(execution.inferences),
+                    "runtimeDiagnosisCount": len(execution.runtime_diagnoses),
+                    "reportSectionCount": len(execution.report_sections),
+                    "repairInstructionCount": len(execution.repair_instructions),
+                    "reviewStatus": execution.review.status if execution.review is not None else None,
+                }
+                stage_payload["agents"].append(execution_payload)
+                artifacts.append(
+                    store.write_artifact(
+                        job_id,
+                        kind="agent_execution",
+                        stage="agent_pass",
+                        filename=f"agent-execution-{execution.spec.name.lower()}.json",
+                        content=self._json_bytes(
+                            {
+                                "kind": "agent_execution",
+                                "jobId": job_id,
+                                "stage": stage.stage,
+                                "stageStatus": stage.status,
+                                "stageFailureClass": stage.failure_class,
+                                "stageDurationMs": stage.duration_ms,
+                                "toolRegistryArtifactId": tool_registry_artifact.id,
+                                "knowledgeEvidenceArtifactId": knowledge_artifact.id,
+                                **execution_payload,
+                            }
+                        ),
+                        content_type="application/json",
+                        producer="worker.agent_runtime",
+                        parent_artifact_ids=[
+                            *base_input_artifact_ids,
+                            plan_artifact.id,
+                            tool_registry_artifact.id,
+                            knowledge_artifact.id,
+                        ],
+                    )
+                )
+            artifacts.append(
+                store.write_artifact(
+                    job_id,
+                    kind="agent_execution",
+                    stage="agent_pass",
+                    filename=f"agent-stage-{stage_index}-{stage.stage}.json",
+                    content=self._json_bytes(stage_payload),
+                    content_type="application/json",
+                    producer="worker.agent_runtime",
+                    parent_artifact_ids=[
+                        *base_input_artifact_ids,
+                        plan_artifact.id,
+                        tool_registry_artifact.id,
+                        knowledge_artifact.id,
+                    ],
+                )
+            )
+        return artifacts
+
+    def _conflict_payload(self, conflict: CrewConflictRecord) -> dict[str, Any]:
+        return {
+            "key": conflict.key,
+            "severity": conflict.severity,
+            "agents": list(conflict.agents),
+            "summary": conflict.summary,
+            "evidenceRefs": list(conflict.evidence_refs),
+        }
+
     def _duration_ms(self, started_at: float) -> float:
         return round((time.perf_counter() - started_at) * 1000, 3)
 
     def _json_bytes(self, payload: dict[str, Any]) -> bytes:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+
+
+__all__ = [
+    "AgentArtifactWriter",
+    "AgentRunSummary",
+    "PersistedAgentOutputs",
+]

@@ -165,6 +165,7 @@ class PackagingRunner:
             "runtimeTraces": self._load_json_artifacts(job.id, artifacts, store, "runtime_trace"),
             "runtimeComparisons": self._load_json_artifacts(job.id, artifacts, store, "runtime_comparison"),
             "reviewRuns": self._load_json_artifacts(job.id, artifacts, store, "review_run"),
+            "agentExecutions": self._load_json_artifacts(job.id, artifacts, store, "agent_execution"),
             "inferenceRecords": self._load_json_artifacts(job.id, artifacts, store, "inference_record"),
             "toolCalls": self._load_json_artifacts(job.id, artifacts, store, "tool_call"),
             "toolRegistry": self._load_tool_registry(job.id, artifacts, store),
@@ -323,6 +324,7 @@ class PackagingRunner:
         runtime_operations = self._browser_runner_operations(runtime_boundaries)
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
+        agent_executions = audit_payload["agentExecutions"]
         inference_records = audit_payload["inferenceRecords"]
         tool_calls = audit_payload["toolCalls"]
         tool_registry = audit_payload["toolRegistry"]
@@ -345,6 +347,7 @@ class PackagingRunner:
             f"- Runtime validations: {len(runtime_reports)}",
             f"- Runtime comparisons: {len(runtime_comparisons)}",
             f"- Review runs: {len(review_runs)}",
+            f"- Agent executions: {len(agent_executions)}",
             f"- Inference records: {len(inference_records)}",
             f"- Tool calls: {len(tool_calls)}",
             f"- Tool registry entries: {len(tool_registry)}",
@@ -422,8 +425,11 @@ class PackagingRunner:
             "",
             f"- Tool registry entries: {len(tool_registry)}",
             f"- Memory records: {self._memory_record_summary(memory_records)}",
+            f"- Agent executions: {self._agent_execution_summary(agent_executions)}",
             f"- Runtime diagnoses: {len(runtime_diagnoses)}",
             f"- Report sections: {len(report_sections)}",
+            "",
+            self._status_table(agent_executions, ("stage", "name", "status", "failureClass", "message")),
             "",
             self._status_table(runtime_diagnoses, ("agentName", "targetStage", "status", "failureClass", "diagnosis")),
             "",
@@ -479,6 +485,7 @@ class PackagingRunner:
         runtime_operations = self._browser_runner_operations(runtime_boundaries)
         runtime_comparisons = audit_payload["runtimeComparisons"]
         review_runs = audit_payload["reviewRuns"]
+        agent_executions = audit_payload["agentExecutions"]
         build_artifacts = audit_payload["buildArtifacts"]
         tool_registry = audit_payload["toolRegistry"]
         memory_records = audit_payload["memoryRecords"]
@@ -519,6 +526,7 @@ class PackagingRunner:
                 self._metric_html("Runtime validations", str(len(runtime_reports))),
                 self._metric_html("Runtime comparisons", str(len(runtime_comparisons))),
                 self._metric_html("Review runs", str(len(review_runs))),
+                self._metric_html("Agent executions", str(len(agent_executions))),
                 self._metric_html("Tool registry", str(len(tool_registry))),
                 self._metric_html("Memory records", str(len(memory_records))),
                 self._metric_html("Evidence attachments", str(sum(1 for item in attachments if item["included"]))),
@@ -583,6 +591,7 @@ class PackagingRunner:
                 "<h2>Agent Runtime Audit</h2>",
                 self._html_table(tool_registry, ("toolName", "toolVersion", "category", "caller")),
                 self._html_table(memory_records, ("memoryType", "scope", "sensitivityClass", "retentionClass", "content")),
+                self._html_table(agent_executions, ("stage", "name", "status", "failureClass", "message")),
                 self._html_table(runtime_diagnoses, ("agentName", "targetStage", "status", "failureClass", "diagnosis")),
                 self._html_table(report_sections, ("title", "status", "confidence", "summary")),
                 "<h2>Review Evidence</h2>",
@@ -642,6 +651,13 @@ class PackagingRunner:
         for record in records:
             memory_type = str(record.get("memoryType") or "unknown")
             counts[memory_type] = counts.get(memory_type, 0) + 1
+        return self._count_summary(counts)
+
+    def _agent_execution_summary(self, records: list[dict[str, Any]]) -> str:
+        counts: dict[str, int] = {}
+        for record in records:
+            stage = str(record.get("stage") or "unknown")
+            counts[stage] = counts.get(stage, 0) + 1
         return self._count_summary(counts)
 
     def _html_cell(self, value: Any) -> str:
@@ -1197,6 +1213,12 @@ class PackagingRunner:
                 description="Build and typecheck evidence records.",
             ),
             self._package_content(
+                path="agent-executions.json",
+                content_type="application/json",
+                source="agent_execution",
+                description="Per-agent and per-stage CrewAI execution audit records.",
+            ),
+            self._package_content(
                 path="inference-records.json",
                 content_type="application/json",
                 source="inference_record",
@@ -1421,6 +1443,7 @@ class PackagingRunner:
                 summary="Agent output contracts, Tool Registry entries, memory records, runtime diagnoses, and report sections.",
                 artifact_kinds=(
                     "agent_plan",
+                    "agent_execution",
                     "inference_record",
                     "tool_registry",
                     "memory_record",
@@ -2224,6 +2247,7 @@ class PackagingRunner:
             archive.writestr("evidence-index.json", self._json_text(evidence_index))
             archive.writestr("artifact-manifest.json", self._json_text(audit_payload["artifactManifest"]))
             archive.writestr("build-artifacts.json", self._json_text(audit_payload["buildArtifacts"]))
+            archive.writestr("agent-executions.json", self._json_text(audit_payload["agentExecutions"]))
             archive.writestr("inference-records.json", self._json_text(audit_payload["inferenceRecords"]))
             archive.writestr("runtime-report.json", self._json_text(audit_payload["runtimeReports"]))
             archive.writestr("runtime-traces.json", self._json_text(audit_payload["runtimeTraces"]))

@@ -216,6 +216,7 @@ class WorkerPipeline:
             *[artifact.id for artifact in context.agent_result.memory_artifacts],
             context.agent_result.knowledge_artifact.id,
             context.agent_result.tool_registry_artifact.id,
+            *[artifact.id for artifact in context.agent_result.agent_execution_artifacts],
             *[artifact.id for artifact in context.agent_result.inference_artifacts],
             *[artifact.id for artifact in context.agent_result.runtime_diagnosis_artifacts],
             *[artifact.id for artifact in context.agent_result.report_section_artifacts],
