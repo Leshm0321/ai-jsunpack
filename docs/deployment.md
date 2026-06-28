@@ -92,6 +92,7 @@ Worker：
 - `AI_JSUNPACK_LOCAL_AGENT_MODEL`
 - `AI_JSUNPACK_LOCAL_AGENT_PROVIDER`
 - `AI_JSUNPACK_CREWAI_DATA_ROOT`
+- provider 凭据只注入 Worker，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`、`AZURE_OPENAI_API_KEY`、`OLLAMA_ENDPOINT`
 
 Browser Runner：
 
@@ -117,6 +118,25 @@ Web：
 - `VITE_API_AUTH_TOKEN`
 - `VITE_API_USER_ID`
 - `VITE_API_PROJECT_ID`
+
+## Agent 模型与凭据
+
+Agent Runtime 只属于 Worker。模型选择有两层入口：
+
+- Job config：`config.agentModel`、`config.agentModelProvider`、`config.localAgentModel`、`config.localAgentProvider`。
+- Worker 环境变量：`AI_JSUNPACK_AGENT_MODEL`、`AI_JSUNPACK_AGENT_PROVIDER`、`AI_JSUNPACK_LOCAL_AGENT_MODEL`、`AI_JSUNPACK_LOCAL_AGENT_PROVIDER`。
+
+`cloud_allowed` Job 需要 `config.agentModel` 或 `AI_JSUNPACK_AGENT_MODEL`；`local_only` Job 需要 `config.localAgentModel` 或 `AI_JSUNPACK_LOCAL_AGENT_MODEL`；`desensitized` Job 会先做上下文脱敏，再使用 cloud 或 local 模型变量。
+
+第三方 provider 凭据必须只注入 Worker，例如：
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
+- `AZURE_OPENAI_API_KEY`
+- `OLLAMA_ENDPOINT`
+
+不要把这些变量注入 API、Web 或 Browser Runner。API strict mode 已显式拒绝模型 provider 凭据，防止 HTTP 层进程携带 Worker 执行侧权限。`AI_JSUNPACK_AGENT_PROVIDER` 和 `AI_JSUNPACK_LOCAL_AGENT_PROVIDER` 会写入 policy/audit 证据；CrewAI 实际根据 `llm` 模型字符串和 provider credential 环境变量初始化 SDK。
 
 ## Sandbox Profile
 
@@ -302,6 +322,7 @@ docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worke
 - MinIO 或 bucket init 失败：检查 `artifact-store`、`artifact-store-init` 日志，确认 MinIO 凭证和 `AI_JSUNPACK_ARTIFACT_S3_BUCKET` 一致。
 - API 启动失败：检查部署 profile，API 不能接收 Worker/sandbox/Browser Runner/Core CLI/model provider 配置。
 - Worker 空闲或 degraded：检查 `/ops/metrics`、Worker lease、共享 DB 和 Artifact Store 连接。
+- Agent evidence 出现 `policy_denied`：检查 Job `cloudMode`、`config.*AgentModel`、Worker 的 `AI_JSUNPACK_*AGENT*_MODEL` 变量和 provider 凭据是否匹配。
 - Browser Runner degraded：检查 `/health`、queue backend、lease/retry 阈值和 Playwright 镜像依赖。
 - Prometheus 或告警失败：确认 Bearer token 使用共享 `AI_JSUNPACK_AUTH_SECRET` 签发并具备 ops read 权限。
 - 结果包缺失：检查 Worker packaging 日志、`deploymentSmoke.failedChecks` 和 retained Artifact Store 内容。
@@ -321,6 +342,7 @@ docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worke
 - API 与 Worker/Browser Runner 使用不同服务角色配置。
 - Artifact Store lifecycle 和 retention 策略已配置。
 - Sandbox runner 与网络策略符合安全要求。
+- Worker 模型 provider 凭据和 Job `cloudMode` 策略已验证，且未注入 API/Web/Browser Runner。
 - Browser Runner 队列容量、retry、lease recovery 和告警阈值已压测。
 - 结果包下载、审计报告、Prometheus scrape 和 webhook 投递已验证。
 - 发布证据、外部快照、registry digest、service logs 和回滚证据已归档。

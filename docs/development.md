@@ -114,6 +114,7 @@ node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output
 - Worker 空转时，检查 source input artifact、Metadata DB、Artifact Store 路径或 S3/MinIO 配置是否共享。
 - Browser Runner 未配置时，Worker 使用本地 Playwright adapter；配置了 `AI_JSUNPACK_BROWSER_RUNNER_URL` 后会走远程服务。
 - CrewAI provider 未配置或策略拒绝时，系统应保留 schema-valid best-effort evidence，而不是阻断 deterministic pipeline 的可审计输出。
+- Agent evidence 出现 `policy_denied` 时，按顺序检查 Job `cloudMode`、Job config 中的 `agentModel`/`localAgentModel`、Worker 环境中的 `AI_JSUNPACK_AGENT_MODEL`/`AI_JSUNPACK_LOCAL_AGENT_MODEL`，最后检查 provider 凭据，例如 `OPENAI_API_KEY` 或 `OLLAMA_ENDPOINT`。
 
 ## 生成产物与忽略目录
 

@@ -188,6 +188,30 @@ Remove-Item Env:AI_JSUNPACK_BROWSER_RUNNER_URL -ErrorAction SilentlyContinue
 Remove-Item Env:AI_JSUNPACK_BROWSER_RUNNER_TOKEN -ErrorAction SilentlyContinue
 ```
 
+## 可选 Agent 模型配置
+
+Agent Runtime 在 Worker 进程中运行。不要把模型变量或第三方 provider 凭据放进 API 环境；API strict mode 会拒绝这些配置。
+
+未配置模型时，Agent pass 会写入 `policy_denied` 或 best-effort evidence，Core 分析、重建、build/typecheck 和 artifact lineage 仍会继续保留可审计输出。
+
+cloud_allowed 或 desensitized Job 的最小云端模型示例：
+
+```powershell
+$env:AI_JSUNPACK_AGENT_PROVIDER = "openai"
+$env:AI_JSUNPACK_AGENT_MODEL = "gpt-4o-mini"
+$env:OPENAI_API_KEY = "<worker-only secret>"
+```
+
+local_only Job 的本地模型示例：
+
+```powershell
+$env:AI_JSUNPACK_LOCAL_AGENT_PROVIDER = "ollama"
+$env:AI_JSUNPACK_LOCAL_AGENT_MODEL = "ollama/llama3.1"
+$env:OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
+```
+
+也可以在创建 Job 时通过 `config.agentModel`、`config.agentModelProvider`、`config.localAgentModel` 或 `config.localAgentProvider` 覆盖环境变量。CrewAI 实际使用的是模型字符串，provider 名称主要用于 policy/audit 证据；真实凭据仍由 CrewAI/native provider 从 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`、`AZURE_OPENAI_API_KEY` 或 `OLLAMA_ENDPOINT` 等环境变量读取。
+
 ## 健康检查
 
 API：
