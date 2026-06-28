@@ -29,6 +29,8 @@ _API_FORBIDDEN_EXACT: dict[str, tuple[str, str]] = {
 _API_FORBIDDEN_PREFIXES: dict[str, tuple[str, str]] = {
     "AI_JSUNPACK_SANDBOX_": ("worker", "sandbox execution configuration belongs to the Worker or Browser Runner"),
     "AI_JSUNPACK_BROWSER_RUNNER_": ("browser-runner", "browser execution configuration belongs to the Browser Runner"),
+    "AI_JSUNPACK_AGENT_": ("worker", "Agent endpoint configuration belongs to the Worker/Agent runtime"),
+    "AI_JSUNPACK_LOCAL_AGENT_": ("worker", "local Agent endpoint configuration belongs to the Worker/Agent runtime"),
 }
 
 _WORKER_EXECUTION_PREFIXES: tuple[str, ...] = (

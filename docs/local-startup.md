@@ -210,7 +210,27 @@ $env:AI_JSUNPACK_LOCAL_AGENT_MODEL = "ollama/llama3.1"
 $env:OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
 ```
 
-也可以在创建 Job 时通过 `config.agentModel`、`config.agentModelProvider`、`config.localAgentModel` 或 `config.localAgentProvider` 覆盖环境变量。CrewAI 实际使用的是模型字符串，provider 名称主要用于 policy/audit 证据；真实凭据仍由 CrewAI/native provider 从 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`、`AZURE_OPENAI_API_KEY` 或 `OLLAMA_ENDPOINT` 等环境变量读取。
+OpenAI Chat Completions 兼容的私有 endpoint 示例：
+
+```powershell
+$env:AI_JSUNPACK_AGENT_PROVIDER = "openai-compatible"
+$env:AI_JSUNPACK_AGENT_MODEL = "private-model"
+$env:AI_JSUNPACK_AGENT_BASE_URL = "https://agent.example.com"
+$env:AI_JSUNPACK_AGENT_API_KEY = "<worker-only endpoint secret>"
+$env:AI_JSUNPACK_AGENT_TIMEOUT_SECONDS = "30"
+$env:AI_JSUNPACK_AGENT_TEMPERATURE = "0.2"
+```
+
+本地或私有 local_only endpoint 示例：
+
+```powershell
+$env:AI_JSUNPACK_LOCAL_AGENT_PROVIDER = "openai-compatible"
+$env:AI_JSUNPACK_LOCAL_AGENT_MODEL = "local-private-model"
+$env:AI_JSUNPACK_LOCAL_AGENT_BASE_URL = "http://127.0.0.1:11434/v1"
+$env:AI_JSUNPACK_LOCAL_AGENT_API_KEY = ""
+```
+
+也可以在创建 Job 时通过 `config.agentModel`、`config.agentModelProvider`、`config.localAgentModel` 或 `config.localAgentProvider` 覆盖模型和 provider。自定义 endpoint 的 base URL、API key、timeout 和 temperature 只从 Worker 环境读取，不从 Job config 读取。CrewAI 默认路径实际使用模型字符串；provider 名称主要用于 policy/audit 证据。配置 `provider=openai-compatible` 且有 base URL 时，Worker 会通过自定义 `BaseLLM` 适配器按 OpenAI Chat Completions 协议发送 `model/messages/temperature/tools`。endpoint 超时、HTTP error 或响应缺少 `choices[0].message.content` 时，Agent evidence 会记录 `agent_failed`，deterministic Core、重建、build/typecheck 和 packaging 证据链仍继续保留。
 
 ## 健康检查
 

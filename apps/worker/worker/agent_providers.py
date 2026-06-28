@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib import error, request
 
 from pydantic import BaseModel
 
@@ -13,9 +15,13 @@ from packages.memory import JobMemoryContext
 
 from .agent_context import AgentContextBuilder, AgentContextRedactor
 from .agent_contracts import (
+    AGENT_API_KEY_ENV,
+    AGENT_BASE_URL_ENV,
     AGENT_MODEL_ENV,
     AGENT_PROMPT_VERSION,
     AGENT_PROVIDER_ENV,
+    AGENT_TEMPERATURE_ENV,
+    AGENT_TIMEOUT_SECONDS_ENV,
     AGENT_TOOL_VERSION,
     CREWAI_DATA_ROOT_ENV,
     CREW_AGENT_NAMES,
@@ -29,6 +35,8 @@ from .agent_contracts import (
     CrewReviewOutput,
     CrewRuntimeDiagnosisOutput,
     CrewStructuredAgentOutput,
+    LOCAL_AGENT_API_KEY_ENV,
+    LOCAL_AGENT_BASE_URL_ENV,
     LOCAL_AGENT_MODEL_ENV,
     LOCAL_AGENT_PROVIDER_ENV,
     AgentInferenceDraft,
@@ -42,6 +50,10 @@ from .agent_contracts import (
 from .agent_feedback import AgentFeedbackRefiner
 
 
+OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
+DEFAULT_AGENT_TIMEOUT_SECONDS = 30.0
+
+
 class ModelPolicyResolver:
     def resolve(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
         if request.cloud_mode == "cloud_allowed":
@@ -53,35 +65,45 @@ class ModelPolicyResolver:
     def _cloud_allowed(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
         model_name = self._config_or_env(request.job_config, "agentModel", AGENT_MODEL_ENV)
         provider = self._config_or_env(request.job_config, "agentModelProvider", AGENT_PROVIDER_ENV) or "cloud"
+        base_url = self._env_value(AGENT_BASE_URL_ENV)
+        api_key = self._env_value(AGENT_API_KEY_ENV)
         return self._policy(
             cloud_mode=request.cloud_mode,
             model_provider=provider,
             model_name=model_name,
             sanitized_context=False,
             denial_reason="cloud_allowed mode requires config.agentModel or AI_JSUNPACK_AGENT_MODEL.",
+            base_url=base_url,
+            api_key=api_key,
         )
 
     def _local_only(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
         model_name = self._config_or_env(request.job_config, "localAgentModel", LOCAL_AGENT_MODEL_ENV)
         provider = self._config_or_env(request.job_config, "localAgentProvider", LOCAL_AGENT_PROVIDER_ENV) or "local"
+        base_url = self._env_value(LOCAL_AGENT_BASE_URL_ENV)
+        api_key = self._env_value(LOCAL_AGENT_API_KEY_ENV)
         return self._policy(
             cloud_mode=request.cloud_mode,
             model_provider=provider,
             model_name=model_name,
             sanitized_context=False,
             denial_reason="local_only mode requires config.localAgentModel or AI_JSUNPACK_LOCAL_AGENT_MODEL.",
+            base_url=base_url,
+            api_key=api_key,
         )
 
     def _desensitized(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
-        model_name = (
-            self._config_or_env(request.job_config, "agentModel", AGENT_MODEL_ENV)
-            or self._config_or_env(request.job_config, "localAgentModel", LOCAL_AGENT_MODEL_ENV)
-        )
-        provider = (
-            self._config_or_env(request.job_config, "agentModelProvider", AGENT_PROVIDER_ENV)
-            or self._config_or_env(request.job_config, "localAgentProvider", LOCAL_AGENT_PROVIDER_ENV)
-            or "desensitized"
-        )
+        cloud_model_name = self._config_or_env(request.job_config, "agentModel", AGENT_MODEL_ENV)
+        local_model_name = self._config_or_env(request.job_config, "localAgentModel", LOCAL_AGENT_MODEL_ENV)
+        model_name = cloud_model_name or local_model_name
+        cloud_provider = self._config_or_env(request.job_config, "agentModelProvider", AGENT_PROVIDER_ENV)
+        local_provider = self._config_or_env(request.job_config, "localAgentProvider", LOCAL_AGENT_PROVIDER_ENV)
+        cloud_base_url = self._env_value(AGENT_BASE_URL_ENV)
+        local_base_url = self._env_value(LOCAL_AGENT_BASE_URL_ENV)
+        cloud_api_key = self._env_value(AGENT_API_KEY_ENV)
+        local_api_key = self._env_value(LOCAL_AGENT_API_KEY_ENV)
+        use_cloud_endpoint = bool(cloud_model_name)
+        provider = (cloud_provider if use_cloud_endpoint else local_provider) or "desensitized"
         return self._policy(
             cloud_mode=request.cloud_mode,
             model_provider=provider,
@@ -91,6 +113,8 @@ class ModelPolicyResolver:
                 "desensitized mode requires config.agentModel, config.localAgentModel, "
                 "AI_JSUNPACK_AGENT_MODEL, or AI_JSUNPACK_LOCAL_AGENT_MODEL."
             ),
+            base_url=cloud_base_url if use_cloud_endpoint else local_base_url,
+            api_key=cloud_api_key if use_cloud_endpoint else local_api_key,
         )
 
     def _policy(
@@ -101,7 +125,14 @@ class ModelPolicyResolver:
         model_name: str | None,
         sanitized_context: bool,
         denial_reason: str,
+        base_url: str | None,
+        api_key: str | None,
     ) -> AgentModelPolicy:
+        timeout_seconds = self._positive_float_or_default(
+            self._env_value(AGENT_TIMEOUT_SECONDS_ENV),
+            default=DEFAULT_AGENT_TIMEOUT_SECONDS,
+        )
+        temperature = self._optional_float(self._env_value(AGENT_TEMPERATURE_ENV))
         if model_name:
             return AgentModelPolicy(
                 allowed=True,
@@ -110,6 +141,10 @@ class ModelPolicyResolver:
                 model_name=model_name,
                 prompt_version=AGENT_PROMPT_VERSION,
                 sanitized_context=sanitized_context,
+                base_url=base_url,
+                api_key=api_key,
+                timeout_seconds=timeout_seconds,
+                temperature=temperature,
             )
         return AgentModelPolicy(
             allowed=False,
@@ -119,6 +154,10 @@ class ModelPolicyResolver:
             prompt_version=AGENT_PROMPT_VERSION,
             sanitized_context=sanitized_context,
             denial_reason=denial_reason,
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
         )
 
     def _config_or_env(self, config: dict[str, Any], key: str, env_name: str) -> str | None:
@@ -129,6 +168,189 @@ class ModelPolicyResolver:
         if env_value and env_value.strip():
             return env_value.strip()
         return None
+
+    def _env_value(self, env_name: str) -> str | None:
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            return env_value.strip()
+        return None
+
+    def _positive_float_or_default(self, value: str | None, *, default: float) -> float:
+        if value is None:
+            return default
+        with contextlib.suppress(ValueError):
+            parsed = float(value)
+            if parsed > 0:
+                return parsed
+        return default
+
+    def _optional_float(self, value: str | None) -> float | None:
+        if value is None:
+            return None
+        with contextlib.suppress(ValueError):
+            return float(value)
+        return None
+
+
+class OpenAICompatibleLLMError(RuntimeError):
+    pass
+
+
+class OpenAICompatibleCrewAILLM:
+    """CrewAI BaseLLM adapter for OpenAI Chat Completions-compatible endpoints."""
+
+    def __new__(
+        cls,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str | None,
+        timeout_seconds: float,
+        temperature: float | None = None,
+    ):
+        prepare_crewai_storage()
+        from crewai.llm import BaseLLM
+
+        class _OpenAICompatibleCrewAILLM(BaseLLM):
+            llm_type: str = OPENAI_COMPATIBLE_PROVIDER
+
+            def __init__(self) -> None:
+                super().__init__(
+                    model=model,
+                    provider=OPENAI_COMPATIBLE_PROVIDER,
+                    base_url=base_url,
+                    api_key=api_key,
+                    temperature=temperature,
+                )
+                self._endpoint = self._chat_completions_url(base_url)
+                self._request_timeout_seconds = timeout_seconds
+
+            def call(
+                self,
+                messages: str | list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                callbacks: list[Any] | None = None,
+                available_functions: dict[str, Any] | None = None,
+                from_task: Any | None = None,
+                from_agent: Any | None = None,
+                response_model: type[BaseModel] | None = None,
+            ) -> str | Any:
+                del callbacks, available_functions
+                formatted_messages = self._format_messages(messages)
+                payload: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": formatted_messages,
+                }
+                if self.temperature is not None:
+                    payload["temperature"] = self.temperature
+                if tools:
+                    payload["tools"] = tools
+                content = self._post_chat_completions(payload)
+                return self._validate_structured_output(content, response_model)
+
+            def _post_chat_completions(self, payload: dict[str, Any]) -> str:
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                chat_request = request.Request(self._endpoint, data=body, headers=headers, method="POST")
+                try:
+                    with request.urlopen(chat_request, timeout=self._request_timeout_seconds) as response:
+                        raw = response.read()
+                except TimeoutError as exc:
+                    raise OpenAICompatibleLLMError(
+                        f"OpenAI-compatible endpoint timed out after {self._request_timeout_seconds:g}s."
+                    ) from exc
+                except error.HTTPError as exc:
+                    detail = exc.read().decode("utf-8", errors="replace")[:500]
+                    raise OpenAICompatibleLLMError(
+                        f"OpenAI-compatible endpoint returned HTTP {exc.code}: {detail}"
+                    ) from exc
+                except error.URLError as exc:
+                    reason = getattr(exc, "reason", exc)
+                    if isinstance(reason, TimeoutError):
+                        raise OpenAICompatibleLLMError(
+                            f"OpenAI-compatible endpoint timed out after {self._request_timeout_seconds:g}s."
+                        ) from exc
+                    raise OpenAICompatibleLLMError(f"OpenAI-compatible endpoint request failed: {reason}") from exc
+
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise OpenAICompatibleLLMError(
+                        "OpenAI-compatible endpoint returned non-JSON response."
+                    ) from exc
+                return self._extract_content(data)
+
+            def _extract_content(self, data: Any) -> str:
+                if not isinstance(data, dict):
+                    raise OpenAICompatibleLLMError("OpenAI-compatible endpoint response must be a JSON object.")
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    raise OpenAICompatibleLLMError(
+                        "OpenAI-compatible endpoint response is missing choices[0].message.content."
+                    )
+                first_choice = choices[0]
+                if not isinstance(first_choice, dict):
+                    raise OpenAICompatibleLLMError(
+                        "OpenAI-compatible endpoint response has invalid choices[0]."
+                    )
+                message = first_choice.get("message")
+                if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                    raise OpenAICompatibleLLMError(
+                        "OpenAI-compatible endpoint response is missing choices[0].message.content."
+                    )
+                content = message["content"]
+                return self._apply_stop_words(content)
+
+            def _format_messages(self, messages: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+                formatted = super()._format_messages(messages)
+                return [self._message_payload(message) for message in formatted]
+
+            def _message_payload(self, message: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    key: value
+                    for key, value in message.items()
+                    if key in {"role", "content", "name", "tool_call_id", "tool_calls"}
+                }
+
+            @staticmethod
+            def _chat_completions_url(raw_base_url: str) -> str:
+                normalized = raw_base_url.strip().rstrip("/")
+                if not normalized:
+                    raise ValueError("OpenAI-compatible base URL cannot be empty.")
+                if normalized.endswith("/chat/completions"):
+                    return normalized
+                if normalized.endswith("/v1"):
+                    return f"{normalized}/chat/completions"
+                return f"{normalized}/v1/chat/completions"
+
+        return _OpenAICompatibleCrewAILLM()
+
+
+def prepare_crewai_storage() -> None:
+    data_root = Path(os.getenv(CREWAI_DATA_ROOT_ENV, Path.cwd() / ".crewai-data")).resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    os.environ["LOCALAPPDATA"] = str(data_root)
+    os.environ.setdefault("XDG_DATA_HOME", str(data_root))
+    os.environ.setdefault("CREWAI_STORAGE_DIR", "ai-jsunpack")
+    try:
+        import appdirs
+
+        def project_user_data_dir(
+            appname: str | None = None,
+            appauthor: str | None = None,
+            version: str | None = None,
+            roaming: bool = False,
+        ) -> str:
+            parts = [part for part in (appauthor, appname, version) if part]
+            target = data_root.joinpath(*parts) if parts else data_root
+            target.mkdir(parents=True, exist_ok=True)
+            return str(target)
+
+        appdirs.user_data_dir = project_user_data_dir
+    except Exception:
+        pass
 
 
 class CrewAIBackend:
@@ -151,7 +373,7 @@ class CrewAIBackend:
             role=spec.role,
             goal=spec.goal,
             backstory=spec.backstory,
-            llm=policy.model_name,
+            llm=self._llm_for_policy(policy),
             allow_delegation=False,
             verbose=False,
         )
@@ -172,28 +394,7 @@ class CrewAIBackend:
     def _prepare_crewai_storage(self) -> None:
         if self._prepared:
             return
-        data_root = Path(os.getenv(CREWAI_DATA_ROOT_ENV, Path.cwd() / ".crewai-data")).resolve()
-        data_root.mkdir(parents=True, exist_ok=True)
-        os.environ["LOCALAPPDATA"] = str(data_root)
-        os.environ.setdefault("XDG_DATA_HOME", str(data_root))
-        os.environ.setdefault("CREWAI_STORAGE_DIR", "ai-jsunpack")
-        try:
-            import appdirs
-
-            def project_user_data_dir(
-                appname: str | None = None,
-                appauthor: str | None = None,
-                version: str | None = None,
-                roaming: bool = False,
-            ) -> str:
-                parts = [part for part in (appauthor, appname, version) if part]
-                target = data_root.joinpath(*parts) if parts else data_root
-                target.mkdir(parents=True, exist_ok=True)
-                return str(target)
-
-            appdirs.user_data_dir = project_user_data_dir
-        except Exception:
-            pass
+        prepare_crewai_storage()
         self._prepared = True
 
     def _parse_crewai_result(self, result: Any) -> CrewStructuredAgentOutput:
@@ -210,6 +411,19 @@ class CrewAIBackend:
             return CrewStructuredAgentOutput.model_validate(result)
         raw = getattr(result, "raw", None) or str(result)
         return CrewStructuredAgentOutput.model_validate(json.loads(raw))
+
+    def _llm_for_policy(self, policy: AgentModelPolicy) -> str | Any:
+        if not policy.custom_endpoint_enabled:
+            return policy.model_name
+        if not policy.base_url:
+            return policy.model_name
+        return OpenAICompatibleCrewAILLM(
+            model=policy.model_name,
+            base_url=policy.base_url,
+            api_key=policy.api_key,
+            timeout_seconds=policy.timeout_seconds,
+            temperature=policy.temperature,
+        )
 
 
 class CrewAIExecutionAdapter:
@@ -352,6 +566,11 @@ class CrewAIExecutionAdapter:
             review=review,
             model_provider=policy.model_provider,
             model_name=policy.model_name,
+            model_base_url_configured=policy.base_url_configured,
+            model_api_key_configured=policy.api_key_configured,
+            model_custom_endpoint_enabled=policy.custom_endpoint_enabled,
+            model_timeout_seconds=policy.timeout_seconds,
+            model_temperature=policy.temperature,
         )
 
     def _policy_denied_execution(
@@ -381,6 +600,11 @@ class CrewAIExecutionAdapter:
             review=review,
             model_provider=policy.model_provider,
             model_name=policy.model_name,
+            model_base_url_configured=policy.base_url_configured,
+            model_api_key_configured=policy.api_key_configured,
+            model_custom_endpoint_enabled=policy.custom_endpoint_enabled,
+            model_timeout_seconds=policy.timeout_seconds,
+            model_temperature=policy.temperature,
         )
 
     def _failed_execution(
@@ -411,6 +635,11 @@ class CrewAIExecutionAdapter:
             review=review,
             model_provider=policy.model_provider,
             model_name=policy.model_name,
+            model_base_url_configured=policy.base_url_configured,
+            model_api_key_configured=policy.api_key_configured,
+            model_custom_endpoint_enabled=policy.custom_endpoint_enabled,
+            model_timeout_seconds=policy.timeout_seconds,
+            model_temperature=policy.temperature,
         )
 
     def _execution_status(self, value: str) -> CrewExecutionStatus:
@@ -508,6 +737,13 @@ class CrewAIExecutionAdapter:
                 "allowed": policy.allowed,
                 "sanitizedContext": policy.sanitized_context,
                 "denialReason": policy.denial_reason,
+                "provider": policy.model_provider,
+                "model": policy.model_name,
+                "baseUrlConfigured": policy.base_url_configured,
+                "apiKeyConfigured": policy.api_key_configured,
+                "customEndpointEnabled": policy.custom_endpoint_enabled,
+                "timeoutSeconds": policy.timeout_seconds,
+                "temperature": policy.temperature,
                 "redaction": redaction_metadata,
             },
             "runtimeStatus": "planned",
@@ -594,4 +830,6 @@ __all__ = [
     "CrewAIBackend",
     "CrewAIExecutionAdapter",
     "ModelPolicyResolver",
+    "OpenAICompatibleCrewAILLM",
+    "OpenAICompatibleLLMError",
 ]

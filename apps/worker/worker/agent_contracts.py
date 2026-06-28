@@ -24,8 +24,14 @@ AGENT_PROMPT_VERSION = "agent-runtime-v1"
 AGENT_TOOL_VERSION = "0.2.0"
 AGENT_MODEL_ENV = "AI_JSUNPACK_AGENT_MODEL"
 AGENT_PROVIDER_ENV = "AI_JSUNPACK_AGENT_PROVIDER"
+AGENT_BASE_URL_ENV = "AI_JSUNPACK_AGENT_BASE_URL"
+AGENT_API_KEY_ENV = "AI_JSUNPACK_AGENT_API_KEY"
 LOCAL_AGENT_MODEL_ENV = "AI_JSUNPACK_LOCAL_AGENT_MODEL"
 LOCAL_AGENT_PROVIDER_ENV = "AI_JSUNPACK_LOCAL_AGENT_PROVIDER"
+LOCAL_AGENT_BASE_URL_ENV = "AI_JSUNPACK_LOCAL_AGENT_BASE_URL"
+LOCAL_AGENT_API_KEY_ENV = "AI_JSUNPACK_LOCAL_AGENT_API_KEY"
+AGENT_TIMEOUT_SECONDS_ENV = "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS"
+AGENT_TEMPERATURE_ENV = "AI_JSUNPACK_AGENT_TEMPERATURE"
 CREWAI_DATA_ROOT_ENV = "AI_JSUNPACK_CREWAI_DATA_ROOT"
 
 CrewStageName = Literal["planner", "analysis", "specialists", "synthesis", "review"]
@@ -105,6 +111,22 @@ class AgentModelPolicy:
     prompt_version: str
     sanitized_context: bool
     denial_reason: str | None = None
+    base_url: str | None = None
+    api_key: str | None = field(default=None, repr=False, compare=False)
+    timeout_seconds: float = 30.0
+    temperature: float | None = None
+
+    @property
+    def base_url_configured(self) -> bool:
+        return bool(self.base_url)
+
+    @property
+    def api_key_configured(self) -> bool:
+        return bool(self.api_key)
+
+    @property
+    def custom_endpoint_enabled(self) -> bool:
+        return self.model_provider.strip().lower() == "openai-compatible" and self.base_url_configured
 
 
 @dataclass(frozen=True)
@@ -211,6 +233,11 @@ class CrewAgentExecution:
     review: AgentReviewDraft | None = None
     model_provider: str = "unknown"
     model_name: str = "unknown"
+    model_base_url_configured: bool = False
+    model_api_key_configured: bool = False
+    model_custom_endpoint_enabled: bool = False
+    model_timeout_seconds: float = 30.0
+    model_temperature: float | None = None
 
 
 @dataclass(frozen=True)
@@ -375,9 +402,13 @@ class CrewAgentPassOutput(BaseModel):
 
 
 __all__ = [
+    "AGENT_API_KEY_ENV",
+    "AGENT_BASE_URL_ENV",
     "AGENT_MODEL_ENV",
     "AGENT_PROMPT_VERSION",
     "AGENT_PROVIDER_ENV",
+    "AGENT_TEMPERATURE_ENV",
+    "AGENT_TIMEOUT_SECONDS_ENV",
     "AGENT_TOOL_VERSION",
     "CREWAI_DATA_ROOT_ENV",
     "CREW_AGENT_NAMES",
@@ -397,6 +428,8 @@ __all__ = [
     "CrewStagePlanOutput",
     "CrewStructuredAgentOutput",
     "CrewTaskSpec",
+    "LOCAL_AGENT_API_KEY_ENV",
+    "LOCAL_AGENT_BASE_URL_ENV",
     "LOCAL_AGENT_MODEL_ENV",
     "LOCAL_AGENT_PROVIDER_ENV",
     "AgentFeedbackRefinement",

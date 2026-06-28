@@ -33,6 +33,8 @@ class DeploymentConfigTest(unittest.TestCase):
                 "AI_JSUNPACK_SANDBOX_RUNNER": "container",
                 "AI_JSUNPACK_SANDBOX_IMAGE": "node:20-bookworm-slim",
                 "AI_JSUNPACK_AGENT_MODEL": "gpt-example",
+                "AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test",
+                "AI_JSUNPACK_LOCAL_AGENT_API_KEY": "local-secret",
                 "AI_JSUNPACK_BROWSER_RUNNER_URL": "http://browser-runner:9222",
                 "OPENAI_API_KEY": "secret",
             },
@@ -42,6 +44,8 @@ class DeploymentConfigTest(unittest.TestCase):
         self.assertEqual(profile.status, "invalid")
         self.assertIn("AI_JSUNPACK_SANDBOX_RUNNER", violation_names)
         self.assertIn("AI_JSUNPACK_AGENT_MODEL", violation_names)
+        self.assertIn("AI_JSUNPACK_AGENT_BASE_URL", violation_names)
+        self.assertIn("AI_JSUNPACK_LOCAL_AGENT_API_KEY", violation_names)
         self.assertIn("AI_JSUNPACK_BROWSER_RUNNER_URL", violation_names)
         self.assertIn("OPENAI_API_KEY", violation_names)
 
@@ -88,7 +92,13 @@ class DeploymentConfigTest(unittest.TestCase):
                 "AI_JSUNPACK_SANDBOX_RUNNER": "container",
                 "AI_JSUNPACK_SANDBOX_IMAGE": "node:20-bookworm-slim",
                 "AI_JSUNPACK_AGENT_MODEL": "gpt-example",
+                "AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test",
+                "AI_JSUNPACK_AGENT_API_KEY": "secret",
+                "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "30",
+                "AI_JSUNPACK_AGENT_TEMPERATURE": "0.2",
                 "AI_JSUNPACK_LOCAL_AGENT_MODEL": "local-example",
+                "AI_JSUNPACK_LOCAL_AGENT_BASE_URL": "http://host.docker.internal:11434/v1",
+                "AI_JSUNPACK_LOCAL_AGENT_API_KEY": "local-secret",
                 "AI_JSUNPACK_CORE_CLI_PATH": "packages/core/dist/cli.js",
                 "AI_JSUNPACK_CREWAI_DATA_ROOT": "/var/lib/ai-jsunpack/crewai",
             },

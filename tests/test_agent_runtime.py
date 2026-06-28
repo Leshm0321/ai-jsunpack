@@ -1,11 +1,16 @@
 import json
+import os
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from apps.api.app.models import CreateJobRequest, EvidenceRef
 from apps.api.app.store import create_store
+from apps.worker.worker.agent_contracts import CrewAgentExecution, CrewAgentSpec, CrewStageExecution
 from apps.worker.worker.agent_runtime import (
     AgentContextRedactor,
     AgentRuntime,
@@ -13,6 +18,8 @@ from apps.worker.worker.agent_runtime import (
     AgentToolRegistryBuilder,
     ModelPolicyResolver,
 )
+from apps.worker.worker.agent_artifacts import AgentArtifactWriter
+from apps.worker.worker.agent_providers import CrewAIBackend, OpenAICompatibleCrewAILLM, OpenAICompatibleLLMError
 from apps.worker.worker.reconstruction import ReconstructionRunner
 from packages.knowledge import StaticKnowledgeRetriever
 
@@ -50,6 +57,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(policy.model_provider, "provider")
         self.assertEqual(policy.model_name, "provider/model-a")
         self.assertFalse(policy.sanitized_context)
+        self.assertFalse(policy.custom_endpoint_enabled)
 
     def test_desensitized_marks_context_sanitized(self):
         policy = ModelPolicyResolver().resolve(
@@ -62,6 +70,71 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertTrue(policy.allowed)
         self.assertEqual(policy.model_name, "provider/model-b")
         self.assertTrue(policy.sanitized_context)
+
+    def test_cloud_policy_reads_openai_compatible_endpoint_from_worker_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test",
+                "AI_JSUNPACK_AGENT_API_KEY": "secret-value",
+                "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "12.5",
+                "AI_JSUNPACK_AGENT_TEMPERATURE": "0.2",
+            },
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(
+                    cloud_mode="cloud_allowed",
+                    config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                )
+            )
+
+        self.assertTrue(policy.allowed)
+        self.assertTrue(policy.custom_endpoint_enabled)
+        self.assertEqual(policy.base_url, "https://agent.example.test")
+        self.assertTrue(policy.api_key_configured)
+        self.assertEqual(policy.timeout_seconds, 12.5)
+        self.assertEqual(policy.temperature, 0.2)
+        self.assertNotIn("secret-value", repr(policy))
+
+    def test_local_policy_reads_local_openai_compatible_endpoint_from_worker_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_LOCAL_AGENT_BASE_URL": "http://127.0.0.1:11434/v1",
+                "AI_JSUNPACK_LOCAL_AGENT_API_KEY": "",
+            },
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(
+                    cloud_mode="local_only",
+                    config={"localAgentModel": "local-model", "localAgentProvider": "openai-compatible"},
+                )
+            )
+
+        self.assertTrue(policy.allowed)
+        self.assertTrue(policy.custom_endpoint_enabled)
+        self.assertEqual(policy.base_url, "http://127.0.0.1:11434/v1")
+        self.assertFalse(policy.api_key_configured)
+        self.assertEqual(policy.timeout_seconds, 30.0)
+        self.assertIsNone(policy.temperature)
+
+    def test_invalid_timeout_and_temperature_fall_back_to_safe_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "-1",
+                "AI_JSUNPACK_AGENT_TEMPERATURE": "not-a-number",
+            },
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+            )
+
+        self.assertEqual(policy.timeout_seconds, 30.0)
+        self.assertIsNone(policy.temperature)
 
     def test_desensitized_redacts_model_context_material(self):
         policy = ModelPolicyResolver().resolve(
@@ -152,6 +225,214 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertIn("crewai_storage", crewai_entry.description)
         self.assertIn("runtime_diagnosis", crewai_entry.output_artifact_kinds)
         self.assertIn("repair_instruction", crewai_entry.output_artifact_kinds)
+
+    def test_crewai_backend_uses_string_model_when_no_custom_endpoint(self):
+        policy = ModelPolicyResolver().resolve(
+            self._request(cloud_mode="cloud_allowed", config={"agentModel": "provider/model-a"})
+        )
+
+        self.assertEqual(CrewAIBackend()._llm_for_policy(policy), "provider/model-a")
+
+    def test_crewai_backend_uses_custom_llm_for_openai_compatible_endpoint(self):
+        with patch.dict(
+            os.environ,
+            {"AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test", "AI_JSUNPACK_AGENT_API_KEY": "secret"},
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(
+                    cloud_mode="cloud_allowed",
+                    config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                )
+            )
+
+        llm = CrewAIBackend()._llm_for_policy(policy)
+
+        self.assertNotEqual(llm, "private-model")
+        self.assertEqual(llm.model, "private-model")
+        self.assertEqual(llm.base_url, "https://agent.example.test")
+        self.assertEqual(llm._endpoint, "https://agent.example.test/v1/chat/completions")
+
+    def test_openai_compatible_llm_posts_string_messages_and_returns_content(self):
+        server = _OpenAICompatibleTestServer(
+            [{"choices": [{"message": {"content": "adapter response"}}]}]
+        )
+        try:
+            llm = OpenAICompatibleCrewAILLM(
+                model="private-model",
+                base_url=server.base_url,
+                api_key="secret",
+                timeout_seconds=5,
+                temperature=0.1,
+            )
+
+            result = llm.call("hello")
+
+            self.assertEqual(result, "adapter response")
+            request_payload = server.requests[0]
+            self.assertEqual(request_payload["headers"]["authorization"], "Bearer secret")
+            self.assertEqual(request_payload["body"]["model"], "private-model")
+            self.assertEqual(request_payload["body"]["messages"], [{"role": "user", "content": "hello"}])
+            self.assertEqual(request_payload["body"]["temperature"], 0.1)
+        finally:
+            server.close()
+
+    def test_openai_compatible_llm_posts_list_messages_and_tools(self):
+        server = _OpenAICompatibleTestServer(
+            [{"choices": [{"message": {"content": "tool-aware response"}}]}]
+        )
+        try:
+            llm = OpenAICompatibleCrewAILLM(
+                model="private-model",
+                base_url=f"{server.base_url}/v1",
+                api_key=None,
+                timeout_seconds=5,
+            )
+            tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+            result = llm.call([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], tools=tools)
+
+            self.assertEqual(result, "tool-aware response")
+            self.assertEqual(server.requests[0]["body"]["messages"][0]["role"], "system")
+            self.assertEqual(server.requests[0]["body"]["tools"], tools)
+            self.assertNotIn("authorization", server.requests[0]["headers"])
+        finally:
+            server.close()
+
+    def test_openai_compatible_llm_raises_readable_http_error(self):
+        server = _OpenAICompatibleTestServer([{"status": 500, "body": {"error": "failed"}}])
+        try:
+            llm = OpenAICompatibleCrewAILLM(
+                model="private-model",
+                base_url=server.base_url,
+                api_key=None,
+                timeout_seconds=5,
+            )
+
+            with self.assertRaisesRegex(OpenAICompatibleLLMError, "HTTP 500"):
+                llm.call("hello")
+        finally:
+            server.close()
+
+    def test_openai_compatible_llm_rejects_missing_content(self):
+        server = _OpenAICompatibleTestServer([{"choices": [{"message": {}}]}])
+        try:
+            llm = OpenAICompatibleCrewAILLM(
+                model="private-model",
+                base_url=server.base_url,
+                api_key=None,
+                timeout_seconds=5,
+            )
+
+            with self.assertRaisesRegex(OpenAICompatibleLLMError, "choices\\[0\\].message.content"):
+                llm.call("hello")
+        finally:
+            server.close()
+
+    def test_openai_compatible_llm_raises_readable_transport_error(self):
+        llm = OpenAICompatibleCrewAILLM(
+            model="private-model",
+            base_url="http://127.0.0.1:1",
+            api_key=None,
+            timeout_seconds=0.1,
+        )
+
+        with self.assertRaisesRegex(OpenAICompatibleLLMError, "request failed|timed out"):
+            llm.call("hello")
+
+    def test_agent_execution_artifact_records_endpoint_metadata_without_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                plan_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="agent_plan",
+                    stage="agent_planning",
+                    filename="agent-plan.json",
+                    payload={"kind": "agent_plan"},
+                )
+                tool_registry_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="tool_registry",
+                    stage="agent_planning",
+                    filename="tool-registry.json",
+                    payload={"kind": "tool_registry"},
+                )
+                knowledge_artifact = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="knowledge_evidence",
+                    stage="agent_planning",
+                    filename="knowledge.json",
+                    payload={"kind": "knowledge_evidence"},
+                )
+                spec = CrewAgentSpec(
+                    name="PlannerAgent",
+                    stage="planner",
+                    responsibility="Plan",
+                    role="Planner",
+                    goal="Plan",
+                    backstory="Planner",
+                    output_kind="agent_plan",
+                    allow_parallel=False,
+                )
+                execution = CrewAgentExecution(
+                    spec=spec,
+                    status="pass",
+                    failure_class="none",
+                    attempt=0,
+                    duration_ms=1.0,
+                    input_artifact_ids=[],
+                    evidence_refs=[],
+                    message="done",
+                    model_provider="openai-compatible",
+                    model_name="private-model",
+                    model_base_url_configured=True,
+                    model_api_key_configured=True,
+                    model_custom_endpoint_enabled=True,
+                    model_timeout_seconds=42.0,
+                    model_temperature=0.3,
+                )
+                stages = [
+                    CrewStageExecution(
+                        stage="planner",
+                        status="pass",
+                        agent_executions=[execution],
+                        duration_ms=1.0,
+                        failure_class="none",
+                    )
+                ]
+
+                artifacts = AgentArtifactWriter()._write_agent_execution_artifacts(
+                    job_id=job.id,
+                    store=store,
+                    stages=stages,
+                    plan_artifact=plan_artifact,
+                    tool_registry_artifact=tool_registry_artifact,
+                    knowledge_artifact=knowledge_artifact,
+                    base_input_artifact_ids=[],
+                    model_provider="openai-compatible",
+                    model_name="private-model",
+                )
+                agent_payload = json.loads(store.read_artifact(job.id, artifacts[0].id))
+                serialized = json.dumps(agent_payload)
+
+                self.assertTrue(agent_payload["modelBaseUrlConfigured"])
+                self.assertTrue(agent_payload["modelApiKeyConfigured"])
+                self.assertTrue(agent_payload["modelCustomEndpointEnabled"])
+                self.assertEqual(agent_payload["modelTimeoutSeconds"], 42.0)
+                self.assertEqual(agent_payload["modelTemperature"], 0.3)
+                self.assertNotIn("secret", serialized)
+                self.assertNotIn("http://", serialized)
+            finally:
+                store.close()
 
     def test_static_knowledge_retriever_recognizes_core_and_runtime_patterns(self):
         retriever = StaticKnowledgeRetriever()
@@ -694,6 +975,48 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             content_type="application/json",
             producer="tests.agent_runtime",
         )
+
+
+class _OpenAICompatibleTestServer:
+    def __init__(self, responses: list[dict]):
+        self.responses = list(responses)
+        self.requests: list[dict] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                content_length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(content_length)
+                owner.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": {key.lower(): value for key, value in self.headers.items()},
+                        "body": json.loads(raw_body.decode("utf-8")),
+                    }
+                )
+                response = owner.responses.pop(0)
+                status = int(response.get("status", 200))
+                body = response.get("body", response if "status" not in response else {})
+                encoded = json.dumps(body).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format, *args):  # noqa: A002
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address
+        self.base_url = f"http://{host}:{port}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
 
 
 if __name__ == "__main__":

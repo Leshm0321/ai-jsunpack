@@ -89,8 +89,14 @@ Worker：
 - `AI_JSUNPACK_BROWSER_RUNNER_TOKEN`
 - `AI_JSUNPACK_AGENT_MODEL`
 - `AI_JSUNPACK_AGENT_PROVIDER`
+- `AI_JSUNPACK_AGENT_BASE_URL`
+- `AI_JSUNPACK_AGENT_API_KEY`
+- `AI_JSUNPACK_AGENT_TIMEOUT_SECONDS`
+- `AI_JSUNPACK_AGENT_TEMPERATURE`
 - `AI_JSUNPACK_LOCAL_AGENT_MODEL`
 - `AI_JSUNPACK_LOCAL_AGENT_PROVIDER`
+- `AI_JSUNPACK_LOCAL_AGENT_BASE_URL`
+- `AI_JSUNPACK_LOCAL_AGENT_API_KEY`
 - `AI_JSUNPACK_CREWAI_DATA_ROOT`
 - provider 凭据只注入 Worker，例如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`、`AZURE_OPENAI_API_KEY`、`OLLAMA_ENDPOINT`
 
@@ -124,9 +130,13 @@ Web：
 Agent Runtime 只属于 Worker。模型选择有两层入口：
 
 - Job config：`config.agentModel`、`config.agentModelProvider`、`config.localAgentModel`、`config.localAgentProvider`。
-- Worker 环境变量：`AI_JSUNPACK_AGENT_MODEL`、`AI_JSUNPACK_AGENT_PROVIDER`、`AI_JSUNPACK_LOCAL_AGENT_MODEL`、`AI_JSUNPACK_LOCAL_AGENT_PROVIDER`。
+- Worker 环境变量：`AI_JSUNPACK_AGENT_MODEL`、`AI_JSUNPACK_AGENT_PROVIDER`、`AI_JSUNPACK_AGENT_BASE_URL`、`AI_JSUNPACK_AGENT_API_KEY`、`AI_JSUNPACK_LOCAL_AGENT_MODEL`、`AI_JSUNPACK_LOCAL_AGENT_PROVIDER`、`AI_JSUNPACK_LOCAL_AGENT_BASE_URL`、`AI_JSUNPACK_LOCAL_AGENT_API_KEY`。
 
 `cloud_allowed` Job 需要 `config.agentModel` 或 `AI_JSUNPACK_AGENT_MODEL`；`local_only` Job 需要 `config.localAgentModel` 或 `AI_JSUNPACK_LOCAL_AGENT_MODEL`；`desensitized` Job 会先做上下文脱敏，再使用 cloud 或 local 模型变量。
+
+如果 `AI_JSUNPACK_AGENT_PROVIDER=openai-compatible` 且配置 `AI_JSUNPACK_AGENT_BASE_URL`，cloud_allowed/desensitized Job 会通过 Worker 内置的 CrewAI `BaseLLM` 适配器调用 OpenAI Chat Completions 兼容 endpoint。local_only 对应 `AI_JSUNPACK_LOCAL_AGENT_PROVIDER=openai-compatible` 和 `AI_JSUNPACK_LOCAL_AGENT_BASE_URL`。请求会发送 `model`、`messages`、可选 `temperature` 和 CrewAI `tools`，并读取 `choices[0].message.content`。`AI_JSUNPACK_AGENT_TIMEOUT_SECONDS` 默认 30；`AI_JSUNPACK_AGENT_TEMPERATURE` 为空时不发送。
+
+自定义 endpoint 的 API key 不写入 artifact 原文。Agent plan 和 execution audit 只记录 provider、model、base URL 是否配置、API key 是否配置、timeout 和 temperature。endpoint 超时、HTTP error 或响应格式不合法会进入 `agent_failed` evidence，不会中断 Core、重建、build/typecheck、runtime validation 或 packaging 的确定性证据链。
 
 第三方 provider 凭据必须只注入 Worker，例如：
 
@@ -136,7 +146,7 @@ Agent Runtime 只属于 Worker。模型选择有两层入口：
 - `AZURE_OPENAI_API_KEY`
 - `OLLAMA_ENDPOINT`
 
-不要把这些变量注入 API、Web 或 Browser Runner。API strict mode 已显式拒绝模型 provider 凭据，防止 HTTP 层进程携带 Worker 执行侧权限。`AI_JSUNPACK_AGENT_PROVIDER` 和 `AI_JSUNPACK_LOCAL_AGENT_PROVIDER` 会写入 policy/audit 证据；CrewAI 实际根据 `llm` 模型字符串和 provider credential 环境变量初始化 SDK。
+不要把这些变量注入 API、Web 或 Browser Runner。API strict mode 会拒绝 `AI_JSUNPACK_AGENT_*`、`AI_JSUNPACK_LOCAL_AGENT_*` 和模型 provider 凭据，防止 HTTP 层进程携带 Worker 执行侧权限。`AI_JSUNPACK_AGENT_PROVIDER` 和 `AI_JSUNPACK_LOCAL_AGENT_PROVIDER` 会写入 policy/audit 证据；CrewAI 默认路径根据 `llm` 模型字符串和 provider credential 环境变量初始化 SDK。
 
 ## Sandbox Profile
 

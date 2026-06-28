@@ -115,6 +115,7 @@ node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output
 - Browser Runner 未配置时，Worker 使用本地 Playwright adapter；配置了 `AI_JSUNPACK_BROWSER_RUNNER_URL` 后会走远程服务。
 - CrewAI provider 未配置或策略拒绝时，系统应保留 schema-valid best-effort evidence，而不是阻断 deterministic pipeline 的可审计输出。
 - Agent evidence 出现 `policy_denied` 时，按顺序检查 Job `cloudMode`、Job config 中的 `agentModel`/`localAgentModel`、Worker 环境中的 `AI_JSUNPACK_AGENT_MODEL`/`AI_JSUNPACK_LOCAL_AGENT_MODEL`，最后检查 provider 凭据，例如 `OPENAI_API_KEY` 或 `OLLAMA_ENDPOINT`。
+- Agent evidence 出现 `agent_failed` 且 provider 为 `openai-compatible` 时，检查 Worker 环境中的 `AI_JSUNPACK_AGENT_BASE_URL` 或 `AI_JSUNPACK_LOCAL_AGENT_BASE_URL` 是否可达，确认 endpoint 支持 OpenAI Chat Completions 响应形状 `choices[0].message.content`，再检查 `AI_JSUNPACK_AGENT_TIMEOUT_SECONDS`、`AI_JSUNPACK_AGENT_API_KEY` 或 `AI_JSUNPACK_LOCAL_AGENT_API_KEY`。
 
 ## 生成产物与忽略目录
 
