@@ -6,10 +6,9 @@ import { AppView, emptyArtifactPreview, emptyEvidence } from "./workbench-view";
 import { artifactPreviewSupport, buildReportArtifacts, buildRuntimeMetrics, buildStageItems, errorMessage, fetchJobEvidence, fetchJobWorkspace, formatArtifactPreviewText } from "./workbench-logic";
 import { API_BASE_URL, createJob, fetchArtifactText, rerunJob, uploadSource } from "./api";
 import type { JobSummary } from "./api";
-import { LocalizationContext, persistPreferredLanguage, readPreferredLanguage, translate } from "./i18n";
-import type { Language, LocalizationValue } from "./i18n";
-export function AppContainer() {
-  const [language, setLanguageState] = useState<Language>(() => readPreferredLanguage());
+import { useLocalization } from "./i18n";
+import type { AppRoute } from "./routes";
+export function AppContainer({ onNavigate }: { onNavigate?: (route: AppRoute) => void }) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview>(() => emptyArtifactPreview());
   const [selectedCloudMode, setSelectedCloudMode] = useState<CloudMode>("local_only");
@@ -25,18 +24,7 @@ export function AppContainer() {
   const currentJob = jobSummary?.job ?? null;
   const artifacts = jobSummary?.artifacts ?? [];
   const latestRuntime = evidence.runtimeValidations.at(-1) ?? null;
-  const t = useMemo(() => (key: string) => translate(language, key), [language]);
-  const localization = useMemo<LocalizationValue>(
-    () => ({
-      language,
-      setLanguage: (nextLanguage) => {
-        setLanguageState(nextLanguage);
-        persistPreferredLanguage(nextLanguage);
-      },
-      t
-    }),
-    [language, t]
-  );
+  const { t } = useLocalization();
   const selectedArtifact = useMemo(
     () => artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? artifacts[0] ?? null,
     [artifacts, selectedArtifactId]
@@ -208,30 +196,29 @@ export function AppContainer() {
   };
 
   return (
-    <LocalizationContext.Provider value={localization}>
-      <AppView
-        apiBaseUrl={API_BASE_URL}
-        artifactPreview={artifactPreview}
-        artifacts={artifacts}
-        currentJob={currentJob}
-        data={data}
-        evidence={evidence}
-        isRefreshing={isRefreshing}
-        isRerunning={isRerunning}
-        isSubmitting={isSubmitting}
-        onArtifactSelect={setSelectedArtifactId}
-        onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
-        onFileChange={setSelectedUploadFile}
-        onRefreshJob={handleRefreshJob}
-        onRerunJob={handleRerunJob}
-        onSelectCloudMode={setSelectedCloudMode}
-        onSubmitJob={handleSubmitJob}
-        pollError={pollError}
-        selectedArtifact={selectedArtifact}
-        selectedCloudMode={selectedCloudMode}
-        selectedUploadFile={selectedUploadFile}
-        uploadError={uploadError}
-      />
-    </LocalizationContext.Provider>
+    <AppView
+      apiBaseUrl={API_BASE_URL}
+      artifactPreview={artifactPreview}
+      artifacts={artifacts}
+      currentJob={currentJob}
+      data={data}
+      evidence={evidence}
+      isRefreshing={isRefreshing}
+      isRerunning={isRerunning}
+      isSubmitting={isSubmitting}
+      onArtifactSelect={setSelectedArtifactId}
+      onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
+      onFileChange={setSelectedUploadFile}
+      onNavigate={onNavigate}
+      onRefreshJob={handleRefreshJob}
+      onRerunJob={handleRerunJob}
+      onSelectCloudMode={setSelectedCloudMode}
+      onSubmitJob={handleSubmitJob}
+      pollError={pollError}
+      selectedArtifact={selectedArtifact}
+      selectedCloudMode={selectedCloudMode}
+      selectedUploadFile={selectedUploadFile}
+      uploadError={uploadError}
+    />
   );
 }

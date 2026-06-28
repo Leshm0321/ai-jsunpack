@@ -8,15 +8,10 @@ import {
   Binary,
   Braces,
   CheckCircle2,
-  ChevronRight,
-  Download,
   FileCode2,
   GitBranch,
-  Languages,
-  Network,
   Radar,
   RefreshCw,
-  RotateCcw,
   SearchCode,
   ShieldCheck,
   Sparkles,
@@ -27,16 +22,16 @@ import {
 import type { Artifact, CloudMode, Job } from "@ai-jsunpack/shared";
 import { CLOUD_MODES } from "@ai-jsunpack/shared";
 import { useLocalization } from "./i18n";
-import type { Language } from "./i18n";
 import type { ArtifactPreview, JobEvidence, StageState, WorkbenchData } from "./workbench-types";
 import { ArtifactDetail, ArtifactList } from "./workbench-artifacts";
 import { AuditPanel } from "./workbench-audit";
 import { StatusBanner } from "./workbench-common";
 import { EvidenceGraphPanel } from "./workbench-graph";
-import { downloadJsonFile, formatBytes, formatTimestamp } from "./workbench-logic";
+import { formatBytes } from "./workbench-logic";
 import { ReportArtifactList } from "./workbench-report";
 import { RuntimePanel } from "./workbench-runtime";
 import { JobSummaryPanel, LanguageToggle, ModePill, PipelineMap, WorkspaceActions } from "./workbench-shell";
+import type { AppRoute } from "./routes";
 gsap.registerPlugin(useGSAP);
 
 function stageIcon(state: StageState) {
@@ -80,6 +75,7 @@ interface AppViewProps {
   onArtifactSelect: (artifactId: string) => void;
   onEvidenceArtifactSelect: (artifactId: string) => void;
   onFileChange: (file: File | null) => void;
+  onNavigate?: (route: AppRoute) => void;
   onRefreshJob: () => void;
   onRerunJob: () => void;
   onSelectCloudMode: (mode: CloudMode) => void;
@@ -104,6 +100,7 @@ export function AppView({
   onArtifactSelect,
   onEvidenceArtifactSelect,
   onFileChange,
+  onNavigate,
   onRefreshJob,
   onRerunJob,
   onSelectCloudMode,
@@ -128,7 +125,7 @@ export function AppView({
         (context) => {
           const reduceMotion = Boolean(context.conditions?.reduceMotion);
           if (reduceMotion) {
-            gsap.set(".motion-item, .topbar, .pipeline-node, .pipeline-status, .stage-step", {
+            gsap.set(".motion-item, .topbar, .workbench-nav-card, .pipeline-node, .pipeline-status, .stage-step", {
               autoAlpha: 1,
               x: 0,
               y: 0,
@@ -140,8 +137,7 @@ export function AppView({
           const timeline = gsap.timeline({ defaults: { duration: 0.46, ease: "power3.out" } });
           timeline
             .from(".topbar", { y: -16, autoAlpha: 0, duration: 0.36 })
-            .from(".entry-copy", { y: 24, autoAlpha: 0 }, "<0.08")
-            .from(".entry-visual", { y: 24, autoAlpha: 0, scale: 0.985 }, "<0.1")
+            .from(".workbench-nav-card", { y: 18, autoAlpha: 0, stagger: 0.055 }, "<0.08")
             .from(".pipeline-node, .pipeline-status", { x: 18, autoAlpha: 0, stagger: 0.045 }, "<0.08")
             .from(".workbench-panel", { y: 24, autoAlpha: 0, stagger: 0.055 }, "<0.08")
             .from(".stage-step", { x: -18, autoAlpha: 0, stagger: 0.045 }, "<0.05");
@@ -158,13 +154,14 @@ export function AppView({
   return (
     <div className="app-shell" ref={rootRef}>
       <header className="topbar">
-        <a className="brand" href="#overview" aria-label={t("app.aria.overview")}>
+        <button className="brand brand-button" type="button" onClick={() => onNavigate?.("/")} aria-label={t("site.aria.home")}>
           <span className="brand-mark">
             <Binary size={18} aria-hidden="true" />
           </span>
           <span>AI JS Unpack</span>
-        </a>
+        </button>
         <nav className="topnav" aria-label={t("app.aria.primaryNav")}>
+          <button type="button" onClick={() => onNavigate?.("/")}>{t("site.nav.home")}</button>
           <a href="#workflow">{t("nav.workflow")}</a>
           <a href="#audit">{t("nav.audit")}</a>
           <a href="#runtime">{t("nav.runtime")}</a>
@@ -173,24 +170,13 @@ export function AppView({
       </header>
 
       <main>
-        <section className="entry-band" id="overview">
-          <div className="entry-copy motion-item">
-            <p className="eyebrow">{t("hero.eyebrow")}</p>
-            <h1>{t("hero.title")}</h1>
-            <p className="entry-text">{t("hero.text")}</p>
-            <div className="entry-actions">
-              <button className="primary-action" type="button" onClick={() => fileInputRef.current?.click()}>
-                <Upload size={18} aria-hidden="true" />
-                {t("action.uploadBuild")}
-              </button>
-              <button className="secondary-action" type="button" onClick={onRefreshJob} disabled={!currentJob || isRefreshing}>
-                <RefreshCw size={18} aria-hidden="true" />
-                {t("action.refreshJob")}
-              </button>
-            </div>
+        <section className="workbench-overview" id="overview">
+          <div className="workbench-nav-card motion-item">
+            <p className="eyebrow">{t("workbench.eyebrow")}</p>
+            <h1>{t("workbench.title")}</h1>
+            <p>{t("workbench.text")}</p>
           </div>
-
-          <div className="entry-visual motion-item" aria-label={t("app.aria.pipelineOverview")}>
+          <div className="workbench-nav-card motion-item" aria-label={t("app.aria.pipelineOverview")}>
             <PipelineMap currentJob={currentJob} artifacts={artifacts} evidence={evidence} />
           </div>
         </section>
