@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Sequence
 from uuid import uuid4
@@ -36,6 +36,8 @@ from packages.sandbox import (
     SandboxCommand,
     SandboxPolicy,
     SandboxResult,
+    deployment_profile,
+    is_production_profile,
 )
 
 
@@ -109,6 +111,7 @@ class BuildValidationConfig:
     firecracker_runner_command: tuple[str, ...] | None = None
     sandbox_runtime_name: str | None = None
     sandbox_runtime_version: str | None = None
+    deployment_profile: str = "development"
 
 
 @dataclass(frozen=True)
@@ -222,7 +225,7 @@ class BuildValidationRunner:
             source_project_parents.append(generated_project_artifact.id)
 
         config = self._config(job_id=job_id, store=store)
-        self.sandbox_runner = self._provided_sandbox_runner or self._sandbox_runner_for_config(config)
+        self.sandbox_runner = self._runner_for_config(config)
         source_project_path = Path(project_path) if project_path is not None else None
         if source_project_path is None or not source_project_path.is_dir():
             local_artifact_path = (
@@ -939,7 +942,21 @@ class BuildValidationRunner:
             sandbox_runtime_version=self._optional_string_config(
                 config.get("sandboxRuntimeVersion") or os.getenv("AI_JSUNPACK_SANDBOX_RUNTIME_VERSION")
             ),
+            deployment_profile=deployment_profile(
+                raw_config.get("deploymentProfile") if isinstance(raw_config, dict) else None
+            ),
         )
+
+    def _runner_for_config(
+        self,
+        config: BuildValidationConfig,
+    ) -> LocalSandboxRunner | ContainerSandboxRunner | GVisorSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner:
+        if self._provided_sandbox_runner is None:
+            return self._sandbox_runner_for_config(config)
+        runner = self._provided_sandbox_runner
+        if runner.policy.resource_policy.runner_kind == "local" and is_production_profile(config.deployment_profile):
+            return LocalSandboxRunner(replace(runner.policy, deployment_profile=config.deployment_profile))
+        return runner
 
     def _bool_config(self, value: Any, *, default: bool) -> bool:
         return value if isinstance(value, bool) else default
@@ -960,7 +977,7 @@ class BuildValidationRunner:
         self,
         config: BuildValidationConfig,
     ) -> LocalSandboxRunner | ContainerSandboxRunner | GVisorSandboxRunner | FirecrackerSandboxRunner | ProfileOnlySandboxRunner:
-        policy = self._sandbox_policy()
+        policy = self._sandbox_policy(config)
         if config.sandbox_runner == "container":
             return ContainerSandboxRunner(
                 policy,
@@ -995,7 +1012,7 @@ class BuildValidationRunner:
             )
         return LocalSandboxRunner(policy)
 
-    def _sandbox_policy(self) -> SandboxPolicy:
+    def _sandbox_policy(self, config: BuildValidationConfig) -> SandboxPolicy:
         return SandboxPolicy(
             allowed_commands=(
                 self.build_command,
@@ -1007,6 +1024,7 @@ class BuildValidationRunner:
             ),
             timeout_ms=120_000,
             output_limit_bytes=128 * 1024,
+            deployment_profile=config.deployment_profile,
         )
 
     def _sandbox_runner_name(self, value: Any) -> SandboxRunnerKind:

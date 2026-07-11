@@ -1,0 +1,40 @@
+version: 1
+
+shared:
+  deploymentProfile: development
+  logLevel: info
+
+api:
+  host: 127.0.0.1
+  port: 8000
+  corsOrigins:
+    - http://127.0.0.1:5173
+    - http://localhost:5173
+  maxUploadBytes: 104857600
+  artifactRoot: tmp/local-dev/artifacts
+  database:
+    urlSecretRef: database/local
+
+worker:
+  sandbox:
+    runner: local
+    allowLocalInDevelopment: true
+  agent:
+    cloud:
+      provider: openai-compatible
+      model: null
+      baseUrl: null
+      apiKeySecretRef: ai/cloud
+    local:
+      provider: openai-compatible
+      model: qwen3-coder
+      baseUrl: http://127.0.0.1:11434/v1
+      apiKeySecretRef: ai/local
+
+browserRunner:
+  mode: local
+  baseUrl: null
+  tokenSecretRef: browser-runner/local
+
+web:
+  apiBaseUrl: http://127.0.0.1:8000

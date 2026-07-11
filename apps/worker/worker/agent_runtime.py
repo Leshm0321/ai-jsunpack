@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from typing import Any
+
+from pydantic import BaseModel
 
 from packages.knowledge import POST_CORE_KINDS, StaticKnowledgeRetriever
 from packages.memory import JobMemoryService
@@ -176,10 +179,46 @@ class CrewRuntimePlanner:
 
     def build_stage_order(self, specs: list[CrewAgentSpec]) -> list[tuple[CrewStageName, list[CrewAgentSpec]]]:
         order: list[CrewStageName] = ["planner", "analysis", "specialists", "synthesis", "review"]
+        self.validate_specs(specs, order=order)
         by_stage: dict[CrewStageName, list[CrewAgentSpec]] = {stage: [] for stage in order}
         for spec in specs:
             by_stage[spec.stage].append(spec)
         return [(stage, by_stage[stage]) for stage in order]
+
+    def validate_specs(self, specs: list[CrewAgentSpec], *, order: list[CrewStageName] | None = None) -> None:
+        stage_order = order or ["planner", "analysis", "specialists", "synthesis", "review"]
+        stage_indexes = {stage: index for index, stage in enumerate(stage_order)}
+        by_name = {spec.name: spec for spec in specs}
+        if len(by_name) != len(specs):
+            raise AgentRuntimeError("Agent execution plan contains duplicate agent names.")
+        for spec in specs:
+            if spec.stage not in stage_indexes:
+                raise AgentRuntimeError(f"Agent {spec.name} uses unsupported stage {spec.stage!r}.")
+            for dependency in spec.dependencies:
+                dependency_spec = by_name.get(dependency)
+                if dependency_spec is None:
+                    raise AgentRuntimeError(f"Agent {spec.name} depends on missing agent {dependency}.")
+                if stage_indexes[dependency_spec.stage] >= stage_indexes[spec.stage]:
+                    raise AgentRuntimeError(
+                        f"Agent {spec.name} dependency {dependency} must belong to an earlier stage."
+                    )
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visiting:
+                raise AgentRuntimeError(f"Agent execution plan contains a dependency cycle at {name}.")
+            if name in visited:
+                return
+            visiting.add(name)
+            for dependency in by_name[name].dependencies:
+                visit(dependency)
+            visiting.remove(name)
+            visited.add(name)
+
+        for name in by_name:
+            visit(name)
 
 
 class CrewConflictDetector:
@@ -236,46 +275,30 @@ class CrewExecutionManager:
 
         for stage_name, stage_specs in stage_order:
             stage_started = time.perf_counter()
-            stage_executions: list[CrewAgentExecution] = []
-            for spec in stage_specs:
-                execution = self.adapter.execute_agent(
-                    spec=spec,
-                    policy=context.policy,
-                    prompt_context=self._prompt_context_for_agent(
+            if len(stage_specs) > 1 and all(spec.allow_parallel for spec in stage_specs):
+                with ThreadPoolExecutor(max_workers=len(stage_specs), thread_name_prefix=f"agent-{stage_name}") as executor:
+                    futures = {
+                        spec.name: executor.submit(
+                            self._execute_spec,
+                            context=context,
+                            spec=spec,
+                            stages=stages,
+                            executions_by_name=executions_by_name,
+                        )
+                        for spec in stage_specs
+                    }
+                    stage_executions = [futures[spec.name].result() for spec in stage_specs]
+            else:
+                stage_executions = [
+                    self._execute_spec(
                         context=context,
                         spec=spec,
                         stages=stages,
                         executions_by_name=executions_by_name,
-                    ),
-                    input_artifact_ids=[
-                        *context.request.input_artifact_ids,
-                        *context.memory_artifact_ids,
-                        context.knowledge_artifact.id,
-                        context.tool_registry_artifact.id,
-                    ],
-                    evidence_refs=context.evidence_refs,
-                )
-                stage_executions.append(
-                    CrewAgentExecution(
-                        spec=execution.spec,
-                        status=execution.status,
-                        failure_class=execution.failure_class,
-                        attempt=execution.attempt,
-                        duration_ms=round((time.perf_counter() - stage_started) * 1000, 3) if len(stage_specs) == 1 else 0.0,
-                        input_artifact_ids=execution.input_artifact_ids,
-                        evidence_refs=execution.evidence_refs,
-                        message=execution.message,
-                        raw_output=execution.raw_output,
-                        inferences=execution.inferences,
-                        runtime_diagnoses=execution.runtime_diagnoses,
-                        report_sections=execution.report_sections,
-                        repair_instructions=execution.repair_instructions,
-                        review=execution.review,
-                        model_provider=execution.model_provider,
-                        model_name=execution.model_name,
                     )
-                )
-                executions_by_name[spec.name] = stage_executions[-1]
+                    for spec in stage_specs
+                ]
+            executions_by_name.update({execution.spec.name: execution for execution in stage_executions})
 
             status = self._stage_status(stage_executions)
             failure_class = self._stage_failure_class(stage_executions)
@@ -303,6 +326,65 @@ class CrewExecutionManager:
 
         return stages, self._aggregate_provider_draft(context=context, stages=stages)
 
+    def _execute_spec(
+        self,
+        *,
+        context: RuntimeContext,
+        spec: CrewAgentSpec,
+        stages: list[CrewStageExecution],
+        executions_by_name: dict[str, CrewAgentExecution],
+    ) -> CrewAgentExecution:
+        started = time.perf_counter()
+        blocked = [
+            executions_by_name[name]
+            for name in spec.dependencies
+            if name in executions_by_name
+            and (
+                executions_by_name[name].status in {"fail", "retry", "skipped"}
+                or executions_by_name[name].failure_class != "none"
+            )
+        ]
+        if blocked:
+            first = blocked[0]
+            return CrewAgentExecution(
+                spec=spec,
+                status="skipped",
+                failure_class=first.failure_class if first.failure_class != "none" else "agent_failed",
+                attempt=0,
+                duration_ms=0.0,
+                input_artifact_ids=self._input_artifact_ids(context),
+                evidence_refs=context.evidence_refs,
+                message=f"{spec.name} skipped because dependency {first.spec.name} did not complete successfully.",
+                model_provider=context.policy.model_provider,
+                model_name=context.policy.model_name,
+                model_base_url_configured=context.policy.base_url_configured,
+                model_api_key_configured=context.policy.api_key_configured,
+                model_custom_endpoint_enabled=context.policy.custom_endpoint_enabled,
+                model_timeout_seconds=context.policy.timeout_seconds,
+                model_temperature=context.policy.temperature,
+            )
+        execution = self.adapter.execute_agent(
+            spec=spec,
+            policy=context.policy,
+            prompt_context=self._prompt_context_for_agent(
+                context=context,
+                spec=spec,
+                stages=stages,
+                executions_by_name=executions_by_name,
+            ),
+            input_artifact_ids=self._input_artifact_ids(context),
+            evidence_refs=context.evidence_refs,
+        )
+        return replace(execution, duration_ms=round((time.perf_counter() - started) * 1000, 3))
+
+    def _input_artifact_ids(self, context: RuntimeContext) -> list[str]:
+        return [
+            *context.request.input_artifact_ids,
+            *context.memory_artifact_ids,
+            context.knowledge_artifact.id,
+            context.tool_registry_artifact.id,
+        ]
+
     def _prompt_context_for_agent(
         self,
         *,
@@ -321,6 +403,11 @@ class CrewExecutionManager:
                 "repairInstructionCount": len(execution.repair_instructions),
             }
             for name, execution in executions_by_name.items()
+        }
+        dependency_outputs = {
+            name: self._structured_output_for_context(executions_by_name[name])
+            for name in spec.dependencies
+            if name in executions_by_name
         }
         conflict_summary = [
             {
@@ -348,6 +435,7 @@ class CrewExecutionManager:
                 "dependencies": spec.dependencies,
             },
             "completedAgents": completed,
+            "dependencyOutputs": dependency_outputs,
             "stageSummaries": [
                 {
                     "stage": stage.stage,
@@ -361,6 +449,30 @@ class CrewExecutionManager:
             "plannedAgents": list(CREW_AGENT_NAMES),
         }
 
+    def _structured_output_for_context(self, execution: CrewAgentExecution) -> dict[str, Any]:
+        return {
+            "status": execution.status,
+            "failureClass": execution.failure_class,
+            "message": execution.message,
+            "rawOutput": self._context_value(execution.raw_output),
+            "inferences": self._context_value(execution.inferences),
+            "runtimeDiagnoses": self._context_value(execution.runtime_diagnoses),
+            "reportSections": self._context_value(execution.report_sections),
+            "repairInstructions": self._context_value(execution.repair_instructions),
+            "review": self._context_value(execution.review),
+        }
+
+    def _context_value(self, value: Any) -> Any:
+        if isinstance(value, BaseModel):
+            return value.model_dump(by_alias=True, exclude_none=True)
+        if is_dataclass(value) and not isinstance(value, type):
+            return self._context_value(asdict(value))
+        if isinstance(value, dict):
+            return {str(key): self._context_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._context_value(item) for item in value]
+        return value
+
     def _aggregate_provider_draft(self, *, context: RuntimeContext, stages: list[CrewStageExecution]) -> AgentProviderDraft:
         executions = [execution for stage in stages for execution in stage.agent_executions]
         planner = next((execution for execution in executions if execution.spec.name == "PlannerAgent"), None)
@@ -370,10 +482,14 @@ class CrewExecutionManager:
         aggregated_runtime_diagnoses = [draft for execution in executions for draft in execution.runtime_diagnoses]
         aggregated_report_sections = [draft for execution in executions for draft in execution.report_sections]
         aggregated_repairs = [draft for execution in executions for draft in execution.repair_instructions]
+        fallback_failure_class = next(
+            (stage.failure_class for stage in stages if stage.failure_class != "none"),
+            "unknown",
+        )
         review = review_execution.review if review_execution is not None and review_execution.review is not None else AgentReviewDraft(
             status="best_effort",
             decision="CrewAI runtime completed without an explicit ReviewAgent verdict.",
-            failure_class="unknown",
+            failure_class=fallback_failure_class,  # type: ignore[arg-type]
         )
 
         plan_payload = {
@@ -535,7 +651,7 @@ class CrewExecutionManager:
         statuses = {stage.status for stage in stages}
         if "fail" in statuses:
             return "agent_failed"
-        if "best_effort" in statuses or "retry" in statuses:
+        if "best_effort" in statuses or "retry" in statuses or "skipped" in statuses:
             return "completed_best_effort"
         return "completed"
 
@@ -549,6 +665,8 @@ class CrewExecutionManager:
             return "retry"
         if statuses == {"skipped"}:
             return "skipped"
+        if "skipped" in statuses:
+            return "best_effort"
         return "pass"
 
     def _stage_failure_class(self, executions: list[CrewAgentExecution]) -> str:

@@ -90,6 +90,30 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(typecheck_log["status"], "pass")
         self.assertIn("type ok", typecheck_log["stdout"])
 
+    def test_production_job_config_denies_injected_local_runner(self):
+        job = self.store.create_job(
+            CreateJobRequest(
+                project_id="proj",
+                owner_id="owner",
+                config={"deploymentProfile": "production"},
+            )
+        )
+        project_root = self.root / "generated-production"
+        project_root.mkdir()
+        (project_root / "package.json").write_text("{}", encoding="utf-8")
+        runner = BuildValidationRunner(
+            sandbox_runner=LocalSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),))),
+            build_command=(sys.executable, "-c", "print('must not run')"),
+            typecheck_command=(sys.executable, "-c", "print('must not run')"),
+        )
+
+        result = runner.run(job_id=job.id, store=self.store, project_path=project_root)
+
+        self.assertEqual(result.build.review_run.failure_class, "sandbox_denied")
+        self.assertEqual(result.typecheck.review_run.failure_class, "sandbox_denied")
+        build_log = json.loads(Path(result.build.log_artifact.storage_uri).read_text(encoding="utf-8"))
+        self.assertIn("production deployment profile", build_log["stderr"])
+
     def test_extracts_typescript_diagnostics_into_build_artifact(self):
         project_root = self.root / "generated"
         project_root.mkdir()

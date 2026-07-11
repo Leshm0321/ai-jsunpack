@@ -46,15 +46,7 @@ class CoreBridge:
             "--job-id",
             job_id,
         ]
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except OSError as error:
-            raise CoreBridgeError(f"Failed to launch Core CLI: {error}") from error
+        result = self._run_core_cli(command)
 
         if result.returncode != 0:
             stderr = result.stderr.strip() or "Core CLI failed without stderr."
@@ -95,15 +87,7 @@ class CoreBridge:
             "--output-dir",
             str(Path(output_dir)),
         ]
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except OSError as error:
-            raise CoreBridgeError(f"Failed to launch Core CLI: {error}") from error
+        result = self._run_core_cli(command)
 
         if result.returncode != 0:
             stderr = result.stderr.strip() or "Core CLI reconstruct failed without stderr."
@@ -129,6 +113,19 @@ class CoreBridge:
             generated_project_manifest_payload=generated_project_manifest_payload,
             generated_project_path=Path(generated_project_path),
         )
+
+    def _run_core_cli(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as error:
+            raise CoreBridgeError(f"Failed to launch Core CLI: {error}") from error
 
     def _default_cli_path(self) -> Path:
         return Path(__file__).resolve().parents[3] / "packages" / "core" / "dist" / "cli.js"

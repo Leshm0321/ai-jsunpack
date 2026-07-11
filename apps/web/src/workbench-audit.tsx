@@ -359,7 +359,7 @@ export function AuditRiskGroupRows({
         <tr className={selectedRecordIds.has(record.id) ? "audit-selected-row" : undefined} key={record.id}>
           <td>
             <input
-              aria-label={`Select audit record ${record.label}`}
+              aria-label={`${t("audit.selectRecord")} ${record.label}`}
               checked={selectedRecordIds.has(record.id)}
               onChange={() => onRecordSelectionToggle(record.id)}
               type="checkbox"

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import os
+import socket
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
 from apps.api.app.models import CloudMode, EvidenceRef, FailureClass, InferenceType, InferenceValidationStatus, RunStatus
 from packages.knowledge import KnowledgeHit
 from packages.memory import JobMemoryContext
+from packages.sandbox import is_production_profile
 
 from .agent_context import AgentContextBuilder, AgentContextRedactor
 from .agent_contracts import (
@@ -26,7 +32,6 @@ from .agent_contracts import (
     CREWAI_DATA_ROOT_ENV,
     CREW_AGENT_NAMES,
     CrewAgentExecution,
-    CrewAgentPassOutput,
     CrewAgentSpec,
     CrewExecutionStatus,
     CrewInferenceOutput,
@@ -52,6 +57,8 @@ from .agent_feedback import AgentFeedbackRefiner
 
 OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 30.0
+DEFAULT_BACKEND_FAILURE_CACHE_SECONDS = 30.0
+BACKEND_FAILURE_CACHE_SECONDS_ENV = "AI_JSUNPACK_AGENT_FAILURE_CACHE_SECONDS"
 
 
 class ModelPolicyResolver:
@@ -75,6 +82,7 @@ class ModelPolicyResolver:
             denial_reason="cloud_allowed mode requires config.agentModel or AI_JSUNPACK_AGENT_MODEL.",
             base_url=base_url,
             api_key=api_key,
+            endpoint_is_cloud=True,
         )
 
     def _local_only(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
@@ -90,6 +98,7 @@ class ModelPolicyResolver:
             denial_reason="local_only mode requires config.localAgentModel or AI_JSUNPACK_LOCAL_AGENT_MODEL.",
             base_url=base_url,
             api_key=api_key,
+            endpoint_is_cloud=False,
         )
 
     def _desensitized(self, request: AgentRuntimeRequest) -> AgentModelPolicy:
@@ -115,6 +124,7 @@ class ModelPolicyResolver:
             ),
             base_url=cloud_base_url if use_cloud_endpoint else local_base_url,
             api_key=cloud_api_key if use_cloud_endpoint else local_api_key,
+            endpoint_is_cloud=use_cloud_endpoint,
         )
 
     def _policy(
@@ -127,13 +137,18 @@ class ModelPolicyResolver:
         denial_reason: str,
         base_url: str | None,
         api_key: str | None,
+        endpoint_is_cloud: bool,
     ) -> AgentModelPolicy:
         timeout_seconds = self._positive_float_or_default(
             self._env_value(AGENT_TIMEOUT_SECONDS_ENV),
             default=DEFAULT_AGENT_TIMEOUT_SECONDS,
         )
         temperature = self._optional_float(self._env_value(AGENT_TEMPERATURE_ENV))
-        if model_name:
+        endpoint_error = self._endpoint_policy_error(
+            base_url=base_url,
+            endpoint_is_cloud=endpoint_is_cloud,
+        )
+        if model_name and endpoint_error is None:
             return AgentModelPolicy(
                 allowed=True,
                 cloud_mode=cloud_mode,
@@ -153,12 +168,48 @@ class ModelPolicyResolver:
             model_name="unconfigured",
             prompt_version=AGENT_PROMPT_VERSION,
             sanitized_context=sanitized_context,
-            denial_reason=denial_reason,
+            denial_reason=endpoint_error or denial_reason,
             base_url=base_url,
             api_key=api_key,
             timeout_seconds=timeout_seconds,
             temperature=temperature,
         )
+
+    def _endpoint_policy_error(self, *, base_url: str | None, endpoint_is_cloud: bool) -> str | None:
+        if not base_url:
+            return None
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            return "OpenAI-compatible endpoint must use http or https."
+        if not parsed.hostname:
+            return "OpenAI-compatible endpoint must include a hostname."
+        if parsed.username or parsed.password:
+            return "OpenAI-compatible endpoint must not include credentials in the URL."
+        if endpoint_is_cloud and is_production_profile() and parsed.scheme != "https":
+            return "Production cloud AI endpoints must use https."
+        if endpoint_is_cloud and self._hostname_is_private(parsed.hostname, parsed.port):
+            return "Cloud AI endpoints must not resolve to loopback, private, link-local, or reserved addresses."
+        return None
+
+    def _hostname_is_private(self, hostname: str, port: int | None) -> bool:
+        normalized = hostname.rstrip(".").lower()
+        if normalized == "localhost" or normalized.endswith(".localhost"):
+            return True
+        addresses: set[str] = set()
+        with contextlib.suppress(ValueError):
+            addresses.add(str(ipaddress.ip_address(normalized)))
+        if not addresses:
+            with contextlib.suppress(OSError):
+                addresses.update(
+                    info[4][0]
+                    for info in socket.getaddrinfo(normalized, port or 443, type=socket.SOCK_STREAM)
+                )
+        for address in addresses:
+            with contextlib.suppress(ValueError):
+                parsed = ipaddress.ip_address(address)
+                if not parsed.is_global:
+                    return True
+        return False
 
     def _config_or_env(self, config: dict[str, Any], key: str, env_name: str) -> str | None:
         value = config.get(key)
@@ -253,9 +304,18 @@ class OpenAICompatibleCrewAILLM:
                 headers = {"Content-Type": "application/json", "Accept": "application/json"}
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"
-                chat_request = request.Request(self._endpoint, data=body, headers=headers, method="POST")
+                # The endpoint is normalized and restricted to HTTP(S) before the adapter is constructed.
+                chat_request = request.Request(  # noqa: S310
+                    self._endpoint,
+                    data=body,
+                    headers=headers,
+                    method="POST",
+                )
                 try:
-                    with request.urlopen(chat_request, timeout=self._request_timeout_seconds) as response:
+                    with request.urlopen(  # nosec B310  # noqa: S310
+                        chat_request,
+                        timeout=self._request_timeout_seconds,
+                    ) as response:
                         raw = response.read()
                 except TimeoutError as exc:
                     raise OpenAICompatibleLLMError(
@@ -319,6 +379,11 @@ class OpenAICompatibleCrewAILLM:
                 normalized = raw_base_url.strip().rstrip("/")
                 if not normalized:
                     raise ValueError("OpenAI-compatible base URL cannot be empty.")
+                parsed = urlparse(normalized)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise ValueError("OpenAI-compatible base URL must use http or https and include a hostname.")
+                if parsed.username or parsed.password:
+                    raise ValueError("OpenAI-compatible base URL must not include credentials.")
                 if normalized.endswith("/chat/completions"):
                     return normalized
                 if normalized.endswith("/v1"):
@@ -350,7 +415,8 @@ def prepare_crewai_storage() -> None:
 
         appdirs.user_data_dir = project_user_data_dir
     except Exception:
-        pass
+        # CrewAI can still use the environment-backed storage path when appdirs is unavailable.
+        return
 
 
 class CrewAIBackend:
@@ -446,7 +512,12 @@ class CrewAIExecutionAdapter:
         self.feedback_refiner = feedback_refiner or AgentFeedbackRefiner()
         self.context_builder = context_builder or AgentContextBuilder()
         self.backend = backend or CrewAIBackend()
-        self._cached_backend_failures: dict[str, str] = {}
+        self._cached_backend_failures: dict[tuple[str, str, str], tuple[float, str]] = {}
+        self._failure_cache_lock = threading.Lock()
+        self._failure_cache_seconds = self._positive_float_env(
+            BACKEND_FAILURE_CACHE_SECONDS_ENV,
+            DEFAULT_BACKEND_FAILURE_CACHE_SECONDS,
+        )
 
     def prepare_context(
         self,
@@ -503,7 +574,8 @@ class CrewAIExecutionAdapter:
                 input_artifact_ids=input_artifact_ids,
                 evidence_refs=evidence_refs,
             )
-        cached_failure = self._cached_backend_failures.get(policy.model_name)
+        cache_key = self._failure_cache_key(policy)
+        cached_failure = self._cached_failure(cache_key)
         if cached_failure:
             return self._failed_execution(
                 spec=spec,
@@ -516,7 +588,7 @@ class CrewAIExecutionAdapter:
         try:
             output = self.backend.run_agent(spec=spec, prompt_context=prompt_context, policy=policy)
         except Exception as error:
-            self._cached_backend_failures[policy.model_name] = str(error)
+            self._cache_failure(cache_key, str(error))
             return self._failed_execution(
                 spec=spec,
                 policy=policy,
@@ -524,6 +596,8 @@ class CrewAIExecutionAdapter:
                 evidence_refs=evidence_refs,
                 error=error,
             )
+        with self._failure_cache_lock:
+            self._cached_backend_failures.pop(cache_key, None)
         return self._execution_from_output(
             spec=spec,
             policy=policy,
@@ -531,6 +605,36 @@ class CrewAIExecutionAdapter:
             evidence_refs=evidence_refs,
             output=output,
         )
+
+    def _failure_cache_key(self, policy: AgentModelPolicy) -> tuple[str, str, str]:
+        return (
+            policy.model_provider.strip().lower(),
+            policy.model_name.strip(),
+            (policy.base_url or "").strip().rstrip("/").lower(),
+        )
+
+    def _cached_failure(self, key: tuple[str, str, str]) -> str | None:
+        now = time.monotonic()
+        with self._failure_cache_lock:
+            cached = self._cached_backend_failures.get(key)
+            if cached is None:
+                return None
+            expires_at, message = cached
+            if expires_at <= now:
+                self._cached_backend_failures.pop(key, None)
+                return None
+            return message
+
+    def _cache_failure(self, key: tuple[str, str, str], message: str) -> None:
+        with self._failure_cache_lock:
+            self._cached_backend_failures[key] = (time.monotonic() + self._failure_cache_seconds, message)
+
+    def _positive_float_env(self, name: str, default: float) -> float:
+        with contextlib.suppress(ValueError):
+            value = float(os.getenv(name, str(default)))
+            if value > 0:
+                return value
+        return default
 
     def _execution_from_output(
         self,

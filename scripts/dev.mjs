@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const command = process.argv[2];
 const flags = new Set(process.argv.slice(3));
+const configFile = argumentValue(process.argv.slice(3), "--config");
 
 const commands = new Set(["api", "web", "worker", "browser-runner", "check"]);
 
@@ -14,14 +15,30 @@ if (!commands.has(command)) {
   usage(command ? `未知命令：${command}` : null);
 }
 
-const baseEnv = {
+let baseEnv = {
   ...process.env,
   ...loadDotEnv(resolve(repoRoot, ".env")),
 };
+let applicationConfig = null;
+if (configFile) {
+  baseEnv.AI_JSUNPACK_CONFIG_FILE = resolve(repoRoot, configFile);
+  applicationConfig = loadApplicationConfig(baseEnv);
+  baseEnv = {
+    ...baseEnv,
+    VITE_API_BASE_URL:
+      applicationConfig.web?.apiBaseUrl || baseEnv.VITE_API_BASE_URL || "http://127.0.0.1:8000",
+    AI_JSUNPACK_DEPLOYMENT_PROFILE:
+      applicationConfig.shared?.deploymentProfile || baseEnv.AI_JSUNPACK_DEPLOYMENT_PROFILE || "development",
+  };
+}
 
 switch (command) {
   case "api":
-    run("python", ["-m", "uvicorn", "apps.api.app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"], {
+    run("python", [
+      "-m", "uvicorn", "apps.api.app.main:app", "--reload",
+      "--host", applicationConfig?.api?.host || "127.0.0.1",
+      "--port", String(applicationConfig?.api?.port || 8000)
+    ], {
       ...baseEnv,
       AI_JSUNPACK_SERVICE_ROLE: "api",
     });
@@ -87,6 +104,31 @@ function loadDotEnv(path) {
     }
   }
   return env;
+}
+
+function argumentValue(args, name) {
+  const index = args.indexOf(name);
+  if (index === -1) {
+    return null;
+  }
+  const value = args[index + 1];
+  if (!value || value.startsWith("-")) {
+    usage(`${name} requires a file path`);
+  }
+  return value;
+}
+
+function loadApplicationConfig(env) {
+  const result = spawnSync(
+    "python",
+    ["-m", "packages.configuration", "print-effective", env.AI_JSUNPACK_CONFIG_FILE],
+    { cwd: repoRoot, env, encoding: "utf8" }
+  );
+  if (result.status !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    throw new Error(`Unable to load application config: ${output || `exit ${result.status}`}`);
+  }
+  return JSON.parse(result.stdout);
 }
 
 function workerEnv(env, optionFlags) {
@@ -196,10 +238,10 @@ function usage(error) {
   }
   console.error(`
 用法:
-  node scripts/dev.mjs api
-  node scripts/dev.mjs web
-  node scripts/dev.mjs worker [--use-browser-runner]
-  node scripts/dev.mjs browser-runner
+  node scripts/dev.mjs api [--config config/ai-jsunpack.yaml]
+  node scripts/dev.mjs web [--config config/ai-jsunpack.yaml]
+  node scripts/dev.mjs worker [--use-browser-runner] [--config config/ai-jsunpack.yaml]
+  node scripts/dev.mjs browser-runner [--config config/ai-jsunpack.yaml]
   node scripts/dev.mjs check
 `);
   process.exit(error ? 1 : 0);

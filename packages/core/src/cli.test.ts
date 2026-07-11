@@ -58,6 +58,29 @@ test("core CLI analyzes archive input", async () => {
   }
 });
 
+test("core CLI analyzes single JavaScript input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-single-js-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(inputPath, "function cliSingle(){return 1} const value = cliSingle();");
+
+    const output = await runCli(["analyze", inputPath, "--job-id", "job_cli_single_js"]);
+    const parsed = JSON.parse(output) as {
+      inventoryArtifactPayload: { inventory: { entries: string[]; scripts: string[]; warnings: string[]; isSingleBundle: boolean } };
+      astIndexArtifactPayload: { astIndexes: Array<{ symbols: Array<{ name: string }> }>; detectedRuntime: string[] };
+    };
+
+    assert.deepEqual(parsed.inventoryArtifactPayload.inventory.entries, ["index.html"]);
+    assert.deepEqual(parsed.inventoryArtifactPayload.inventory.scripts, ["agentApi.js"]);
+    assert.equal(parsed.inventoryArtifactPayload.inventory.isSingleBundle, true);
+    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("single_script file was wrapped")));
+    assert.ok(parsed.astIndexArtifactPayload.detectedRuntime.includes("single_bundle_best_effort"));
+    assert.ok(parsed.astIndexArtifactPayload.astIndexes[0].symbols.some((symbol) => symbol.name === "cliSingle"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("core CLI reconstruct emits plan payload and generated project manifest", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-"));
   try {
@@ -111,6 +134,30 @@ test("core CLI reconstruct accepts archive input", async () => {
     assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
     assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("zip archive")));
     assert.equal(copiedSource, "function cliReconstructZip(){return 1} export { cliReconstructZip };");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core CLI reconstruct accepts single JavaScript input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-single-js-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    const outputDir = path.join(root, "generated");
+    await writeFile(inputPath, "function cliReconstructSingle(){return 1} const value = cliReconstructSingle();");
+
+    const output = await runCli(["reconstruct", inputPath, "--job-id", "job_cli_reconstruct_single_js", "--output-dir", outputDir]);
+    const parsed = JSON.parse(output) as {
+      generatedProjectManifestPayload: { manifest: { copiedSourceFiles: string[]; limitations: string[] } };
+    };
+    const copiedScript = await readFile(path.join(outputDir, "public", "original", "agentApi.js"), "utf8");
+    const hostHtml = await readFile(path.join(outputDir, "public", "original", "index.html"), "utf8");
+
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/agentApi.js"));
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/index.html"));
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("single_script file was wrapped")));
+    assert.equal(copiedScript, "function cliReconstructSingle(){return 1} const value = cliReconstructSingle();");
+    assert.ok(hostHtml.includes('<script src="./agentApi.js"></script>'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

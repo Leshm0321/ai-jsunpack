@@ -46,6 +46,7 @@ from apps.worker.worker.runtime_smoke import (
     PlaywrightBrowserAdapter,
     RuntimeSmokeError,
 )
+from packages.configuration import apply_application_config_to_environment
 from packages.deployment import DeploymentConfigurationError, validate_current_environment
 
 BROWSER_RUNNER_WORKERS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_WORKERS"
@@ -71,6 +72,8 @@ DEFAULT_BROWSER_RUNNER_MAX_CLAIM_LATENCY_MS = 60_000
 DEFAULT_BROWSER_RUNNER_MAX_EXPIRED_RUNNING = 0
 DEFAULT_BROWSER_RUNNER_MAX_RETRY_RATE = 0.25
 TERMINAL_BROWSER_RUN_STATUSES = {"pass", "fail", "best_effort"}
+
+apply_application_config_to_environment("browser-runner")
 
 try:
     DEPLOYMENT_PROFILE = validate_current_environment("browser-runner")

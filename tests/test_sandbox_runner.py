@@ -28,6 +28,16 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertIn("not allowed", result.denied_reason or "")
 
+    def test_production_profile_denies_allowed_local_command(self):
+        runner = LocalSandboxRunner(
+            SandboxPolicy(allowed_commands=((sys.executable,),), deployment_profile="production")
+        )
+
+        result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('nope')")))
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertIn("production deployment profile", result.denied_reason or "")
+
     def test_runs_allowed_command_in_clean_temporary_workspace(self):
         secret_name = "AI_JSUNPACK_TEST_SECRET"
         os.environ[secret_name] = "secret"

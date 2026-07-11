@@ -6,7 +6,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, insert, inspect, select, text, update
+from sqlalchemy import (
+    JSON,
+    Column,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    UniqueConstraint,
+    create_engine,
+    insert,
+    inspect,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Engine
 
 from .artifact_store import (
@@ -36,6 +51,9 @@ from .models import (
     RetentionCleanupRequest,
     RetentionCleanupResult,
     SensitivityClass,
+    SettingScope,
+    SettingsRevision,
+    SettingsSnapshot,
     new_artifact_id,
     new_job_id,
     utc_now,
@@ -168,6 +186,20 @@ ops_alert_events_table = Table(
     Column("updated_at", String, nullable=False),
 )
 
+settings_revisions_table = Table(
+    "settings_revisions",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("scope", String, nullable=False, index=True),
+    Column("scope_id", String, nullable=False, index=True),
+    Column("revision", Integer, nullable=False),
+    Column("settings", JSON, nullable=False),
+    Column("actor_id", String, nullable=False),
+    Column("reason", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    UniqueConstraint("scope", "scope_id", "revision", name="uq_settings_revision_scope"),
+)
+
 
 class DatabaseStore:
     def __init__(
@@ -178,7 +210,11 @@ class DatabaseStore:
         engine: Engine | None = None,
     ) -> None:
         self.database_url = database_url or os.getenv(DATABASE_URL_ENV, DEFAULT_DATABASE_URL)
-        self.engine: Engine = engine or create_engine(self.database_url, future=True)
+        self.engine: Engine = engine or create_engine(
+            self.database_url,
+            future=True,
+            json_deserializer=safe_json_deserialize,
+        )
         self._owns_engine = engine is None
         self.artifact_root = Path(artifact_root or os.getenv(ARTIFACT_ROOT_ENV, "artifacts"))
         self.artifact_root.mkdir(parents=True, exist_ok=True)
@@ -198,6 +234,106 @@ class DatabaseStore:
     def close(self) -> None:
         if self._owns_engine:
             self.engine.dispose()
+
+    def get_settings(self, scope: SettingScope, scope_id: str | None = None) -> SettingsSnapshot:
+        self.initialize()
+        normalized_scope_id = normalize_settings_scope_id(scope, scope_id)
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(settings_revisions_table)
+                .where(settings_revisions_table.c.scope == scope)
+                .where(settings_revisions_table.c.scope_id == normalized_scope_id)
+                .order_by(settings_revisions_table.c.revision.desc())
+                .limit(1)
+            ).mappings().first()
+        if row is None:
+            return SettingsSnapshot(scope=scope, scope_id=scope_id, revision=0, settings={})
+        revision = self._settings_revision_from_row(row)
+        return SettingsSnapshot(
+            scope=scope,
+            scope_id=scope_id,
+            revision=revision.revision,
+            settings=revision.settings,
+            updated_at=revision.created_at,
+        )
+
+    def get_settings_revision(
+        self,
+        scope: SettingScope,
+        revision: int,
+        scope_id: str | None = None,
+    ) -> SettingsRevision | None:
+        self.initialize()
+        normalized_scope_id = normalize_settings_scope_id(scope, scope_id)
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(settings_revisions_table)
+                .where(settings_revisions_table.c.scope == scope)
+                .where(settings_revisions_table.c.scope_id == normalized_scope_id)
+                .where(settings_revisions_table.c.revision == revision)
+            ).mappings().first()
+        return self._settings_revision_from_row(row) if row is not None else None
+
+    def list_settings_revisions(
+        self,
+        scope: SettingScope,
+        scope_id: str | None = None,
+        *,
+        limit: int = 100,
+    ) -> list[SettingsRevision]:
+        self.initialize()
+        normalized_scope_id = normalize_settings_scope_id(scope, scope_id)
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(settings_revisions_table)
+                .where(settings_revisions_table.c.scope == scope)
+                .where(settings_revisions_table.c.scope_id == normalized_scope_id)
+                .order_by(settings_revisions_table.c.revision.desc())
+                .limit(max(1, min(limit, 500)))
+            ).mappings().all()
+        return [self._settings_revision_from_row(row) for row in rows]
+
+    def write_settings_revision(
+        self,
+        scope: SettingScope,
+        settings: dict[str, Any],
+        *,
+        actor_id: str,
+        reason: str,
+        expected_revision: int,
+        scope_id: str | None = None,
+    ) -> SettingsRevision:
+        self.initialize()
+        normalized_scope_id = normalize_settings_scope_id(scope, scope_id)
+        try:
+            with self.engine.begin() as connection:
+                current_row = connection.execute(
+                    select(settings_revisions_table.c.revision)
+                    .where(settings_revisions_table.c.scope == scope)
+                    .where(settings_revisions_table.c.scope_id == normalized_scope_id)
+                    .order_by(settings_revisions_table.c.revision.desc())
+                    .limit(1)
+                ).first()
+                current_revision = int(current_row.revision) if current_row is not None else 0
+                if current_revision != expected_revision:
+                    raise ValueError(
+                        f"Settings revision conflict: expected {expected_revision}, current revision is {current_revision}"
+                    )
+                now = utc_now()
+                row = {
+                    "id": f"settings_{os.urandom(8).hex()}",
+                    "scope": scope,
+                    "scope_id": normalized_scope_id,
+                    "revision": current_revision + 1,
+                    "settings": settings,
+                    "actor_id": actor_id,
+                    "reason": reason.strip(),
+                    "created_at": now,
+                }
+                connection.execute(insert(settings_revisions_table).values(**row))
+        except IntegrityError as error:
+            raise ValueError("Settings revision conflict: another update was committed") from error
+        return self._settings_revision_from_row(row)
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
         self.initialize()
@@ -911,10 +1047,13 @@ class DatabaseStore:
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)
         data.setdefault("run_attempt", 0)
+        data["config"] = normalize_json_dict(data.get("config"))
+        data["worker_lease"] = normalize_optional_json_dict(data.get("worker_lease"))
         return JobRecord.model_validate(data)
 
     def _artifact_from_row(self, row: Any) -> ArtifactRecord:
         data = dict(row)
+        data["parent_artifact_ids"] = normalize_json_string_list(data.get("parent_artifact_ids"))
         data.setdefault("expires_at", None)
         data.setdefault("deleted_at", None)
         data.setdefault("deletion_reason", None)
@@ -937,6 +1076,12 @@ class DatabaseStore:
             "webhookUrlConfigured": False,
         }
         return OpsAlertEvent.model_validate(data)
+
+    def _settings_revision_from_row(self, row: Any) -> SettingsRevision:
+        data = dict(row)
+        data["scope_id"] = data.get("scope_id") or None
+        data["settings"] = normalize_json_dict(data.get("settings"))
+        return SettingsRevision.model_validate(data)
 
     def _ensure_jobs_queue_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("jobs")}
@@ -989,6 +1134,67 @@ def default_expires_at(retention_class: RetentionClass) -> str | None:
     if retention_class != "ephemeral":
         return None
     return (datetime.now(timezone.utc) + timedelta(days=EPHEMERAL_RETENTION_DAYS)).isoformat()
+
+
+def parse_json_text(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def safe_json_deserialize(value: str | bytes | bytearray | None) -> Any:
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def normalize_json_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        parsed = parse_json_text(value)
+        return parsed if isinstance(parsed, dict) else {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def normalize_optional_json_dict(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parsed = parse_json_text(value)
+        return parsed if isinstance(parsed, dict) else None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def normalize_json_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parsed = parse_json_text(value)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, str)]
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def normalize_settings_scope_id(scope: SettingScope, scope_id: str | None) -> str:
+    if scope == "system":
+        if scope_id not in {None, ""}:
+            raise ValueError("System settings must not include a scope id")
+        return ""
+    if not scope_id or not scope_id.strip():
+        raise ValueError("Project settings require a project id")
+    return scope_id.strip()
 
 
 def cleanup_matches(*, artifact: ArtifactRecord, request: RetentionCleanupRequest, now: datetime) -> bool:

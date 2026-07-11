@@ -27,9 +27,11 @@ export interface CoreAnalysisResult extends HeadlessAnalysisResult {
 export interface NormalizedInputPackage {
   rootDir: string;
   sourcePath: string;
-  sourceKind: "directory" | "zip" | "tar" | "tar_gz";
+  sourceKind: "directory" | "zip" | "tar" | "tar_gz" | "single_script";
   cleanup: () => Promise<void>;
 }
+
+type ArchiveInputKind = Extract<NormalizedInputPackage["sourceKind"], "zip" | "tar" | "tar_gz">;
 
 export interface ReconstructionPlan {
   kind: "reconstruction_plan";
@@ -354,13 +356,21 @@ const SUPPORTED_RUNTIME_MARKERS: Array<{ runtimeKind: RuntimeKind; markers: stri
   { runtimeKind: "parcel", markers: ["parcelRequire", "newRequire"] }
 ];
 
+const ARCHIVE_MAX_ENTRIES = 10_000;
+const ARCHIVE_MAX_FILE_BYTES = 64 * 1024 * 1024;
+const ARCHIVE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const ARCHIVE_MAX_COMPRESSION_RATIO = 200;
+
 export async function analyzeInputPackage(inputPath: string, config: AnalyzeInputConfig = {}): Promise<CoreAnalysisResult> {
   const normalized = config.rootDir ? undefined : await normalizeInputPackage(inputPath);
   try {
     const rootDir = path.resolve(config.rootDir ?? normalized?.rootDir ?? inputPath);
     const sourceKind = config.inputSourceKind ?? normalized?.sourceKind;
     const inventory = await buildInputInventory(rootDir);
-    if (sourceKind && sourceKind !== "directory") {
+    if (sourceKind === "single_script") {
+      inventory.isSingleBundle = inventory.scripts.length === 1;
+      inventory.warnings.unshift("Input single_script file was wrapped in a verified temporary static host page.");
+    } else if (sourceKind && sourceKind !== "directory") {
       inventory.warnings.unshift(`Input ${sourceKind} archive was extracted into a verified temporary workspace.`);
     }
     const sourceMapAnalysis = await analyzeSourceMaps(rootDir, inventory);
@@ -404,12 +414,15 @@ export async function normalizeInputPackage(inputPath: string): Promise<Normaliz
   }
 
   if (!stat.isFile()) {
-    throw new Error(`Input path must be a directory or supported archive file: ${inputPath}`);
+    throw new Error(`Input path must be a directory, supported archive, or JavaScript file: ${inputPath}`);
   }
 
   const sourceKind = archiveKindForPath(sourcePath);
   if (!sourceKind) {
-    throw new Error(`Unsupported input file type. Expected a directory, .zip, .tar, .tar.gz, or .tgz: ${inputPath}`);
+    if (isSupportedSingleScriptPath(sourcePath)) {
+      return normalizeSingleScriptInput(sourcePath);
+    }
+    throw new Error(`Unsupported input file type. Expected a directory, .js, .mjs, .cjs, .zip, .tar, .tar.gz, or .tgz: ${inputPath}`);
   }
 
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-input-"));
@@ -427,7 +440,9 @@ export async function normalizeInputPackage(inputPath: string): Promise<Normaliz
     if (sourceKind === "zip") {
       await extractZipArchive(archive, tempRoot);
     } else {
-      const tarBuffer = sourceKind === "tar_gz" ? gunzipSync(archive) : archive;
+      const tarBuffer = sourceKind === "tar_gz"
+        ? gunzipSync(archive, { maxOutputLength: ARCHIVE_MAX_TOTAL_BYTES })
+        : archive;
       await extractTarArchive(tarBuffer, tempRoot);
     }
   } catch (error) {
@@ -439,6 +454,34 @@ export async function normalizeInputPackage(inputPath: string): Promise<Normaliz
     rootDir: tempRoot,
     sourcePath,
     sourceKind,
+    cleanup
+  };
+}
+
+async function normalizeSingleScriptInput(sourcePath: string): Promise<NormalizedInputPackage> {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-input-"));
+  let cleaned = false;
+  const cleanup = async () => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  };
+
+  const scriptName = safeSingleScriptFilename(sourcePath);
+  try {
+    await fs.copyFile(sourcePath, path.join(tempRoot, scriptName));
+    await fs.writeFile(path.join(tempRoot, "index.html"), singleScriptHostHtml(scriptName), "utf8");
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+
+  return {
+    rootDir: tempRoot,
+    sourcePath,
+    sourceKind: "single_script",
     cleanup
   };
 }
@@ -2539,12 +2582,48 @@ function sha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-function archiveKindForPath(filePath: string): NormalizedInputPackage["sourceKind"] | null {
+function archiveKindForPath(filePath: string): ArchiveInputKind | null {
   const lower = filePath.toLowerCase();
   if (lower.endsWith(".zip")) return "zip";
   if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) return "tar_gz";
   if (lower.endsWith(".tar")) return "tar";
   return null;
+}
+
+function isSupportedSingleScriptPath(filePath: string): boolean {
+  return [".js", ".mjs", ".cjs"].includes(path.extname(filePath).toLowerCase());
+}
+
+function safeSingleScriptFilename(filePath: string): string {
+  const filename = path.basename(filePath);
+  if (safeArchiveRelativePath(filename) !== filename || !isSupportedSingleScriptPath(filename)) {
+    throw new Error(`Unsafe single JavaScript input filename: ${filename}`);
+  }
+  return filename;
+}
+
+function singleScriptHostHtml(scriptName: string): string {
+  const scriptType = path.extname(scriptName).toLowerCase() === ".mjs" ? ' type="module"' : "";
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI JS Unpack Single Script Host</title>
+  </head>
+  <body>
+    <script${scriptType} src="./${escapeHtmlAttribute(scriptName)}"></script>
+  </body>
+</html>
+`;
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void> {
@@ -2556,13 +2635,17 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
   if (entryCount === 0xffff || centralDirectorySize === 0xffffffff || centralDirectoryOffset === 0xffffffff) {
     throw new Error("Unsupported zip64 archive.");
   }
+  if (entryCount > ARCHIVE_MAX_ENTRIES) {
+    throw new Error(`Archive resource limit exceeded: zip contains ${entryCount} entries (maximum ${ARCHIVE_MAX_ENTRIES}).`);
+  }
   if (centralDirectoryOffset + centralDirectorySize > archive.length) {
     throw new Error("Invalid zip archive: central directory is outside the archive.");
   }
 
   let cursor = centralDirectoryOffset;
+  let totalUncompressedBytes = 0;
   for (let index = 0; index < entryCount; index += 1) {
-    if (archive.readUInt32LE(cursor) !== 0x02014b50) {
+    if (cursor + 46 > archive.length || archive.readUInt32LE(cursor) !== 0x02014b50) {
       throw new Error("Invalid zip archive: central directory entry is malformed.");
     }
 
@@ -2575,8 +2658,12 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
     const fileCommentLength = archive.readUInt16LE(cursor + 32);
     const externalAttributes = archive.readUInt32LE(cursor + 38);
     const localHeaderOffset = archive.readUInt32LE(cursor + 42);
+    const centralEntryEnd = cursor + 46 + fileNameLength + extraFieldLength + fileCommentLength;
+    if (centralEntryEnd > centralDirectoryOffset + centralDirectorySize || centralEntryEnd > archive.length) {
+      throw new Error("Invalid zip archive: central directory entry is truncated.");
+    }
     const fileName = archive.subarray(cursor + 46, cursor + 46 + fileNameLength).toString("utf8");
-    cursor += 46 + fileNameLength + extraFieldLength + fileCommentLength;
+    cursor = centralEntryEnd;
 
     const unixMode = externalAttributes >>> 16;
     if ((unixMode & 0o170000) === 0o120000) {
@@ -2592,6 +2679,14 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
       await fs.mkdir(resolveInsideRoot(rootDir, safeRelative), { recursive: true });
       continue;
     }
+
+    assertArchiveEntryWithinLimits({
+      fileName,
+      uncompressedSize,
+      compressedSize,
+      totalUncompressedBytes
+    });
+    totalUncompressedBytes += uncompressedSize;
 
     if (localHeaderOffset + 30 > archive.length || archive.readUInt32LE(localHeaderOffset) !== 0x04034b50) {
       throw new Error(`Invalid zip archive: local file header is malformed for ${fileName}`);
@@ -2638,6 +2733,8 @@ async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void
   let cursor = 0;
   let pendingLongName: string | null = null;
   let pendingPaxPath: string | null = null;
+  let entryCount = 0;
+  let totalUncompressedBytes = 0;
 
   while (cursor + 512 <= archive.length) {
     const header = archive.subarray(cursor, cursor + 512);
@@ -2652,6 +2749,17 @@ async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void
     pendingPaxPath = null;
     const size = parseTarOctal(header.subarray(124, 136));
     const typeFlag = header.subarray(156, 157).toString("ascii");
+    entryCount += 1;
+    if (entryCount > ARCHIVE_MAX_ENTRIES) {
+      throw new Error(`Archive resource limit exceeded: tar contains more than ${ARCHIVE_MAX_ENTRIES} entries.`);
+    }
+    if (size > ARCHIVE_MAX_FILE_BYTES) {
+      throw new Error(`Archive resource limit exceeded: ${name} is ${size} bytes (maximum ${ARCHIVE_MAX_FILE_BYTES}).`);
+    }
+    if (totalUncompressedBytes + size > ARCHIVE_MAX_TOTAL_BYTES) {
+      throw new Error(`Archive resource limit exceeded: extracted data exceeds ${ARCHIVE_MAX_TOTAL_BYTES} bytes.`);
+    }
+    totalUncompressedBytes += size;
     const dataStart = cursor;
     const dataEnd = dataStart + size;
     if (dataEnd > archive.length) {
@@ -2681,6 +2789,33 @@ async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void
     if (typeFlag === "1" || typeFlag === "2") {
       throw new Error(`Unsupported tar archive entry type: link ${name}`);
     }
+  }
+}
+
+function assertArchiveEntryWithinLimits(options: {
+  fileName: string;
+  uncompressedSize: number;
+  compressedSize: number;
+  totalUncompressedBytes: number;
+}): void {
+  if (options.uncompressedSize > ARCHIVE_MAX_FILE_BYTES) {
+    throw new Error(
+      `Archive resource limit exceeded: ${options.fileName} is ${options.uncompressedSize} bytes (maximum ${ARCHIVE_MAX_FILE_BYTES}).`
+    );
+  }
+  if (options.totalUncompressedBytes + options.uncompressedSize > ARCHIVE_MAX_TOTAL_BYTES) {
+    throw new Error(`Archive resource limit exceeded: extracted data exceeds ${ARCHIVE_MAX_TOTAL_BYTES} bytes.`);
+  }
+  if (options.uncompressedSize > 0 && options.compressedSize === 0) {
+    throw new Error(`Archive resource limit exceeded: ${options.fileName} has an invalid compression ratio.`);
+  }
+  if (
+    options.compressedSize > 0 &&
+    options.uncompressedSize / options.compressedSize > ARCHIVE_MAX_COMPRESSION_RATIO
+  ) {
+    throw new Error(
+      `Archive resource limit exceeded: ${options.fileName} compression ratio exceeds ${ARCHIVE_MAX_COMPRESSION_RATIO}:1.`
+    );
   }
 }
 

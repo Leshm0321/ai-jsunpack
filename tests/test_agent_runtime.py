@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,9 +18,17 @@ from apps.worker.worker.agent_runtime import (
     AgentRuntimeRequest,
     AgentToolRegistryBuilder,
     ModelPolicyResolver,
+    CrewExecutionManager,
+    CrewRuntimePlanner,
 )
 from apps.worker.worker.agent_artifacts import AgentArtifactWriter
-from apps.worker.worker.agent_providers import CrewAIBackend, OpenAICompatibleCrewAILLM, OpenAICompatibleLLMError
+from apps.worker.worker.agent_providers import (
+    CrewAIBackend,
+    CrewAIExecutionAdapter,
+    OpenAICompatibleCrewAILLM,
+    OpenAICompatibleLLMError,
+)
+from apps.worker.worker.agent_contracts import CrewStructuredAgentOutput
 from apps.worker.worker.reconstruction import ReconstructionRunner
 from packages.knowledge import StaticKnowledgeRetriever
 
@@ -119,6 +128,46 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertFalse(policy.api_key_configured)
         self.assertEqual(policy.timeout_seconds, 30.0)
         self.assertIsNone(policy.temperature)
+
+    def test_cloud_policy_rejects_private_and_credentialed_endpoints(self):
+        for base_url, expected in (
+            ("https://127.0.0.1:11434/v1", "private"),
+            ("https://user:secret@agent.example.test/v1", "credentials"),
+            ("file:///tmp/model", "http or https"),
+        ):
+            with self.subTest(base_url=base_url), patch.dict(
+                os.environ,
+                {"AI_JSUNPACK_AGENT_BASE_URL": base_url},
+                clear=False,
+            ):
+                policy = ModelPolicyResolver().resolve(
+                    self._request(
+                        cloud_mode="cloud_allowed",
+                        config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                    )
+                )
+
+            self.assertFalse(policy.allowed)
+            self.assertIn(expected, policy.denial_reason or "")
+
+    def test_production_cloud_policy_requires_https(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_DEPLOYMENT_PROFILE": "production",
+                "AI_JSUNPACK_AGENT_BASE_URL": "http://agent.example.test/v1",
+            },
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(
+                    cloud_mode="cloud_allowed",
+                    config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                )
+            )
+
+        self.assertFalse(policy.allowed)
+        self.assertIn("must use https", policy.denial_reason or "")
 
     def test_invalid_timeout_and_temperature_fall_back_to_safe_defaults(self):
         with patch.dict(
@@ -339,6 +388,103 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
         with self.assertRaisesRegex(OpenAICompatibleLLMError, "request failed|timed out"):
             llm.call("hello")
+
+    def test_backend_failure_cache_is_endpoint_scoped_and_expires(self):
+        backend = _RecoveringCrewBackend()
+        with patch.dict(os.environ, {"AI_JSUNPACK_AGENT_FAILURE_CACHE_SECONDS": "0.01"}, clear=False):
+            adapter = CrewAIExecutionAdapter(backend=backend)
+        spec = CrewRuntimePlanner().build_specs()[0]
+        policy = ModelPolicyResolver().resolve(
+            self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+        )
+        args = {
+            "spec": spec,
+            "policy": policy,
+            "prompt_context": {},
+            "input_artifact_ids": [],
+            "evidence_refs": [],
+        }
+
+        first = adapter.execute_agent(**args)
+        cached = adapter.execute_agent(**args)
+        time.sleep(0.02)
+        recovered = adapter.execute_agent(**args)
+
+        self.assertEqual(first.status, "fail")
+        self.assertEqual(cached.status, "fail")
+        self.assertEqual(recovered.status, "best_effort")
+        self.assertEqual(backend.calls, 2)
+
+    def test_agent_plan_rejects_missing_and_same_stage_dependencies(self):
+        planner = CrewRuntimePlanner()
+        base = CrewAgentSpec(
+            name="AnalysisAgent",
+            stage="analysis",
+            responsibility="Analyze",
+            role="Analysis",
+            goal="Analyze",
+            backstory="Analysis",
+            output_kind="inference_record",
+            allow_parallel=False,
+        )
+        with self.assertRaisesRegex(Exception, "missing agent"):
+            planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["Missing"]})])
+        with self.assertRaisesRegex(Exception, "earlier stage"):
+            planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["AnalysisAgent"]})])
+
+    def test_parallel_stage_executes_concurrently_and_receives_dependency_outputs(self):
+        barrier = threading.Barrier(3)
+        adapter = _BarrierExecutionAdapter(barrier)
+        manager = CrewExecutionManager(adapter=adapter)
+        specs = [
+            CrewAgentSpec(
+                name=f"Specialist{index}",
+                stage="specialists",
+                responsibility="Analyze",
+                role="Specialist",
+                goal="Analyze",
+                backstory="Specialist",
+                output_kind="inference_record",
+                allow_parallel=True,
+            )
+            for index in range(3)
+        ]
+        request = self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()):
+            stages, _ = manager.execute(context=context, specs=specs)
+
+        specialist_stage = next(stage for stage in stages if stage.stage == "specialists")
+        self.assertEqual([execution.status for execution in specialist_stage.agent_executions], ["pass"] * 3)
+        self.assertEqual(barrier.n_waiting, 0)
+
+        dependency = specialist_stage.agent_executions[0]
+        dependent_spec = CrewAgentSpec(
+            name="ReportAgent",
+            stage="synthesis",
+            responsibility="Report",
+            role="Report",
+            goal="Report",
+            backstory="Report",
+            output_kind="report_section",
+            allow_parallel=False,
+            dependencies=[dependency.spec.name],
+        )
+        prompt = manager._prompt_context_for_agent(
+            context=context,
+            spec=dependent_spec,
+            stages=stages,
+            executions_by_name={dependency.spec.name: dependency},
+        )
+        self.assertEqual(prompt["dependencyOutputs"][dependency.spec.name]["rawOutput"]["agent"], dependency.spec.name)
 
     def test_agent_execution_artifact_records_endpoint_metadata_without_secret(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -974,6 +1120,42 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             content=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
             content_type="application/json",
             producer="tests.agent_runtime",
+        )
+
+
+class _RecoveringCrewBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_agent(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary endpoint failure")
+        return CrewStructuredAgentOutput()
+
+
+class _BarrierExecutionAdapter:
+    tool_name = "test.agent"
+    tool_version = "1"
+
+    def __init__(self, barrier: threading.Barrier) -> None:
+        self.barrier = barrier
+
+    def execute_agent(self, *, spec, policy, prompt_context, input_artifact_ids, evidence_refs):
+        del prompt_context
+        self.barrier.wait(timeout=1)
+        return CrewAgentExecution(
+            spec=spec,
+            status="pass",
+            failure_class="none",
+            attempt=0,
+            duration_ms=0.0,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            message="done",
+            raw_output={"agent": spec.name},
+            model_provider=policy.model_provider,
+            model_name=policy.model_name,
         )
 
 

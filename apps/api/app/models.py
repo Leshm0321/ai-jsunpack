@@ -151,6 +151,73 @@ class ContractModel(BaseModel):
     )
 
 
+SettingScope = Literal["system", "project"]
+ProviderReadinessStatus = Literal["ready", "misconfigured", "unavailable"]
+
+
+class SettingsUpdateRequest(ContractModel):
+    settings: dict[str, Any]
+    expected_revision: int = Field(default=0, ge=0)
+    reason: str = Field(default="settings update", min_length=1, max_length=500)
+
+
+class SettingsRollbackRequest(ContractModel):
+    revision: int = Field(ge=1)
+    expected_revision: int = Field(ge=0)
+    reason: str = Field(default="settings rollback", min_length=1, max_length=500)
+
+
+class SettingsRevision(ContractModel):
+    id: str
+    scope: SettingScope
+    scope_id: str | None = None
+    revision: int = Field(ge=1)
+    settings: dict[str, Any]
+    actor_id: str
+    reason: str
+    created_at: str
+
+
+class SettingsSnapshot(ContractModel):
+    scope: SettingScope
+    scope_id: str | None = None
+    revision: int = Field(ge=0)
+    settings: dict[str, Any]
+    updated_at: str | None = None
+
+
+class EffectiveConfigResponse(ContractModel):
+    version: int
+    source: Literal["defaults", "file", "environment"]
+    fingerprint: str
+    config_file_configured: bool
+    restart_required: bool = False
+    config: dict[str, Any]
+
+
+class ConfigSchemaResponse(ContractModel):
+    application_config: dict[str, Any]
+    runtime_settings: dict[str, Any]
+
+
+class EffectiveSettingsResponse(ContractModel):
+    system_revision: int = Field(ge=0)
+    project_revision: int | None = Field(default=None, ge=0)
+    settings: dict[str, Any]
+
+
+class ProviderReadiness(ContractModel):
+    mode: Literal["cloud", "local"]
+    status: ProviderReadinessStatus
+    provider: str
+    model: str | None = None
+    endpoint_type: Literal["remote_https", "remote_http", "loopback", "not_configured"]
+    credential_configured: bool
+    secret_ref_configured: bool
+    checked_at: str
+    issues: list[str] = Field(default_factory=list)
+
+
 class CreateJobRequest(ContractModel):
     project_id: str = Field(default="default")
     owner_id: str = Field(default="local-user")

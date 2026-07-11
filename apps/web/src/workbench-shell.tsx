@@ -21,7 +21,7 @@ export function ModePill({
       className={active ? "mode-pill mode-pill-active" : "mode-pill"}
       type="button"
       onClick={onClick}
-      title={label}
+      title={t(`cloud.${label}`)}
     >
       {t(`cloud.${label}`)}
     </button>
@@ -156,12 +156,13 @@ export function PipelineMap({
   currentJob: Job | null;
   evidence: JobEvidence;
 }) {
+  const { t } = useLocalization();
   const nodes = [
-    { label: "Input", icon: Upload },
-    { label: "AST", icon: GitBranch },
-    { label: "Agents", icon: Sparkles },
-    { label: "Runtime", icon: Radar },
-    { label: "Review", icon: ShieldCheck }
+    { label: t("pipeline.input"), icon: Upload },
+    { label: t("pipeline.ast"), icon: GitBranch },
+    { label: t("pipeline.agents"), icon: Sparkles },
+    { label: t("pipeline.runtime"), icon: Radar },
+    { label: t("pipeline.review"), icon: ShieldCheck }
   ];
 
   return (
@@ -180,15 +181,15 @@ export function PipelineMap({
       })}
       <div className="pipeline-status">
         <CheckCircle2 size={18} aria-hidden="true" />
-        <span>{currentJob ? currentJob.status : "Awaiting job"}</span>
+        <span>{currentJob ? t(`stage.${currentJob.status}`) : t("pipeline.awaiting")}</span>
       </div>
       <div className={artifacts.length > 0 ? "pipeline-status" : "pipeline-status warning"}>
         <Archive size={18} aria-hidden="true" />
-        <span>{artifacts.length} artifacts</span>
+        <span>{artifacts.length} {t("pipeline.artifacts")}</span>
       </div>
       <div className={evidence.runtimeValidations.length > 0 ? "pipeline-status" : "pipeline-status warning"}>
         <Network size={18} aria-hidden="true" />
-        <span>{evidence.runtimeValidations.length} runtime runs</span>
+        <span>{evidence.runtimeValidations.length} {t("pipeline.runtimeRuns")}</span>
       </div>
     </div>
   );

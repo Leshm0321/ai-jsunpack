@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -198,6 +199,95 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertEqual(updated.status, "building")
             finally:
                 store.close()
+
+    def test_store_normalizes_json_columns_from_legacy_sqlite_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_path = root / "metadata.db"
+            store = create_store(
+                database_url=f"sqlite:///{database_path.as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner", config={"source": "test"}))
+                artifact = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="input.js",
+                    content=b"console.log('ok')",
+                    content_type="text/javascript",
+                    producer="test.database_store",
+                    parent_artifact_ids=["artifact_parent"],
+                )
+            finally:
+                store.close()
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "update jobs set config = ?, worker_lease = ? where id = ?",
+                    (
+                        '{"source":"legacy-string"}',
+                        '{"worker_id":"legacy-worker","expires_at":"2026-06-18T08:05:00+00:00"}',
+                        job.id,
+                    ),
+                )
+                connection.execute(
+                    "update artifacts set parent_artifact_ids = ? where id = ?",
+                    ("not-json", artifact.id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = create_store(
+                database_url=f"sqlite:///{database_path.as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                persisted_job = reopened.get_job(job.id)
+                persisted_artifact = reopened.get_artifact(job.id, artifact.id)
+                normalized_null_parent_artifact = reopened._artifact_from_row(
+                    {**persisted_artifact.model_dump(), "parent_artifact_ids": None}
+                )
+                normalized_null_job = reopened._job_from_row({**persisted_job.model_dump(), "config": None})
+
+                self.assertEqual(persisted_job.config, {"source": "legacy-string"})
+                self.assertEqual(persisted_job.worker_lease.worker_id, "legacy-worker")
+                self.assertEqual(persisted_artifact.parent_artifact_ids, [])
+                self.assertEqual(normalized_null_parent_artifact.parent_artifact_ids, [])
+                self.assertEqual(normalized_null_job.config, {})
+            finally:
+                reopened.close()
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "update jobs set config = ?, worker_lease = NULL where id = ?",
+                    ("not-json", job.id),
+                )
+                connection.execute(
+                    "update artifacts set parent_artifact_ids = ? where id = ?",
+                    ('["artifact_a","artifact_b",7,null]', artifact.id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = create_store(
+                database_url=f"sqlite:///{database_path.as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                persisted_job = reopened.get_job(job.id)
+                persisted_artifact = reopened.get_artifact(job.id, artifact.id)
+
+                self.assertEqual(persisted_job.config, {})
+                self.assertIsNone(persisted_job.worker_lease)
+                self.assertEqual(persisted_artifact.parent_artifact_ids, ["artifact_a", "artifact_b"])
+            finally:
+                reopened.close()
 
     def test_list_project_artifact_payloads_scopes_by_project_and_excludes_current_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -49,7 +49,7 @@ from apps.api.app.models import (
     RuntimeViewport,
     RuntimeWaitFor,
 )
-from packages.sandbox import LocalSandboxRunner
+from packages.sandbox import LocalSandboxRunner, deployment_profile, is_production_profile
 
 DEFAULT_VIEWPORT = {"name": "desktop", "width": 1365, "height": 768}
 REMOTE_BROWSER_RUNNER_URL_ENV = "AI_JSUNPACK_BROWSER_RUNNER_URL"
@@ -286,6 +286,14 @@ class RuntimeSmokeError(Exception):
     def __init__(self, message: str, failure_class: FailureClass = "runtime_error") -> None:
         super().__init__(message)
         self.failure_class = failure_class
+
+
+class PolicyDeniedBrowserAdapter:
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        raise RuntimeSmokeError(
+            "Local Playwright execution is disabled by the production deployment profile; configure the remote Browser Runner.",
+            "policy_denied",
+        )
 
 
 class PlaywrightBrowserAdapter:
@@ -638,7 +646,9 @@ class RuntimeSmokeRunner:
         timeout_ms: int = 10_000,
         sandbox_runner: LocalSandboxRunner | None = None,
     ) -> None:
-        self.browser_adapter = browser_adapter or RemoteBrowserRunnerAdapter.from_environment() or PlaywrightBrowserAdapter()
+        remote_adapter = None if browser_adapter is not None else RemoteBrowserRunnerAdapter.from_environment()
+        self.browser_adapter = browser_adapter or remote_adapter or PlaywrightBrowserAdapter()
+        self._using_local_browser_fallback = browser_adapter is None and remote_adapter is None
         self.timeout_ms = timeout_ms
         self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
 
@@ -692,7 +702,7 @@ class RuntimeSmokeRunner:
             resolved_url = entry.entry_url or "about:blank"
             try:
                 with self._entry_url(entry) as resolved_url:
-                    capture = self.browser_adapter.capture(
+                    capture = self._browser_adapter_for_job(job_id=job_id, store=store).capture(
                         BrowserSmokeRequest(
                             entry_url=resolved_url,
                             screenshot_path=screenshot_path,
@@ -935,6 +945,16 @@ class RuntimeSmokeRunner:
 
     def _duration_ms(self, started_at: float) -> int:
         return int((time.perf_counter() - started_at) * 1000)
+
+    def _browser_adapter_for_job(self, *, job_id: str, store) -> BrowserSmokeAdapter:
+        if not self._using_local_browser_fallback:
+            return self.browser_adapter
+        job = store.get_job(job_id)
+        raw_config = job.config if job is not None and isinstance(job.config, dict) else {}
+        profile = deployment_profile(raw_config.get("deploymentProfile"))
+        if is_production_profile(profile):
+            return PolicyDeniedBrowserAdapter()
+        return self.browser_adapter
 
     def _json_bytes(self, payload: dict) -> bytes:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
@@ -2068,7 +2088,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         else:
             try:
                 with self._entry_url(entry) as resolved_url:
-                    capture = self.browser_adapter.capture(
+                    capture = self._browser_adapter_for_job(job_id=job_id, store=store).capture(
                         BrowserSmokeRequest(
                             entry_url=resolved_url,
                             screenshot_path=screenshot_path,

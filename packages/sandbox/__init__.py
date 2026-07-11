@@ -1,5 +1,6 @@
 from .runner import (
     DEFAULT_CONTAINER_IMAGE,
+    DEPLOYMENT_PROFILE_ENV,
     ContainerSandboxRunner,
     FirecrackerSandboxRunner,
     GVisorSandboxRunner,
@@ -11,11 +12,14 @@ from .runner import (
     SandboxResourcePolicy,
     SandboxRuntimeCapability,
     SandboxResult,
+    deployment_profile,
+    is_production_profile,
     sandbox_resource_policy_profile,
 )
 
 __all__ = [
     "DEFAULT_CONTAINER_IMAGE",
+    "DEPLOYMENT_PROFILE_ENV",
     "ContainerSandboxRunner",
     "FirecrackerSandboxRunner",
     "GVisorSandboxRunner",
@@ -27,5 +31,7 @@ __all__ = [
     "SandboxResourcePolicy",
     "SandboxRuntimeCapability",
     "SandboxResult",
+    "deployment_profile",
+    "is_production_profile",
     "sandbox_resource_policy_profile",
 ]

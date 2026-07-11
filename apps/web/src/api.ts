@@ -1,4 +1,5 @@
 import type { Artifact, CloudMode, InferenceRecord, Job, ReviewRun, RuntimeValidationRun, ToolCall } from "@ai-jsunpack/shared";
+import type { EffectiveConfigResponse, ProviderReadinessResponse, RuntimeSettingsResponse } from "./settings-types";
 
 export interface JobSummary {
   job: Job;
@@ -63,6 +64,42 @@ export async function fetchReviewRuns(jobId: string): Promise<ReviewRun[]> {
 
 export async function fetchToolCalls(jobId: string): Promise<ToolCall[]> {
   return requestJson<ToolCall[]>(`/jobs/${encodeURIComponent(jobId)}/tool-calls`);
+}
+
+export async function fetchEffectiveConfig(): Promise<EffectiveConfigResponse> {
+  return requestJson<EffectiveConfigResponse>("/v1/config/effective");
+}
+
+export async function fetchProviderReadiness(): Promise<ProviderReadinessResponse> {
+  return requestJson<ProviderReadinessResponse>("/v1/providers/readiness");
+}
+
+export async function fetchSystemSettings(): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>("/v1/settings/system");
+}
+
+export async function updateSystemSettings(settings: Record<string, unknown>, expectedRevision = 0): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>("/v1/settings/system", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, expectedRevision, reason: "updated from web settings center" })
+  });
+}
+
+export async function fetchProjectSettings(projectId: string): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>(`/v1/projects/${encodeURIComponent(projectId)}/settings`);
+}
+
+export async function updateProjectSettings(
+  projectId: string,
+  settings: Record<string, unknown>,
+  expectedRevision = 0
+): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>(`/v1/projects/${encodeURIComponent(projectId)}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, expectedRevision, reason: "updated from web settings center" })
+  });
 }
 
 export async function rerunJob(jobId: string): Promise<JobSummary> {

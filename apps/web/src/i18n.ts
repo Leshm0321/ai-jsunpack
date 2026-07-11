@@ -3,7 +3,7 @@ import { en } from "./locales/en";
 import { zh } from "./locales/zh";
 
 export type Language = "en" | "zh";
-type TranslationKey = keyof typeof en;
+export type TranslationKey = keyof typeof en;
 type TranslationTable = Record<TranslationKey, string>;
 
 export interface LocalizationValue {

@@ -22,12 +22,13 @@ import {
 } from "lucide-react";
 import { useLocalization } from "./i18n";
 import type { Language } from "./i18n";
-import type { AppRoute } from "./routes";
+import { setupMarketingMotion } from "./marketing-motion";
+import type { AppRoute, MarketingRoute } from "./routes";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
 interface MarketingPageProps {
-  route: AppRoute;
+  route: MarketingRoute;
   onNavigate: (route: AppRoute) => void;
 }
 
@@ -41,7 +42,7 @@ function navigateLabel(route: AppRoute): string {
   if (route === "/runtime") {
     return "site.nav.runtime";
   }
-  if (route === "/workbench") {
+  if (route === "/workbench/new") {
     return "site.nav.workbench";
   }
   return "site.nav.home";
@@ -54,13 +55,13 @@ function SiteHeader({
   onNavigate,
   t
 }: {
-  activeRoute: AppRoute;
+  activeRoute: MarketingRoute;
   language: Language;
   onLanguageChange: (language: Language) => void;
   onNavigate: (route: AppRoute) => void;
   t: (key: string) => string;
 }) {
-  const navItems: AppRoute[] = ["/", "/workflow", "/evidence", "/runtime", "/workbench"];
+  const navItems: AppRoute[] = ["/", "/workflow", "/evidence", "/runtime", "/workbench/new"];
   return (
     <header className="site-header">
       <button className="site-brand" type="button" onClick={() => onNavigate("/")} aria-label={t("site.aria.home")}>
@@ -109,7 +110,7 @@ function ProductVisual({ t }: { t: (key: string) => string }) {
     { label: t("site.visual.report"), icon: ShieldCheck }
   ];
   return (
-    <div className="product-visual" aria-label={t("app.aria.pipelineOverview")}>
+    <div className="product-visual" data-motion-product aria-label={t("app.aria.pipelineOverview")}>
       <div className="visual-terminal">
         <div className="terminal-topline">
           <span>restore.js</span>
@@ -123,7 +124,7 @@ validate(runtime.capture);`}</pre>
         {steps.map((step) => {
           const Icon = step.icon;
           return (
-            <div className="visual-step" key={step.label}>
+            <div className="visual-step" data-motion-product-step key={step.label}>
               <Icon size={18} aria-hidden="true" />
               <span>{step.label}</span>
             </div>
@@ -141,7 +142,7 @@ validate(runtime.capture);`}</pre>
         </div>
         <div>
           <span>{t("site.metric.mode")}</span>
-          <strong>safe</strong>
+          <strong>{t("site.metric.safe")}</strong>
         </div>
       </div>
     </div>
@@ -156,13 +157,13 @@ function HomePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void; t:
   ];
   return (
     <>
-      <section className="site-hero">
-        <div className="site-hero-copy site-motion">
+      <section className="site-hero" data-motion-hero>
+        <div className="site-hero-copy" data-motion-hero-copy>
           <p className="site-eyebrow">{t("site.home.eyebrow")}</p>
           <h1>AI JS Unpack</h1>
           <p className="site-hero-lede">{t("site.home.lede")}</p>
           <div className="site-actions">
-            <button className="primary-action" type="button" onClick={() => onNavigate("/workbench")}>
+            <button className="primary-action" type="button" onClick={() => onNavigate("/workbench/new")}>
               <Upload size={18} aria-hidden="true" />
               {t("site.cta.openWorkbench")}
             </button>
@@ -172,12 +173,12 @@ function HomePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void; t:
             </button>
           </div>
         </div>
-        <div className="site-motion">
+        <div>
           <ProductVisual t={t} />
         </div>
       </section>
 
-      <section className="site-band proof-band site-reveal">
+      <section className="site-band proof-band" data-motion-reveal>
         {proof.map((item) => {
           const Icon = item.icon;
           return (
@@ -202,7 +203,7 @@ function FeatureGrid({ t }: { t: (key: string) => string }) {
     { title: t("site.feature.audit.title"), text: t("site.feature.audit.text"), icon: ShieldCheck }
   ];
   return (
-    <section className="site-grid-section site-reveal">
+    <section className="site-grid-section" data-motion-reveal>
       <div className="section-heading-block">
         <p className="site-eyebrow">{t("site.home.sectionKicker")}</p>
         <h2>{t("site.home.sectionTitle")}</h2>
@@ -232,17 +233,17 @@ function WorkflowPage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void
     { title: t("site.workflow.step5.title"), text: t("site.workflow.step5.text"), icon: ShieldCheck }
   ];
   return (
-    <section className="detail-page">
-      <div className="detail-intro site-motion">
+    <section className="detail-page" data-motion-workflow>
+      <div className="detail-intro">
         <p className="site-eyebrow">{t("site.workflow.eyebrow")}</p>
         <h1>{t("site.workflow.title")}</h1>
         <p>{t("site.workflow.lede")}</p>
       </div>
-      <div className="workflow-rail">
+      <div className="workflow-rail" data-motion-workflow-rail>
         {steps.map((step, index) => {
           const Icon = step.icon;
           return (
-            <article className="workflow-card site-reveal" key={step.title}>
+            <article className="workflow-card" data-motion-workflow-card key={step.title}>
               <span className="workflow-index">{String(index + 1).padStart(2, "0")}</span>
               <Icon size={22} aria-hidden="true" />
               <h2>{step.title}</h2>
@@ -251,7 +252,7 @@ function WorkflowPage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void
           );
         })}
       </div>
-      <button className="primary-action site-end-cta" type="button" onClick={() => onNavigate("/workbench")}>
+      <button className="primary-action site-end-cta" type="button" onClick={() => onNavigate("/workbench/new")}>
         {t("site.cta.startAnalysis")}
         <ArrowRight size={18} aria-hidden="true" />
       </button>
@@ -267,20 +268,20 @@ function EvidencePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void
   ];
   return (
     <section className="detail-page evidence-page">
-      <div className="detail-intro site-motion">
+      <div className="detail-intro">
         <p className="site-eyebrow">{t("site.evidence.eyebrow")}</p>
         <h1>{t("site.evidence.title")}</h1>
         <p>{t("site.evidence.lede")}</p>
       </div>
-      <div className="evidence-matrix site-reveal" aria-label={t("site.aria.evidenceMatrix")}>
+      <div className="evidence-matrix" data-motion-evidence-matrix aria-label={t("site.aria.evidenceMatrix")}>
         {rows.flat().map((item) => (
-          <div className="evidence-cell" key={item}>
+          <div className="evidence-cell" data-motion-evidence-cell key={item}>
             <CheckCircle2 size={18} aria-hidden="true" />
             <span>{item}</span>
           </div>
         ))}
       </div>
-      <div className="evidence-ledger site-reveal">
+      <div className="evidence-ledger" data-motion-evidence-ledger>
         <div>
           <Activity size={20} aria-hidden="true" />
           <span>{t("site.evidence.ledger.inference")}</span>
@@ -305,13 +306,13 @@ function EvidencePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void
 function RuntimePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void; t: (key: string) => string }) {
   return (
     <section className="detail-page runtime-story">
-      <div className="detail-intro site-motion">
+      <div className="detail-intro">
         <p className="site-eyebrow">{t("site.runtime.eyebrow")}</p>
         <h1>{t("site.runtime.title")}</h1>
         <p>{t("site.runtime.lede")}</p>
       </div>
-      <div className="runtime-showcase site-reveal">
-        <div className="browser-frame">
+      <div className="runtime-showcase" data-motion-runtime>
+        <div className="browser-frame" data-motion-runtime-browser>
           <div className="browser-bar">
             <span />
             <span />
@@ -319,26 +320,26 @@ function RuntimePage({ onNavigate, t }: { onNavigate: (route: AppRoute) => void;
             <strong>127.0.0.1/runtime-smoke</strong>
           </div>
           <div className="browser-capture">
-            <Network size={36} aria-hidden="true" />
+            <Network data-motion-runtime-capture size={36} aria-hidden="true" />
             <p>{t("site.runtime.capture")}</p>
           </div>
         </div>
         <div className="runtime-diff-preview">
-          <div>
+          <div data-motion-runtime-metric>
             <span>{t("site.runtime.original")}</span>
-            <strong>pass</strong>
+            <strong>{t("runtime.pass")}</strong>
           </div>
-          <div>
+          <div data-motion-runtime-metric>
             <span>{t("site.runtime.rebuilt")}</span>
-            <strong>pass</strong>
+            <strong>{t("runtime.pass")}</strong>
           </div>
-          <div>
+          <div data-motion-runtime-metric>
             <span>{t("site.runtime.delta")}</span>
             <strong>0.8%</strong>
           </div>
         </div>
       </div>
-      <button className="primary-action site-end-cta" type="button" onClick={() => onNavigate("/workbench")}>
+      <button className="primary-action site-end-cta" type="button" onClick={() => onNavigate("/workbench/new")}>
         {t("site.cta.openWorkbench")}
         <ArrowRight size={18} aria-hidden="true" />
       </button>
@@ -352,68 +353,10 @@ export function MarketingPage({ route, onNavigate }: MarketingPageProps) {
 
   useGSAP(
     () => {
-      const mm = gsap.matchMedia();
-      mm.add(
-        {
-          reduceMotion: "(prefers-reduced-motion: reduce)",
-          desktop: "(min-width: 800px)"
-        },
-        (context) => {
-          const reduceMotion = Boolean(context.conditions?.reduceMotion);
-          if (reduceMotion) {
-            gsap.set(".site-motion, .site-reveal, .visual-step, .evidence-cell", {
-              autoAlpha: 1,
-              x: 0,
-              y: 0,
-              scale: 1
-            });
-            return;
-          }
-
-          const intro = gsap.timeline({ defaults: { duration: 0.55, ease: "power3.out" } });
-          intro
-            .from(".site-header", { y: -18, autoAlpha: 0, duration: 0.35 })
-            .from(".site-motion", { y: 28, autoAlpha: 0, stagger: 0.08 }, "<0.08")
-            .from(".visual-step", { x: 18, autoAlpha: 0, stagger: 0.05 }, "<0.08");
-
-          gsap.utils.toArray<HTMLElement>(".site-reveal").forEach((element, index) => {
-            gsap.from(element, {
-              y: 34,
-              autoAlpha: 0,
-              duration: 0.58,
-              ease: "power3.out",
-              scrollTrigger: {
-                trigger: element,
-                start: "top 82%",
-                once: true,
-                refreshPriority: index
-              }
-            });
-          });
-
-          gsap.utils.toArray<HTMLElement>(".evidence-cell").forEach((element, index) => {
-            gsap.from(element, {
-              scale: 0.96,
-              autoAlpha: 0,
-              duration: 0.42,
-              delay: index * 0.035,
-              ease: "power2.out",
-              scrollTrigger: {
-                trigger: ".evidence-matrix",
-                start: "top 78%",
-                once: true
-              }
-            });
-          });
-
-          return () => {
-            intro.kill();
-            ScrollTrigger.getAll().forEach((trigger) => trigger.kill());
-          };
-        }
-      );
-
-      return () => mm.revert();
+      if (!rootRef.current) {
+        return;
+      }
+      return setupMarketingMotion(rootRef.current, route);
     },
     { dependencies: [route, language], revertOnUpdate: true, scope: rootRef }
   );
@@ -436,4 +379,3 @@ export function MarketingPage({ route, onNavigate }: MarketingPageProps) {
     </div>
   );
 }
-

@@ -16,12 +16,14 @@ from apps.api.app.store import (
     DEFAULT_WORKER_MAX_ATTEMPTS,
     create_store,
 )
+from packages.configuration import apply_application_config_to_environment
 from packages.deployment import DeploymentConfigurationError, validate_current_environment
 
 from .pipeline import PipelineEvent, WorkerPipeline
 
 
 logger = logging.getLogger(__name__)
+apply_application_config_to_environment("worker")
 WORKER_ID_ENV = "AI_JSUNPACK_WORKER_ID"
 WORKER_LEASE_SECONDS_ENV = "AI_JSUNPACK_WORKER_LEASE_SECONDS"
 WORKER_POLL_SECONDS_ENV = "AI_JSUNPACK_WORKER_POLL_SECONDS"

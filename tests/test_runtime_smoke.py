@@ -1,10 +1,12 @@
 import base64
 import json
+import os
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import create_store
@@ -160,6 +162,33 @@ class RemoteRunnerHandler(BaseHTTPRequestHandler):
 
 
 class RuntimeSmokeRunnerTest(unittest.TestCase):
+    def test_production_profile_denies_implicit_local_playwright_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            input_root.mkdir()
+            (input_root / "index.html").write_text("<h1>Production</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(
+                    CreateJobRequest(
+                        project_id="proj",
+                        owner_id="owner",
+                        config={"deploymentProfile": "production"},
+                    )
+                )
+                with patch.dict(os.environ, {"AI_JSUNPACK_BROWSER_RUNNER_URL": ""}, clear=False):
+                    result = RuntimeSmokeRunner().run(job_id=job.id, store=store, input_path=input_root)
+
+                trace = json.loads(Path(result.trace_artifact.storage_uri).read_text(encoding="utf-8"))
+                self.assertEqual(trace["failureClass"], "policy_denied")
+                self.assertIn("remote Browser Runner", result.message)
+            finally:
+                store.close()
+
     def test_remote_browser_runner_adapter_posts_archive_and_persists_boundary_trace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

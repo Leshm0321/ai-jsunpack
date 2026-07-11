@@ -30,7 +30,7 @@ export function buildArtifactLineageGraph(artifacts: Artifact[], selectedArtifac
     edges,
     emptyDetail: t("graph.empty.lineage"),
     nodes,
-    summary: `${nodes.length} artifacts with ${edges.length} lineage links`,
+    summary: `${nodes.length} ${t("graph.summary.artifacts")} / ${edges.length} ${t("graph.summary.lineageLinks")}`,
     title: t("graph.title.lineage")
   };
 }
@@ -86,12 +86,12 @@ export function buildChunkEvidenceGraph(
   const edges: EvidenceGraphEdge[] = [];
 
   if (inventory) {
-    addResourceNodes(nodes, edges, "entry", inventory.entries, 1, t("graph.node.htmlEntry"));
-    addResourceNodes(nodes, edges, "script", inventory.scripts, 2, t("graph.node.scriptChunk"));
-    addResourceNodes(nodes, edges, "style", inventory.styles, 2, t("graph.node.stylesheet"));
-    addResourceNodes(nodes, edges, "asset", inventory.assets, 3, t("graph.node.asset"));
-    addResourceNodes(nodes, edges, "sourcemap", inventory.sourceMaps, 3, t("graph.node.sourceMap"));
-    addResourceNodes(nodes, edges, "manifest", inventory.manifests, 3, t("graph.node.manifest"));
+    addResourceNodes(nodes, edges, "entry", inventory.entries, 1, t("graph.node.htmlEntry"), t);
+    addResourceNodes(nodes, edges, "script", inventory.scripts, 2, t("graph.node.scriptChunk"), t);
+    addResourceNodes(nodes, edges, "style", inventory.styles, 2, t("graph.node.stylesheet"), t);
+    addResourceNodes(nodes, edges, "asset", inventory.assets, 3, t("graph.node.asset"), t);
+    addResourceNodes(nodes, edges, "sourcemap", inventory.sourceMaps, 3, t("graph.node.sourceMap"), t);
+    addResourceNodes(nodes, edges, "manifest", inventory.manifests, 3, t("graph.node.manifest"), t);
   }
 
   if (astIndexes) {
@@ -99,7 +99,7 @@ export function buildChunkEvidenceGraph(
       const astNodeId = `chunk:ast:${astIndex.filePath}`;
       nodes.push({
         column: 3,
-        detail: `${astIndex.symbols.length} symbols / ${astIndex.imports.length} imports`,
+        detail: `${astIndex.symbols.length} ${t("graph.detail.symbols")} / ${astIndex.imports.length} ${t("graph.detail.imports")}`,
         id: astNodeId,
         kind: "analysis",
         title: trimMiddle(astIndex.filePath, 38),
@@ -109,14 +109,14 @@ export function buildChunkEvidenceGraph(
       edges.push({
         from: nodes.some((node) => node.id === scriptNodeId) ? scriptNodeId : "chunk:root",
         id: `chunk-edge:ast:${astIndex.filePath}`,
-        label: `AST index for ${trimMiddle(astIndex.filePath, 34)}`,
+        label: `${t("graph.edge.astIndex")} ${trimMiddle(astIndex.filePath, 34)}`,
         to: astNodeId
       });
     }
     if (astIndexes.length > 10) {
       nodes.push({
         column: 3,
-        detail: `${astIndexes.length - 10} additional AST indexes`,
+        detail: `${astIndexes.length - 10} ${t("graph.detail.additionalAstIndexes")}`,
         id: "chunk:ast:more",
         kind: "analysis",
         title: t("graph.node.moreAst"),
@@ -130,7 +130,7 @@ export function buildChunkEvidenceGraph(
     edges,
     emptyDetail: t("graph.empty.noChunkEvidence"),
     nodes,
-    summary: `${nodes.length} chunk/resource nodes built from inventory and AST artifacts`,
+    summary: `${nodes.length} ${t("graph.summary.chunkNodes")}`,
     title: t("graph.title.chunk")
   };
 }
@@ -203,7 +203,7 @@ export function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence
     const nodeId = `agent:review:${run.id}`;
     nodes.set(nodeId, {
       column: 3,
-      detail: `${run.reviewType} / attempt ${run.attempt}`,
+      detail: `${run.reviewType} / ${t("graph.detail.attempt")} ${run.attempt}`,
       id: nodeId,
       kind: "review",
       title: run.decision,
@@ -223,7 +223,7 @@ export function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence
     edges,
     emptyDetail: t("graph.empty.agent"),
     nodes: [...nodes.values()],
-    summary: `${nodes.size} agent evidence nodes with ${edges.length} links`,
+    summary: `${nodes.size} ${t("graph.summary.agentNodes")} / ${edges.length} ${t("graph.summary.links")}`,
     title: t("graph.title.agent")
   };
 }
@@ -234,7 +234,8 @@ export function addResourceNodes(
   group: string,
   paths: string[],
   column: number,
-  title: string
+  title: string,
+  t: (key: string) => string
 ): void {
   for (const filePath of paths.slice(0, 8)) {
     const nodeId = `chunk:${group}:${filePath}`;
@@ -251,12 +252,12 @@ export function addResourceNodes(
     const moreNodeId = `chunk:${group}:more`;
     nodes.push({
       column,
-      detail: `${paths.length - 8} additional ${group} records`,
+      detail: `${paths.length - 8} ${t("graph.detail.additionalRecords")}`,
       id: moreNodeId,
       kind: "resource",
-      title: `More ${group}`
+      title: `${t("graph.node.more")} ${title}`
     });
-    edges.push({ from: "chunk:root", id: `chunk-edge:${group}:more`, label: `${group} overflow`, to: moreNodeId });
+    edges.push({ from: "chunk:root", id: `chunk-edge:${group}:more`, label: `${title} ${t("graph.edge.overflow")}`, to: moreNodeId });
   }
 }
 

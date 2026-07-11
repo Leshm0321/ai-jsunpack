@@ -105,37 +105,46 @@ async function main(): Promise<void> {
     throw new Error(usage());
   }
 
-  const result = await analyzeInputPackage(options.inputPath, { jobId: options.jobId });
-  const inventoryArtifactPayload: ArtifactPayload & { inventory: typeof result.inventory } = {
-    schemaVersion: CONTRACT_SCHEMA_VERSION,
-    jobId: options.jobId,
-    kind: "input_inventory",
-    inventory: result.inventory
-  };
-  const astIndexArtifactPayload: ArtifactPayload & {
-    astIndexes: typeof result.astIndexes;
-    detectedRuntime: typeof result.detectedRuntime;
-  } = {
-    schemaVersion: CONTRACT_SCHEMA_VERSION,
-    jobId: options.jobId,
-    kind: "ast_index",
-    astIndexes: result.astIndexes,
-    detectedRuntime: result.detectedRuntime
-  };
+  const normalized = await normalizeInputPackage(options.inputPath);
+  try {
+    const result = await analyzeInputPackage(normalized.rootDir, {
+      jobId: options.jobId,
+      rootDir: normalized.rootDir,
+      inputSourceKind: normalized.sourceKind
+    });
+    const inventoryArtifactPayload: ArtifactPayload & { inventory: typeof result.inventory } = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      jobId: options.jobId,
+      kind: "input_inventory",
+      inventory: result.inventory
+    };
+    const astIndexArtifactPayload: ArtifactPayload & {
+      astIndexes: typeof result.astIndexes;
+      detectedRuntime: typeof result.detectedRuntime;
+    } = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      jobId: options.jobId,
+      kind: "ast_index",
+      astIndexes: result.astIndexes,
+      detectedRuntime: result.detectedRuntime
+    };
 
-  process.stdout.write(
-    JSON.stringify(
-      {
-        jobId: options.jobId,
-        schemaVersion: CONTRACT_SCHEMA_VERSION,
-        inventoryArtifactPayload,
-        astIndexArtifactPayload
-      },
-      null,
-      2
-    )
-  );
-  process.stdout.write("\n");
+    process.stdout.write(
+      JSON.stringify(
+        {
+          jobId: options.jobId,
+          schemaVersion: CONTRACT_SCHEMA_VERSION,
+          inventoryArtifactPayload,
+          astIndexArtifactPayload
+        },
+        null,
+        2
+      )
+    );
+    process.stdout.write("\n");
+  } finally {
+    await normalized.cleanup();
+  }
 }
 
 main().catch((error: unknown) => {

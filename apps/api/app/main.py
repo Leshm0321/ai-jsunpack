@@ -14,6 +14,21 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from pydantic import ValidationError
+
+from packages.configuration import (
+    ApplicationConfig,
+    ConfigurationError,
+    RuntimeSettings,
+    RuntimeSettingsPatch,
+    apply_application_config_to_environment,
+    load_application_config,
+    merge_runtime_settings,
+    redact_secrets,
+)
+
+STARTUP_CONFIG_FILE = os.getenv("AI_JSUNPACK_CONFIG_FILE", "").strip()
+STARTUP_CONFIGURATION = apply_application_config_to_environment("api")
 
 from packages.deployment import DeploymentConfigurationError, validate_current_environment
 
@@ -23,6 +38,9 @@ from .models import (
     AuditRecordCollection,
     CancelJobRequest,
     CreateJobRequest,
+    ConfigSchemaResponse,
+    EffectiveConfigResponse,
+    EffectiveSettingsResponse,
     OpsAlert,
     OpsAlertDelivery,
     OpsAlertEvent,
@@ -39,6 +57,11 @@ from .models import (
     RetentionCleanupResult,
     ReviewRun,
     RuntimeValidationRun,
+    ProviderReadiness,
+    SettingsRevision,
+    SettingsRollbackRequest,
+    SettingsSnapshot,
+    SettingsUpdateRequest,
     ToolCall,
     ToolRegistryEntry,
 )
@@ -93,7 +116,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_cors_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -101,6 +124,156 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "serviceRole": "api", "deploymentProfile": DEPLOYMENT_PROFILE.status}
+
+
+@app.get("/v1/config/effective", response_model=EffectiveConfigResponse)
+def effective_config(access: AccessContext = Depends(require_access)) -> EffectiveConfigResponse:
+    require_authenticated_user(access)
+    loaded = current_application_config()
+    return EffectiveConfigResponse(
+        version=loaded.config.version,
+        source=loaded.source,
+        fingerprint=loaded.fingerprint,
+        config_file_configured=loaded.config_file is not None,
+        restart_required=False,
+        config=redact_secrets(loaded.config.model_dump(mode="json", by_alias=True)),
+    )
+
+
+@app.get("/v1/config/schema", response_model=ConfigSchemaResponse)
+def config_schema(access: AccessContext = Depends(require_access)) -> ConfigSchemaResponse:
+    require_authenticated_user(access)
+    return ConfigSchemaResponse(
+        application_config=ApplicationConfig.model_json_schema(by_alias=True),
+        runtime_settings=RuntimeSettings.model_json_schema(by_alias=True),
+    )
+
+
+@app.get("/v1/settings/system", response_model=SettingsSnapshot)
+def get_system_settings(access: AccessContext = Depends(require_access)) -> SettingsSnapshot:
+    require_authenticated_user(access)
+    return sanitized_settings_snapshot(store.get_settings("system"))
+
+
+@app.put("/v1/settings/system", response_model=SettingsRevision)
+def update_system_settings(
+    request: SettingsUpdateRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_system_settings_write(access)
+    settings = validated_runtime_settings_patch(request.settings)
+    try:
+        revision = store.write_settings_revision(
+            "system",
+            settings,
+            actor_id=access.subject,
+            reason=request.reason,
+            expected_revision=request.expected_revision,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return sanitized_settings_revision(revision)
+
+
+@app.get("/v1/settings/system/revisions", response_model=list[SettingsRevision])
+def list_system_settings_revisions(
+    limit: int = 100,
+    access: AccessContext = Depends(require_access),
+) -> list[SettingsRevision]:
+    require_system_settings_write(access)
+    return [sanitized_settings_revision(item) for item in store.list_settings_revisions("system", limit=limit)]
+
+
+@app.post("/v1/settings/system/rollback", response_model=SettingsRevision)
+def rollback_system_settings(
+    request: SettingsRollbackRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_system_settings_write(access)
+    return rollback_settings("system", None, request, access.subject)
+
+
+@app.get("/v1/projects/{project_id}/settings", response_model=SettingsSnapshot)
+def get_project_settings(
+    project_id: str,
+    access: AccessContext = Depends(require_access),
+) -> SettingsSnapshot:
+    require_project_role(access, project_id, "viewer")
+    return sanitized_settings_snapshot(store.get_settings("project", project_id))
+
+
+@app.put("/v1/projects/{project_id}/settings", response_model=SettingsRevision)
+def update_project_settings(
+    project_id: str,
+    request: SettingsUpdateRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_project_role(access, project_id, "owner")
+    settings = validated_runtime_settings_patch(request.settings)
+    try:
+        revision = store.write_settings_revision(
+            "project",
+            settings,
+            scope_id=project_id,
+            actor_id=access.subject,
+            reason=request.reason,
+            expected_revision=request.expected_revision,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return sanitized_settings_revision(revision)
+
+
+@app.get("/v1/projects/{project_id}/settings/effective", response_model=EffectiveSettingsResponse)
+def get_project_effective_settings(
+    project_id: str,
+    access: AccessContext = Depends(require_access),
+) -> EffectiveSettingsResponse:
+    require_project_role(access, project_id, "viewer")
+    system = store.get_settings("system")
+    project = store.get_settings("project", project_id)
+    effective = merge_runtime_settings(system.settings, project.settings)
+    return EffectiveSettingsResponse(
+        system_revision=system.revision,
+        project_revision=project.revision,
+        settings=redact_secrets(effective.model_dump(mode="json", by_alias=True)),
+    )
+
+
+@app.get("/v1/projects/{project_id}/settings/revisions", response_model=list[SettingsRevision])
+def list_project_settings_revisions(
+    project_id: str,
+    limit: int = 100,
+    access: AccessContext = Depends(require_access),
+) -> list[SettingsRevision]:
+    require_project_role(access, project_id, "owner")
+    return [
+        sanitized_settings_revision(item)
+        for item in store.list_settings_revisions("project", project_id, limit=limit)
+    ]
+
+
+@app.post("/v1/projects/{project_id}/settings/rollback", response_model=SettingsRevision)
+def rollback_project_settings(
+    project_id: str,
+    request: SettingsRollbackRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_project_role(access, project_id, "owner")
+    return rollback_settings("project", project_id, request, access.subject)
+
+
+@app.get("/v1/providers/readiness", response_model=list[ProviderReadiness])
+def providers_readiness(access: AccessContext = Depends(require_access)) -> list[ProviderReadiness]:
+    require_authenticated_user(access)
+    loaded = current_application_config()
+    system = store.get_settings("system")
+    runtime_patch = RuntimeSettingsPatch.model_validate(system.settings)
+    patch = runtime_patch.model_dump(mode="json", by_alias=True, exclude_none=True).get("ai", {})
+    return [
+        provider_readiness("cloud", loaded.config.worker.agent.cloud, patch.get("cloud", {})),
+        provider_readiness("local", loaded.config.worker.agent.local, patch.get("local", {})),
+    ]
 
 
 @app.post("/ops/heartbeats", response_model=OpsHeartbeatRecord)
@@ -167,7 +340,8 @@ def create_job(
     access: AccessContext = Depends(require_access),
 ) -> JobSummary:
     require_create_access(request, access)
-    job = store.create_job(request)
+    effective_request = request.model_copy(update={"config": job_config_with_runtime_settings(request)})
+    job = store.create_job(effective_request)
     return JobSummary(job=job, artifacts=[])
 
 
@@ -532,6 +706,134 @@ def require_project_role(access: AccessContext, project_id: str, minimum_role: P
         raise HTTPException(status_code=403, detail="Service credential is not allowed to access this API")
     if not access.has_project_role(project_id, minimum_role):
         raise HTTPException(status_code=403, detail="Caller is not allowed to access this project")
+
+
+def require_authenticated_user(access: AccessContext) -> None:
+    if access.kind != "user":
+        raise HTTPException(status_code=403, detail="User credential required")
+
+
+def require_system_settings_write(access: AccessContext) -> None:
+    require_authenticated_user(access)
+    if not any(role == "owner" for role in access.projects.values()):
+        raise HTTPException(status_code=403, detail="System settings require an owner role")
+
+
+def validated_runtime_settings_patch(settings: dict[str, object]) -> dict[str, object]:
+    try:
+        patch = RuntimeSettingsPatch.model_validate(settings)
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=error.errors()) from error
+    return patch.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+def job_config_with_runtime_settings(request: CreateJobRequest) -> dict[str, object]:
+    system = store.get_settings("system")
+    project = store.get_settings("project", request.project_id)
+    requested_runtime = {
+        key: value
+        for key, value in request.config.items()
+        if key in {"ai", "agents", "validation"}
+    }
+    try:
+        effective = merge_runtime_settings(system.settings, project.settings, requested_runtime)
+    except ConfigurationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    merged = deepcopy(request.config)
+    merged.update(effective.model_dump(mode="json", by_alias=True))
+    return merged
+
+
+def sanitized_settings_snapshot(snapshot: SettingsSnapshot) -> SettingsSnapshot:
+    return snapshot.model_copy(update={"settings": redact_secrets(snapshot.settings)})
+
+
+def sanitized_settings_revision(revision: SettingsRevision) -> SettingsRevision:
+    return revision.model_copy(update={"settings": redact_secrets(revision.settings)})
+
+
+def rollback_settings(
+    scope: str,
+    scope_id: str | None,
+    request: SettingsRollbackRequest,
+    actor_id: str,
+) -> SettingsRevision:
+    target = store.get_settings_revision(scope, request.revision, scope_id)  # type: ignore[arg-type]
+    if target is None:
+        raise HTTPException(status_code=404, detail="Settings revision not found")
+    try:
+        revision = store.write_settings_revision(
+            scope,  # type: ignore[arg-type]
+            target.settings,
+            scope_id=scope_id,
+            actor_id=actor_id,
+            reason=request.reason,
+            expected_revision=request.expected_revision,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return sanitized_settings_revision(revision)
+
+
+def current_application_config():
+    configured_path = os.getenv("AI_JSUNPACK_CONFIG_FILE", "").strip()
+    if configured_path == STARTUP_CONFIG_FILE:
+        return STARTUP_CONFIGURATION
+    try:
+        return load_application_config()
+    except ConfigurationError as error:
+        raise HTTPException(status_code=503, detail="Application configuration is invalid") from error
+
+
+def provider_readiness(mode: str, static_provider: object, runtime_override: dict[str, object]) -> ProviderReadiness:
+    provider_data = static_provider.model_dump(mode="json", by_alias=False)  # type: ignore[attr-defined]
+    provider_data.update({to_snake_key(key): value for key, value in runtime_override.items() if value is not None})
+    provider = str(provider_data.get("provider") or "openai-compatible")
+    model = provider_data.get("model")
+    base_url = provider_data.get("base_url")
+    secret_ref = provider_data.get("api_key_secret_ref")
+    credential_env = "AI_JSUNPACK_AGENT_API_KEY" if mode == "cloud" else "AI_JSUNPACK_LOCAL_AGENT_API_KEY"
+    credential_configured = bool(secret_ref or os.getenv(credential_env, "").strip())
+    issues: list[str] = []
+    if not isinstance(model, str) or not model.strip():
+        issues.append("model_not_configured")
+    if not isinstance(base_url, str) or not base_url.strip():
+        issues.append("endpoint_not_configured")
+    if mode == "cloud" and not credential_configured:
+        issues.append("credential_not_configured")
+    endpoint_type = provider_endpoint_type(base_url if isinstance(base_url, str) else None)
+    status = "ready" if not issues else "misconfigured"
+    return ProviderReadiness(
+        mode=mode,
+        status=status,
+        provider=provider,
+        model=model if isinstance(model, str) else None,
+        endpoint_type=endpoint_type,
+        credential_configured=credential_configured,
+        secret_ref_configured=bool(secret_ref),
+        checked_at=utc_now(),
+        issues=issues,
+    )
+
+
+def provider_endpoint_type(value: str | None) -> str:
+    if not value:
+        return "not_configured"
+    parsed = urlparse(value)
+    hostname = parsed.hostname or ""
+    if hostname in {"localhost", "127.0.0.1", "::1"}:
+        return "loopback"
+    return "remote_https" if parsed.scheme == "https" else "remote_http"
+
+
+def to_snake_key(value: str) -> str:
+    output = []
+    for char in value:
+        if char.isupper():
+            output.extend(("_", char.lower()))
+        else:
+            output.append(char)
+    return "".join(output)
 
 
 def require_ops_service(access: AccessContext) -> None:

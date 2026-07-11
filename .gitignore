@@ -20,6 +20,8 @@ __pycache__/
 .env.*
 !.env.example
 !.example.env
+config/ai-jsunpack.yaml
+config/ai-jsunpack.json
 artifacts/
 uploads/
 tmp/
@@ -28,4 +30,7 @@ playwright-report/
 test-results/
 *.tsbuildinfo
 design-system/
+!design-system/
+design-system/*
+!design-system/MASTER.md
 dev_docs/

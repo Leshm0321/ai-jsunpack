@@ -4,8 +4,9 @@ from pathlib import Path
 
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import create_store
-from apps.worker.worker.pipeline import PipelineRun
+from apps.worker.worker.pipeline import PipelineRun, WorkerPipeline
 from apps.worker.worker.queue import WorkerQueueRunner
+from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest, RuntimeSmokeRunner
 
 
 class RecordingPipeline:
@@ -28,6 +29,12 @@ class RecordingPipeline:
         run = PipelineRun(job_id)
         run.transition("completed", "recording pipeline completed")
         return run
+
+
+class FakeBrowserAdapter:
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nworker-queue-runtime")
+        return BrowserSmokeCapture()
 
 
 class WorkerQueueRunnerTest(unittest.TestCase):
@@ -76,6 +83,48 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 self.assertEqual(heartbeats[0].status, "ok")
                 self.assertEqual(heartbeats[0].metrics["jobId"], queued.id)
                 self.assertEqual(heartbeats[0].metrics["phase"], "completed")
+            finally:
+                store.close()
+
+    def test_run_once_processes_single_js_source_artifact_through_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="agentApi.js",
+                    content=b"function queueSingleBoot(){return 1} const value = queueSingleBoot();",
+                    content_type="text/javascript",
+                    producer="test.worker_queue",
+                )
+                pipeline = WorkerPipeline(runtime_smoke_runner=RuntimeSmokeRunner(browser_adapter=FakeBrowserAdapter()))
+                runner = WorkerQueueRunner(
+                    store=store,
+                    pipeline=pipeline,
+                    worker_id="queue-worker",
+                    lease_seconds=60,
+                    poll_seconds=0.1,
+                    max_attempts=1,
+                )
+
+                result = runner.run_once()
+
+                self.assertIsNotNone(result)
+                self.assertIn(result.status, {"completed", "completed_best_effort"})
+                persisted = store.get_job(job.id)
+                self.assertIn(persisted.status, {"completed", "completed_best_effort"})
+                self.assertNotIn("NoneType", persisted.failure_reason or "")
+                artifact_kinds = {artifact.kind for artifact in store.list_artifacts(job.id)}
+                self.assertIn("reconstruction_plan", artifact_kinds)
+                self.assertIn("generated_project", artifact_kinds)
+                self.assertIn("result_package", artifact_kinds)
             finally:
                 store.close()
 

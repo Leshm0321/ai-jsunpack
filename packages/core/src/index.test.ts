@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { gzipSync } from "node:zlib";
+import { deflateRawSync, gzipSync } from "node:zlib";
 import { analyzeInputPackage, planReconstruction, writeProject } from "./index.js";
 
 test("analyzeInputPackage inventories dist assets and indexes bundle symbols", async () => {
@@ -24,6 +24,25 @@ test("analyzeInputPackage inventories dist assets and indexes bundle symbols", a
     assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "n"));
     assert.ok(result.detectedRuntime.includes("vite_or_rollup"));
     assert.equal(result.sourceMapAnalysis.bundleCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage accepts a single JavaScript file as a wrapped static input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-single-js-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(inputPath, "function singleUploadBoot(){return 1} const value = singleUploadBoot();");
+
+    const result = await analyzeInputPackage(inputPath);
+
+    assert.deepEqual(result.inventory.entries, ["index.html"]);
+    assert.deepEqual(result.inventory.scripts, ["agentApi.js"]);
+    assert.equal(result.inventory.isSingleBundle, true);
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("single_script file was wrapped")));
+    assert.ok(result.detectedRuntime.includes("single_bundle_best_effort"));
+    assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "singleUploadBoot"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -414,6 +433,32 @@ test("analyzeInputPackage rejects archive paths that escape the extraction root"
   }
 });
 
+test("analyzeInputPackage rejects archive entries that exceed extraction resource limits", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-archive-limits-"));
+  try {
+    const zipBombPath = path.join(root, "ratio.zip");
+    await writeFile(
+      zipBombPath,
+      makeZipArchive([{ path: "large.txt", content: Buffer.alloc(1024 * 1024, 0x41), compress: true }])
+    );
+    await assert.rejects(analyzeInputPackage(zipBombPath), /resource limit exceeded.*compression ratio/i);
+
+    const oversizedTarPath = path.join(root, "oversized.tar");
+    const oversizedHeader = makeTarArchive([{ path: "large.js", content: "" }]);
+    writeTarOctal(oversizedHeader, 124, 12, 64 * 1024 * 1024 + 1);
+    await writeFile(oversizedTarPath, oversizedHeader);
+    await assert.rejects(analyzeInputPackage(oversizedTarPath), /resource limit exceeded.*maximum/i);
+
+    const tooManyZipEntriesPath = path.join(root, "entries.zip");
+    const tooManyEntries = makeZipArchive([]);
+    tooManyEntries.writeUInt16LE(10_001, tooManyEntries.length - 12);
+    await writeFile(tooManyZipEntriesPath, tooManyEntries);
+    await assert.rejects(analyzeInputPackage(tooManyZipEntriesPath), /resource limit exceeded.*entries/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("writeProject emits a buildable generated project shell", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-"));
   try {
@@ -506,6 +551,42 @@ test("writeProject accepts archive input and copies extracted sources", async ()
   }
 });
 
+test("writeProject accepts single JavaScript input and copies the wrapped static sources", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-single-js-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(inputPath, "function singleWriterBoot(){return 1} const value = singleWriterBoot();");
+
+    const analysis = await analyzeInputPackage(inputPath, { jobId: "job_single_writer_test" });
+    const plan = planReconstruction(analysis, { jobId: "job_single_writer_test" });
+    const outputDir = path.join(root, "generated_project");
+    const result = await writeProject(plan, { inputPath, outputDir });
+    const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
+      copiedSourceFiles: string[];
+      limitations: string[];
+    };
+
+    assert.equal(result.projectPath, outputDir);
+    assert.equal(plan.entryHtml, "index.html");
+    assert.ok(manifest.copiedSourceFiles.includes("public/original/agentApi.js"));
+    assert.ok(manifest.copiedSourceFiles.includes("public/original/index.html"));
+    assert.ok(manifest.limitations.some((limitation) => limitation.includes("single_script file was wrapped")));
+    assert.equal(
+      await readFile(path.join(outputDir, "public", "original", "agentApi.js"), "utf8"),
+      "function singleWriterBoot(){return 1} const value = singleWriterBoot();"
+    );
+    assert.ok(
+      (await readFile(path.join(outputDir, "public", "original", "index.html"), "utf8")).includes(
+        '<script src="./agentApi.js"></script>'
+      )
+    );
+    await runScript(outputDir, ["scripts/typecheck.mjs"]);
+    await runScript(outputDir, ["scripts/build.mjs"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function runScript(cwd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -528,6 +609,7 @@ function runScript(cwd: string, args: string[]): Promise<void> {
 interface ArchiveEntry {
   path: string;
   content: string | Buffer;
+  compress?: boolean;
 }
 
 function makeZipArchive(entries: ArchiveEntry[]): Buffer {
@@ -538,26 +620,28 @@ function makeZipArchive(entries: ArchiveEntry[]): Buffer {
   for (const entry of entries) {
     const name = Buffer.from(entry.path, "utf8");
     const content = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content, "utf8");
+    const compressed = entry.compress ? deflateRawSync(content) : content;
+    const compressionMethod = entry.compress ? 8 : 0;
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(compressionMethod, 8);
     local.writeUInt32LE(0, 14);
-    local.writeUInt32LE(content.length, 18);
+    local.writeUInt32LE(compressed.length, 18);
     local.writeUInt32LE(content.length, 22);
     local.writeUInt16LE(name.length, 26);
     local.writeUInt16LE(0, 28);
-    localParts.push(local, name, content);
+    localParts.push(local, name, compressed);
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(compressionMethod, 10);
     central.writeUInt32LE(0, 16);
-    central.writeUInt32LE(content.length, 20);
+    central.writeUInt32LE(compressed.length, 20);
     central.writeUInt32LE(content.length, 24);
     central.writeUInt16LE(name.length, 28);
     central.writeUInt16LE(0, 30);
@@ -566,7 +650,7 @@ function makeZipArchive(entries: ArchiveEntry[]): Buffer {
     central.writeUInt32LE(offset, 42);
     centralParts.push(central, name);
 
-    offset += local.length + name.length + content.length;
+    offset += local.length + name.length + compressed.length;
   }
 
   const localSection = Buffer.concat(localParts);

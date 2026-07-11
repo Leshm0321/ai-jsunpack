@@ -406,6 +406,56 @@ class WorkerPipelineTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_worker_pipeline_accepts_single_js_input_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_path = root / "agentApi.js"
+            input_path.write_text(
+                "function uploadedSingleBoot(){return 1} const value = uploadedSingleBoot();",
+                encoding="utf-8",
+            )
+
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                runner = RuntimeSmokeRunner(browser_adapter=FakeBrowserAdapter())
+                run = WorkerPipeline(runtime_smoke_runner=runner).run(job.id, input_path=input_path, store=store)
+                artifacts = store.list_artifacts(job.id)
+                artifact_by_kind = {artifact.kind: artifact for artifact in artifacts}
+                persisted_job = store.get_job(job.id)
+                inventory_payload = json.loads(
+                    Path(artifact_by_kind["input_inventory"].storage_uri).read_text(encoding="utf-8")
+                )
+                ast_index_payload = json.loads(Path(artifact_by_kind["ast_index"].storage_uri).read_text(encoding="utf-8"))
+                generated_project_artifact = artifact_by_kind["generated_project"]
+                generated_project_root = Path(generated_project_artifact.storage_uri)
+
+                self.assertTrue(any(event.status == "intake" for event in run.events))
+                self.assertTrue(any(event.status == "reconstructing" for event in run.events))
+                self.assertIn(run.events[-1].status, {"completed", "completed_best_effort"})
+                self.assertIsNotNone(persisted_job)
+                self.assertIn(persisted_job.status, {"completed", "completed_best_effort"})
+                self.assertEqual(inventory_payload["inventory"]["entries"], ["index.html"])
+                self.assertEqual(inventory_payload["inventory"]["scripts"], ["agentApi.js"])
+                self.assertTrue(inventory_payload["inventory"]["isSingleBundle"])
+                self.assertTrue(
+                    any(
+                        "single_script file was wrapped" in warning
+                        for warning in inventory_payload["inventory"]["warnings"]
+                    )
+                )
+                self.assertTrue(
+                    any(symbol["name"] == "uploadedSingleBoot" for symbol in ast_index_payload["astIndexes"][0]["symbols"])
+                )
+                self.assertTrue((generated_project_root / "public" / "original" / "agentApi.js").exists())
+                self.assertTrue((generated_project_root / "public" / "original" / "index.html").exists())
+                self.assertIn("result_package", artifact_by_kind)
+            finally:
+                store.close()
+
     def test_desensitized_job_redacts_agent_model_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

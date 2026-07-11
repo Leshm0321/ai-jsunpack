@@ -31,6 +31,16 @@ AllowedCommand = str | Sequence[str]
 DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
 PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("remote_browser_runner",)
 DEFAULT_GVISOR_RUNTIME_NAME = "runsc"
+DEPLOYMENT_PROFILE_ENV = "AI_JSUNPACK_DEPLOYMENT_PROFILE"
+
+
+def deployment_profile(value: object = None) -> str:
+    configured = value if isinstance(value, str) and value.strip() else os.getenv(DEPLOYMENT_PROFILE_ENV, "development")
+    return str(configured).strip().lower().replace("-", "_")
+
+
+def is_production_profile(value: object = None) -> bool:
+    return deployment_profile(value) in {"production", "prod"}
 
 
 @dataclass(frozen=True)
@@ -302,6 +312,7 @@ class SandboxPolicy:
         "TMP",
     )
     temp_prefix: str = "ai-jsunpack-sandbox-"
+    deployment_profile: str = field(default_factory=deployment_profile)
 
 
 @dataclass(frozen=True)
@@ -419,6 +430,8 @@ class LocalSandboxRunner:
         )
 
     def _denied_reason(self, command: SandboxCommand, workspace: Path) -> str | None:
+        if self.policy.resource_policy.runner_kind == "local" and is_production_profile(self.policy.deployment_profile):
+            return "Local sandbox execution is disabled by the production deployment profile."
         if not self._is_allowed(command.argv):
             return f"Command is not allowed: {command.executable}"
         if command.working_directory is None:
