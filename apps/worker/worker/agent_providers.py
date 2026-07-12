@@ -7,14 +7,23 @@ import os
 import socket
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib import error, request
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from apps.api.app.models import CloudMode, EvidenceRef, FailureClass, InferenceType, InferenceValidationStatus, RunStatus
+from apps.api.app.models import (
+    CloudMode,
+    EvidenceRef,
+    FailureClass,
+    InferenceType,
+    InferenceValidationStatus,
+    RepairAction,
+    RunStatus,
+)
 from packages.knowledge import KnowledgeHit
 from packages.memory import JobMemoryContext
 from packages.sandbox import is_production_profile
@@ -51,6 +60,8 @@ from .agent_contracts import (
     AgentReviewDraft,
     AgentRuntimeDiagnosisDraft,
     AgentRuntimeRequest,
+    crew_output_model_for_agent,
+    validate_crew_output_for_agent,
 )
 from .agent_feedback import AgentFeedbackRefiner
 
@@ -397,8 +408,9 @@ def prepare_crewai_storage() -> None:
     data_root = Path(os.getenv(CREWAI_DATA_ROOT_ENV, Path.cwd() / ".crewai-data")).resolve()
     data_root.mkdir(parents=True, exist_ok=True)
     os.environ["LOCALAPPDATA"] = str(data_root)
-    os.environ.setdefault("XDG_DATA_HOME", str(data_root))
-    os.environ.setdefault("CREWAI_STORAGE_DIR", "ai-jsunpack")
+    os.environ["APPDATA"] = str(data_root)
+    os.environ["XDG_DATA_HOME"] = str(data_root)
+    os.environ["CREWAI_STORAGE_DIR"] = "ai-jsunpack"
     try:
         import appdirs
 
@@ -435,6 +447,7 @@ class CrewAIBackend:
         self._prepare_crewai_storage()
         from crewai import Agent, Crew, Process, Task
 
+        output_model = crew_output_model_for_agent(spec.name)
         agent = Agent(
             role=spec.role,
             goal=spec.goal,
@@ -451,11 +464,11 @@ class CrewAIBackend:
             ),
             expected_output=f"Structured {spec.output_kind} records for {spec.name}.",
             agent=agent,
-            output_pydantic=CrewStructuredAgentOutput,
+            output_pydantic=output_model,
         )
         crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
         result = crew.kickoff(inputs={"agent_context": context_json})
-        return self._parse_crewai_result(result)
+        return self._parse_crewai_result(result, agent_name=spec.name)
 
     def _prepare_crewai_storage(self) -> None:
         if self._prepared:
@@ -463,20 +476,14 @@ class CrewAIBackend:
         prepare_crewai_storage()
         self._prepared = True
 
-    def _parse_crewai_result(self, result: Any) -> CrewStructuredAgentOutput:
+    def _parse_crewai_result(self, result: Any, *, agent_name: str) -> CrewStructuredAgentOutput:
         structured = getattr(result, "pydantic", None)
-        if isinstance(structured, CrewStructuredAgentOutput):
-            return structured
         if isinstance(structured, BaseModel):
-            return CrewStructuredAgentOutput.model_validate(structured.model_dump())
-        if isinstance(result, CrewStructuredAgentOutput):
-            return result
-        if isinstance(result, BaseModel):
-            return CrewStructuredAgentOutput.model_validate(result.model_dump())
-        if isinstance(result, dict):
-            return CrewStructuredAgentOutput.model_validate(result)
+            return validate_crew_output_for_agent(agent_name, structured)
+        if isinstance(result, BaseModel | dict):
+            return validate_crew_output_for_agent(agent_name, result)
         raw = getattr(result, "raw", None) or str(result)
-        return CrewStructuredAgentOutput.model_validate(json.loads(raw))
+        return validate_crew_output_for_agent(agent_name, json.loads(raw))
 
     def _llm_for_policy(self, policy: AgentModelPolicy) -> str | Any:
         if not policy.custom_endpoint_enabled:
@@ -505,19 +512,31 @@ class CrewAIExecutionAdapter:
         redactor: AgentContextRedactor | None = None,
         feedback_refiner: AgentFeedbackRefiner | None = None,
         context_builder: AgentContextBuilder | None = None,
-        backend: CrewAIBackend | None = None,
+        backend: Any | None = None,
     ) -> None:
         self.policy_resolver = policy_resolver or ModelPolicyResolver()
         self.redactor = redactor or AgentContextRedactor()
         self.feedback_refiner = feedback_refiner or AgentFeedbackRefiner()
         self.context_builder = context_builder or AgentContextBuilder()
-        self.backend = backend or CrewAIBackend()
+        if backend is None:
+            from .agent_process import IsolatedCrewAIBackend
+
+            backend = IsolatedCrewAIBackend()
+        self.backend = backend
         self._cached_backend_failures: dict[tuple[str, str, str], tuple[float, str]] = {}
         self._failure_cache_lock = threading.Lock()
         self._failure_cache_seconds = self._positive_float_env(
             BACKEND_FAILURE_CACHE_SECONDS_ENV,
             DEFAULT_BACKEND_FAILURE_CACHE_SECONDS,
         )
+
+    @property
+    def parallel_safe(self) -> bool:
+        return bool(getattr(self.backend, "parallel_safe", False))
+
+    @property
+    def isolation_mode(self) -> str:
+        return str(getattr(self.backend, "isolation_mode", "in_process"))
 
     def prepare_context(
         self,
@@ -568,43 +587,79 @@ class CrewAIExecutionAdapter:
         evidence_refs: list[EvidenceRef],
     ) -> CrewAgentExecution:
         if not policy.allowed:
-            return self._policy_denied_execution(
-                spec=spec,
-                policy=policy,
-                input_artifact_ids=input_artifact_ids,
-                evidence_refs=evidence_refs,
+            return replace(
+                self._policy_denied_execution(
+                    spec=spec,
+                    policy=policy,
+                    input_artifact_ids=input_artifact_ids,
+                    evidence_refs=evidence_refs,
+                ),
+                isolation_mode=self.isolation_mode,
             )
         cache_key = self._failure_cache_key(policy)
         cached_failure = self._cached_failure(cache_key)
         if cached_failure:
-            return self._failed_execution(
-                spec=spec,
-                policy=policy,
-                input_artifact_ids=input_artifact_ids,
-                evidence_refs=evidence_refs,
-                error=RuntimeError(cached_failure),
+            return replace(
+                self._failed_execution(
+                    spec=spec,
+                    policy=policy,
+                    input_artifact_ids=input_artifact_ids,
+                    evidence_refs=evidence_refs,
+                    error=RuntimeError(cached_failure),
+                ),
+                isolation_mode=self.isolation_mode,
             )
 
         try:
             output = self.backend.run_agent(spec=spec, prompt_context=prompt_context, policy=policy)
+            output = validate_crew_output_for_agent(spec.name, output)
         except Exception as error:
-            self._cache_failure(cache_key, str(error))
-            return self._failed_execution(
+            if self._should_cache_backend_failure(error):
+                self._cache_failure(cache_key, str(error))
+            metadata = self._process_metadata(error)
+            return replace(
+                self._failed_execution(
+                    spec=spec,
+                    policy=policy,
+                    input_artifact_ids=input_artifact_ids,
+                    evidence_refs=evidence_refs,
+                    error=error,
+                ),
+                **metadata,
+            )
+        with self._failure_cache_lock:
+            self._cached_backend_failures.pop(cache_key, None)
+        metadata = self._process_metadata()
+        return replace(
+            self._execution_from_output(
                 spec=spec,
                 policy=policy,
                 input_artifact_ids=input_artifact_ids,
                 evidence_refs=evidence_refs,
-                error=error,
-            )
-        with self._failure_cache_lock:
-            self._cached_backend_failures.pop(cache_key, None)
-        return self._execution_from_output(
-            spec=spec,
-            policy=policy,
-            input_artifact_ids=input_artifact_ids,
-            evidence_refs=evidence_refs,
-            output=output,
+                output=output,
+            ),
+            **metadata,
         )
+
+    def _process_metadata(self, error: Exception | None = None) -> dict[str, Any]:
+        result = getattr(error, "result", None)
+        consume = getattr(self.backend, "consume_last_result", None)
+        consumed = consume() if callable(consume) else None
+        if result is None:
+            result = consumed
+        return {
+            "isolation_mode": self.isolation_mode,
+            "process_exit_status": getattr(result, "process_exit_status", None),
+            "process_data_root_configured": bool(getattr(result, "data_root", None)),
+        }
+
+    def _should_cache_backend_failure(self, error: Exception) -> bool:
+        if isinstance(error, ValidationError):
+            return False
+        result = getattr(error, "result", None)
+        if getattr(result, "status", None) == "invalid_response":
+            return False
+        return True
 
     def _failure_cache_key(self, policy: AgentModelPolicy) -> tuple[str, str, str]:
         return (
@@ -650,7 +705,7 @@ class CrewAIExecutionAdapter:
         runtime_diagnoses = [self._runtime_diagnosis_from_output(item) for item in output.runtime_diagnoses]
         report_sections = [self._report_section_from_output(item) for item in output.report_sections]
         repair_instructions = [self._repair_instruction_from_output(item) for item in output.repair_instructions]
-        status = self._execution_status(review.status if review is not None else "best_effort")
+        status = self._execution_status(review.status if review is not None else "pass")
         failure_class = review.failure_class if review is not None else "none"
         message = review.decision if review is not None else f"{spec.name} completed with no explicit review decision."
         return CrewAgentExecution(
@@ -675,6 +730,7 @@ class CrewAIExecutionAdapter:
             model_custom_endpoint_enabled=policy.custom_endpoint_enabled,
             model_timeout_seconds=policy.timeout_seconds,
             model_temperature=policy.temperature,
+            role_schema_validated=True,
         )
 
     def _policy_denied_execution(
@@ -787,7 +843,7 @@ class CrewAIExecutionAdapter:
 
     def _repair_instruction_from_output(self, output: CrewRepairInstructionOutput) -> AgentRepairInstructionDraft:
         actions = [
-            RepairActionLike.to_model(action_name=item.action, path=item.path, value=item.value, reason=item.reason)
+            RepairAction(action=item.action, path=item.path, value=item.value, reason=item.reason)
             for item in output.actions
         ]
         return AgentRepairInstructionDraft(
@@ -918,16 +974,6 @@ class CrewAIExecutionAdapter:
         }
         normalized = str(value)
         return normalized if normalized in allowed else "unknown"  # type: ignore[return-value]
-
-
-class RepairActionLike:
-    @staticmethod
-    def to_model(*, action_name: str, path: str | None, value: str | None, reason: str):
-        from apps.api.app.models import RepairAction
-
-        allowed = {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
-        action = action_name if action_name in allowed else "mirror_original_static_entry"
-        return RepairAction(action=action, path=path, value=value, reason=reason)
 
 
 __all__ = [

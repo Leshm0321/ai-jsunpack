@@ -84,7 +84,7 @@ flowchart LR
 
 ## 多智能体 DAG
 
-Agent Runtime 使用固定阶段与显式依赖：
+Agent Runtime 使用固定阶段、显式依赖和受限动态选择：
 
 ```mermaid
 graph LR
@@ -110,14 +110,20 @@ graph LR
 
 执行规则：
 
-- `planner`、`analysis`、`synthesis`、`review` 串行。
-- 5 个 specialist 标记为可并行，并由本地 `ThreadPoolExecutor` 执行。
+- Planner 只能从固定 specialist 白名单中选择本次节点；非法、空或失败输出回退到全部 specialist，不能创建 Agent 或修改阶段。
+- `planner`、`analysis`、`review` 按依赖执行；specialist 以及互不依赖的 Repair/Report 可并行。
+- 每次 CrewAI 调用运行在独立 Python 子进程和独立 `.crewai-data/<job>/<agent>/<run>` 中；主进程只负责受控 DAG 调度和 Artifact 持久化。
+- `agents.maxParallel` 限制并发子进程数；不具备进程隔离能力的 Adapter 自动退化为串行。
 - DAG 在执行前拒绝重复名称、缺失依赖、同阶段/后置依赖和依赖环。
 - 上游失败时，下游节点标记为 `skipped` 并继承失败分类。
-- specialist 对相同 inference type 的输出会形成 conflict record，由 ReviewAgent 合并。
-- 每个 Agent 只返回约束 schema；不能直接修改生成工程。
+- Planner 失败不会阻断 Analysis；系统使用全部 specialist 的安全回退计划继续运行。
+- conflict detector 按 inference type、target 和 value 区分同值 overlap 与异值 conflict，ReviewAgent 可读取全部 specialist、Repair 和 Report 的规范化输出。
+- 每个 Agent 使用独立的严格 Pydantic 输出模型；服务端覆盖模型自报的 `agentName`，跨角色字段和 inference type 会被拒绝。
+- `agents.contextBudget` 按确定顺序裁剪可选 knowledge、memory、摘要和 excerpt，同时保留直接依赖输出与 evidence locator，并记录预算审计。
+- Agent 不能直接修改生成工程；只有 Review 明确批准的 `planned`、低风险、白名单 RepairAction 才会在首次 Core 重建完成前由确定性 Writer 应用。
+- Python Worker 与 TypeScript Core 之间的反馈文件使用显式 `protocolVersion: 1`；版本或结构不匹配时 Core fail closed。
 
-当前 Settings 模型包含 `agents.maxParallel` 和 `agents.contextBudget`，但执行管理器尚未使用这些字段限制线程数或上下文。当前 specialist 并行度由 DAG 中可并行节点数量决定。详情见 [配置指南](configuration.md#当前执行边界)。
+CrewAI 在此架构中是隔离的 Agent execution adapter；Job 状态、DAG、失败传播、审批、重试和 Artifact lineage 仍由 Worker 的确定性编排层负责。详情见 [配置指南](configuration.md#当前执行边界)。
 
 ## 输入与 Headless Core
 

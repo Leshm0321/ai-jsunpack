@@ -148,9 +148,9 @@ API 保存三层运行时设置：
 
 ### 当前执行边界
 
-Settings API 和 Web 设置中心已经提供存储、合并、版本和回滚能力，但 Worker 并未消费所有嵌套运行时字段。当前 provider 选择仍主要读取 Job 顶层的 `agentModel`、`agentModelProvider`、`localAgentModel`、`localAgentProvider`，或 Worker 环境变量；build/runtime compare 仍读取 `buildValidation`、`runtimeCompare`、`reviewFix` 等现有 Job 配置。
+Settings API 和 Web 设置中心提供存储、合并、版本和回滚能力。Worker 已消费 `agents.maxParallel` 和 `agents.contextBudget`：前者限制进程隔离的 Agent 并发，后者限制每次 Agent Prompt 的近似 token 预算，并把 requested/effective 值和裁剪结果写入 Agent Plan/Execution Artifact。provider 选择仍主要读取 Job 顶层的 `agentModel`、`agentModelProvider`、`localAgentModel`、`localAgentProvider`，或 Worker 环境变量；build/runtime compare 仍读取 `buildValidation`、`runtimeCompare`、`reviewFix` 等现有 Job 配置。
 
-因此，在对应 Worker 消费逻辑补齐前，不要把 `agents.maxParallel`、`agents.contextBudget` 或 `validation.*` 的界面保存成功等同于执行行为已经改变。它们目前是已验证、可审计的配置记录和 Job 输入。
+`validation.*` 仍不是全部由 Worker 直接消费；界面保存成功只表示配置已验证并进入 Job 输入。Agent 并发还受 Adapter 能力约束：生产 CrewAI Adapter 使用独立子进程，因此可并行；测试或自定义的非隔离 Adapter 会把 effective parallelism 降为 1。
 
 启动模型也包含尚未直接驱动执行的字段：`worker.sandbox.allowLocalInDevelopment`、`browserRunner.mode` 和 `browserRunner.tokenSecretRef` 当前会被校验、脱敏和展示，但 `apply_application_config_to_environment` 只映射 sandbox `runner`、Agent provider/model/base URL 和 Browser Runner `baseUrl`。实际 token、队列 backend 和本地执行许可仍由服务环境与部署策略决定。
 

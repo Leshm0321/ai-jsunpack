@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ class CoreBridge:
         job_id: str,
         input_path: Path | str,
         output_dir: Path | str,
+        agent_feedback: dict[str, Any] | None = None,
     ) -> CoreReconstructionResult:
         if not self.cli_path.exists():
             raise CoreBridgeError(f"Core CLI is not built: {self.cli_path}")
@@ -87,7 +89,16 @@ class CoreBridge:
             "--output-dir",
             str(Path(output_dir)),
         ]
-        result = self._run_core_cli(command)
+        if agent_feedback is None:
+            result = self._run_core_cli(command)
+        else:
+            with tempfile.TemporaryDirectory(prefix="ai-jsunpack-agent-feedback-") as temp_dir:
+                feedback_path = Path(temp_dir) / "agent-feedback.json"
+                feedback_path.write_text(
+                    json.dumps(agent_feedback, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                result = self._run_core_cli([*command, "--agent-feedback-file", str(feedback_path)])
 
         if result.returncode != 0:
             stderr = result.stderr.strip() or "Core CLI reconstruct failed without stderr."

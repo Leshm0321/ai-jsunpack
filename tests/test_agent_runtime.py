@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,16 @@ from unittest.mock import patch
 
 from apps.api.app.models import CreateJobRequest, EvidenceRef
 from apps.api.app.store import create_store
-from apps.worker.worker.agent_contracts import CrewAgentExecution, CrewAgentSpec, CrewStageExecution
+from apps.worker.worker.agent_contracts import (
+    AgentInferenceDraft,
+    AgentProviderDraft,
+    AgentRepairInstructionDraft,
+    AgentReviewDraft,
+    CrewAgentExecution,
+    CrewAgentSpec,
+    CrewStageExecution,
+    validate_crew_output_for_agent,
+)
 from apps.worker.worker.agent_runtime import (
     AgentContextRedactor,
     AgentRuntime,
@@ -19,6 +29,7 @@ from apps.worker.worker.agent_runtime import (
     AgentToolRegistryBuilder,
     ModelPolicyResolver,
     CrewExecutionManager,
+    CrewConflictDetector,
     CrewRuntimePlanner,
 )
 from apps.worker.worker.agent_artifacts import AgentArtifactWriter
@@ -81,22 +92,23 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertTrue(policy.sanitized_context)
 
     def test_cloud_policy_reads_openai_compatible_endpoint_from_worker_env(self):
-        with patch.dict(
-            os.environ,
-            {
-                "AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test",
-                "AI_JSUNPACK_AGENT_API_KEY": "secret-value",
-                "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "12.5",
-                "AI_JSUNPACK_AGENT_TEMPERATURE": "0.2",
-            },
-            clear=False,
-        ):
-            policy = ModelPolicyResolver().resolve(
-                self._request(
-                    cloud_mode="cloud_allowed",
-                    config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+        with patch.object(ModelPolicyResolver, "_hostname_is_private", return_value=False):
+            with patch.dict(
+                os.environ,
+                {
+                    "AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test",
+                    "AI_JSUNPACK_AGENT_API_KEY": "secret-value",
+                    "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "12.5",
+                    "AI_JSUNPACK_AGENT_TEMPERATURE": "0.2",
+                },
+                clear=False,
+            ):
+                policy = ModelPolicyResolver().resolve(
+                    self._request(
+                        cloud_mode="cloud_allowed",
+                        config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                    )
                 )
-            )
 
         self.assertTrue(policy.allowed)
         self.assertTrue(policy.custom_endpoint_enabled)
@@ -263,17 +275,20 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(result.memory_excerpt, "Job memory mentions boot.")
         self.assertEqual(result.evidence_refs[0].excerpt, "symbols=['boot']")
 
-    def test_tool_registry_marks_crewai_provider_as_stateful_not_parallel_safe(self):
+    def test_tool_registry_marks_crewai_provider_as_process_isolated_and_parallel_safe(self):
         entries = AgentToolRegistryBuilder().entries("job_tools")
         crewai_entry = next(entry for entry in entries if entry.tool_name == "crewai.agent_pass")
 
         self.assertEqual(crewai_entry.category, "model")
         self.assertIn("stateful", crewai_entry.description)
-        self.assertIn("not parallel-safe", crewai_entry.description)
+        self.assertNotIn("not parallel-safe", crewai_entry.description)
+        self.assertIn("isolated child process", crewai_entry.description)
         self.assertIn("model_call", crewai_entry.description)
-        self.assertIn("crewai_storage", crewai_entry.description)
+        self.assertIn("isolated_crewai_storage", crewai_entry.description)
+        self.assertIn("child_process", crewai_entry.description)
         self.assertIn("runtime_diagnosis", crewai_entry.output_artifact_kinds)
         self.assertIn("repair_instruction", crewai_entry.output_artifact_kinds)
+        self.assertIn("resource_limit", crewai_entry.failure_classes)
 
     def test_crewai_backend_uses_string_model_when_no_custom_endpoint(self):
         policy = ModelPolicyResolver().resolve(
@@ -283,17 +298,18 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(CrewAIBackend()._llm_for_policy(policy), "provider/model-a")
 
     def test_crewai_backend_uses_custom_llm_for_openai_compatible_endpoint(self):
-        with patch.dict(
-            os.environ,
-            {"AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test", "AI_JSUNPACK_AGENT_API_KEY": "secret"},
-            clear=False,
-        ):
-            policy = ModelPolicyResolver().resolve(
-                self._request(
-                    cloud_mode="cloud_allowed",
-                    config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+        with patch.object(ModelPolicyResolver, "_hostname_is_private", return_value=False):
+            with patch.dict(
+                os.environ,
+                {"AI_JSUNPACK_AGENT_BASE_URL": "https://agent.example.test", "AI_JSUNPACK_AGENT_API_KEY": "secret"},
+                clear=False,
+            ):
+                policy = ModelPolicyResolver().resolve(
+                    self._request(
+                        cloud_mode="cloud_allowed",
+                        config={"agentModel": "private-model", "agentModelProvider": "openai-compatible"},
+                    )
                 )
-            )
 
         llm = CrewAIBackend()._llm_for_policy(policy)
 
@@ -412,7 +428,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
         self.assertEqual(first.status, "fail")
         self.assertEqual(cached.status, "fail")
-        self.assertEqual(recovered.status, "best_effort")
+        self.assertEqual(recovered.status, "pass")
         self.assertEqual(backend.calls, 2)
 
     def test_agent_plan_rejects_missing_and_same_stage_dependencies(self):
@@ -431,6 +447,515 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["Missing"]})])
         with self.assertRaisesRegex(Exception, "earlier stage"):
             planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["AnalysisAgent"]})])
+
+    def test_role_contract_rejects_cross_role_fields_and_rebinds_agent_identity(self):
+        validated = validate_crew_output_for_agent(
+            "NamingAgent",
+            {
+                "inferences": [
+                    {
+                        "type": "naming",
+                        "agentName": "ForgedAgent",
+                        "confidence": 0.8,
+                        "uncertaintyReasons": ["Minified source."],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(validated.inferences[0].agent_name, "NamingAgent")
+        with self.assertRaisesRegex(Exception, "outside this role contract"):
+            validate_crew_output_for_agent(
+                "NamingAgent",
+                {"inferences": [{"type": "framework", "confidence": 0.8}]},
+            )
+        with self.assertRaises(Exception):
+            validate_crew_output_for_agent(
+                "RuntimeAgent",
+                {"reportSections": [{"title": "not runtime output"}]},
+            )
+        with self.assertRaises(Exception):
+            validate_crew_output_for_agent(
+                "RepairAgent",
+                {
+                    "repairInstructions": [
+                        {
+                            "targetStage": "runtime_compare",
+                            "failureClass": "none",
+                            "status": "planned",
+                            "riskLevel": "low",
+                            "decision": "Invalid action fixture.",
+                            "actions": [
+                                {
+                                    "action": "delete_everything",
+                                    "path": "projectRoot",
+                                    "value": "all",
+                                    "reason": "Must be rejected, never coerced.",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+
+    def test_planner_selects_allowlisted_specialists_and_review_receives_all_selected_outputs(self):
+        adapter = _RecordingExecutionAdapter(planned_agents=["NamingAgent", "RuntimeAgent"])
+        manager = CrewExecutionManager(adapter=adapter)
+        request = self._request(
+            cloud_mode="cloud_allowed",
+            config={"agentModel": "model-a", "agents": {"maxParallel": 2}},
+        )
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()) as aggregate:
+            stages, _ = manager.execute(context=context, specs=CrewRuntimePlanner().build_specs())
+
+        specialist_stage = next(stage for stage in stages if stage.stage == "specialists")
+        synthesis_stage = next(stage for stage in stages if stage.stage == "synthesis")
+        self.assertEqual(
+            [execution.spec.name for execution in specialist_stage.agent_executions],
+            ["NamingAgent", "RuntimeAgent"],
+        )
+        self.assertTrue(all(execution.spec.dependencies == ["NamingAgent", "RuntimeAgent"] for execution in synthesis_stage.agent_executions))
+        review_prompt = adapter.prompts["ReviewAgent"]
+        self.assertEqual(set(review_prompt["reviewInputs"]["specialists"]), {"NamingAgent", "RuntimeAgent"})
+        self.assertEqual(set(review_prompt["reviewInputs"]["synthesis"]), {"RepairAgent", "ReportAgent"})
+        self.assertEqual(
+            set(review_prompt["dependencyOutputs"]),
+            {"NamingAgent", "RuntimeAgent", "RepairAgent", "ReportAgent"},
+        )
+        self.assertEqual(aggregate.call_args.kwargs["requested_max_parallel"], 2)
+        self.assertEqual(aggregate.call_args.kwargs["effective_max_parallel"], 2)
+        self.assertEqual(aggregate.call_args.kwargs["scheduler_mode"], "bounded_parallel")
+
+    def test_invalid_planner_selection_falls_back_to_all_specialists(self):
+        adapter = _RecordingExecutionAdapter(planned_agents=["ReviewAgent"])
+        manager = CrewExecutionManager(adapter=adapter)
+        request = self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()) as aggregate:
+            stages, _ = manager.execute(context=context, specs=CrewRuntimePlanner().build_specs())
+
+        specialist_stage = next(stage for stage in stages if stage.stage == "specialists")
+        self.assertEqual(
+            [execution.spec.name for execution in specialist_stage.agent_executions],
+            ["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
+        )
+        self.assertEqual(aggregate.call_args.kwargs["planner_fallback_reason"], "planner_selection_outside_allowlist")
+
+    def test_repair_ids_are_assigned_before_review_and_can_be_explicitly_approved(self):
+        class ApprovalAdapter:
+            tool_name = "test.agent"
+            tool_version = "1"
+            parallel_safe = True
+
+            def execute_agent(self, *, spec, policy, prompt_context, input_artifact_ids, evidence_refs):
+                raw_output = {"plannedAgents": ["NamingAgent"]} if spec.name == "PlannerAgent" else {}
+                repairs = []
+                review = None
+                if spec.name == "RepairAgent":
+                    repairs = [
+                        AgentRepairInstructionDraft(
+                            target_stage="runtime_compare",
+                            failure_class="none",
+                            decision="Add a deterministic package script.",
+                            status="planned",
+                            risk_level="low",
+                        )
+                    ]
+                if spec.name == "ReviewAgent":
+                    repair_id = prompt_context["dependencyOutputs"]["RepairAgent"]["repairInstructions"][0]["id"]
+                    review = AgentReviewDraft(
+                        status="pass",
+                        decision="Approved one low-risk instruction.",
+                        failure_class="none",
+                        repair_instruction_ids=[repair_id],
+                    )
+                return CrewAgentExecution(
+                    spec=spec,
+                    status="pass",
+                    failure_class="none",
+                    attempt=0,
+                    duration_ms=0.0,
+                    input_artifact_ids=input_artifact_ids,
+                    evidence_refs=evidence_refs,
+                    message="done",
+                    raw_output=raw_output,
+                    repair_instructions=repairs,
+                    review=review,
+                    model_provider=policy.model_provider,
+                    model_name=policy.model_name,
+                )
+
+        manager = CrewExecutionManager(adapter=ApprovalAdapter())
+        request = self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()):
+            stages, _ = manager.execute(context=context, specs=CrewRuntimePlanner().build_specs())
+
+        repair_execution = next(
+            execution
+            for stage in stages
+            for execution in stage.agent_executions
+            if execution.spec.name == "RepairAgent"
+        )
+        review_execution = next(
+            execution
+            for stage in stages
+            for execution in stage.agent_executions
+            if execution.spec.name == "ReviewAgent"
+        )
+        self.assertEqual(repair_execution.repair_instructions[0].id, "RepairAgent:repair:1")
+        self.assertEqual(review_execution.review.repair_instruction_ids, ["RepairAgent:repair:1"])
+
+    def test_failed_planner_falls_back_without_blocking_analysis_or_specialists(self):
+        adapter = _RecordingExecutionAdapter(planned_agents=[], planner_failure=True)
+        manager = CrewExecutionManager(adapter=adapter)
+        request = self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()) as aggregate:
+            stages, _ = manager.execute(context=context, specs=CrewRuntimePlanner().build_specs())
+
+        analysis = next(stage for stage in stages if stage.stage == "analysis").agent_executions[0]
+        specialists = next(stage for stage in stages if stage.stage == "specialists").agent_executions
+        self.assertEqual(analysis.status, "pass")
+        self.assertTrue(all(execution.status == "pass" for execution in specialists))
+        self.assertEqual(
+            aggregate.call_args.kwargs["planner_fallback_reason"],
+            "planner_execution_fail:agent_failed",
+        )
+
+    def test_conflict_detector_distinguishes_aligned_overlap_from_value_conflict(self):
+        executions = []
+        for name, value in (("NamingAgent", "bootstrap"), ("TypeAgent", "start")):
+            spec = CrewAgentSpec(
+                name=name,
+                stage="specialists",
+                responsibility="Infer",
+                role="Infer",
+                goal="Infer",
+                backstory="Infer",
+                output_kind="inference_record",
+                allow_parallel=True,
+            )
+            executions.append(
+                CrewAgentExecution(
+                    spec=spec,
+                    status="pass",
+                    failure_class="none",
+                    attempt=0,
+                    duration_ms=0,
+                    input_artifact_ids=[],
+                    evidence_refs=[],
+                    message="done",
+                    raw_output={"inferences": [{"type": "naming", "target": "symbol:a", "value": value}]},
+                    inferences=[
+                        AgentInferenceDraft(
+                            type="naming",
+                            agent_name=name,
+                            confidence=0.8,
+                            uncertainty_reasons=["minified"],
+                            alternatives=[],
+                        )
+                    ],
+                )
+            )
+        stage = CrewStageExecution(
+            stage="specialists",
+            status="pass",
+            agent_executions=executions,
+            duration_ms=0,
+            failure_class="none",
+        )
+
+        conflicts = CrewConflictDetector().detect(stage)
+
+        self.assertEqual(conflicts[0].severity, "warning")
+        self.assertTrue(conflicts[0].key.startswith("conflict:naming:symbol:a"))
+        aligned = [
+            replace(execution, raw_output={"inferences": [{"type": "naming", "target": "symbol:a", "value": "bootstrap"}]})
+            for execution in executions
+        ]
+        overlap = CrewConflictDetector().detect(replace(stage, agent_executions=aligned))
+        self.assertEqual(overlap[0].severity, "info")
+        self.assertTrue(overlap[0].key.startswith("overlap:naming:symbol:a"))
+
+    def test_conflict_detector_flags_dead_code_against_retained_semantics(self):
+        executions = []
+        for name, inference_type, value in (
+            ("NamingAgent", "naming", "bootstrap"),
+            ("DeadCodeAgent", "dead_code", "remove"),
+        ):
+            spec = CrewAgentSpec(
+                name=name,
+                stage="specialists",
+                responsibility="Infer",
+                role="Infer",
+                goal="Infer",
+                backstory="Infer",
+                output_kind="inference_record",
+                allow_parallel=True,
+            )
+            executions.append(
+                CrewAgentExecution(
+                    spec=spec,
+                    status="pass",
+                    failure_class="none",
+                    attempt=0,
+                    duration_ms=0,
+                    input_artifact_ids=[],
+                    evidence_refs=[],
+                    message="done",
+                    raw_output={
+                        "inferences": [
+                            {"type": inference_type, "target": "symbol:a", "value": value}
+                        ]
+                    },
+                    inferences=[
+                        AgentInferenceDraft(
+                            type=inference_type,
+                            agent_name=name,
+                            confidence=0.8,
+                            uncertainty_reasons=["fixture"],
+                            alternatives=[],
+                        )
+                    ],
+                )
+            )
+        stage = CrewStageExecution(
+            stage="specialists",
+            status="pass",
+            agent_executions=executions,
+            duration_ms=0,
+            failure_class="none",
+        )
+
+        conflicts = CrewConflictDetector().detect(stage)
+
+        self.assertTrue(any(conflict.key == "conflict:retention:symbol:a" for conflict in conflicts))
+
+    def test_context_budget_trims_optional_context_but_preserves_dependencies_and_locators(self):
+        manager = CrewExecutionManager(adapter=_RecordingExecutionAdapter(planned_agents=["NamingAgent"]))
+        request = self._request(
+            cloud_mode="cloud_allowed",
+            config={"agents": {"contextBudget": 1000}},
+        )
+        context = SimpleNamespace(request=request)
+        spec = CrewRuntimePlanner().build_specs()[-1]
+        prompt = {
+            "agent": {"name": "ReviewAgent"},
+            "memory": "m" * 5000,
+            "knowledgeHits": [
+                {"category": "historical_repair_case", "locator": "knowledge:historical", "excerpt": "h" * 3000},
+                {"category": "framework", "locator": "knowledge:framework", "excerpt": "current"},
+            ],
+            "completedAgents": {"PlannerAgent": {"message": "p" * 1000}, "RepairAgent": {"message": "keep"}},
+            "dependencyOutputs": {"RepairAgent": {"rawOutput": {"decision": "required"}}},
+            "evidenceRefs": [
+                {"artifactId": "a", "locator": "file:assets/app.js", "excerpt": "e" * 8000}
+            ],
+        }
+
+        trimmed, audit = manager._apply_context_budget(context=context, spec=spec, prompt_context=prompt)
+
+        self.assertEqual(trimmed["dependencyOutputs"], prompt["dependencyOutputs"])
+        self.assertEqual(trimmed["evidenceRefs"][0]["locator"], "file:assets/app.js")
+        self.assertNotIn("historical_repair_case", json.dumps(trimmed))
+        self.assertEqual(trimmed["memory"], "[omitted by context budget]")
+        self.assertGreater(audit["omissions"]["evidenceExcerpts"], 0)
+        self.assertEqual(audit["estimateMethod"], "ceil_utf8_bytes_div_4")
+
+    def test_context_budget_overflow_fails_before_model_invocation(self):
+        adapter = _RecordingExecutionAdapter(planned_agents=["NamingAgent"])
+        manager = CrewExecutionManager(adapter=adapter)
+        request = self._request(
+            cloud_mode="cloud_allowed",
+            config={"agentModel": "model-a", "agents": {"contextBudget": 1000}},
+        )
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+        dependency_spec = CrewAgentSpec(
+            name="RepairAgent",
+            stage="synthesis",
+            responsibility="Repair",
+            role="Repair",
+            goal="Repair",
+            backstory="Repair",
+            output_kind="repair_instruction",
+            allow_parallel=True,
+        )
+        dependency = CrewAgentExecution(
+            spec=dependency_spec,
+            status="pass",
+            failure_class="none",
+            attempt=0,
+            duration_ms=0,
+            input_artifact_ids=[],
+            evidence_refs=[],
+            message="done",
+            raw_output={"decision": "x" * 20_000},
+        )
+        review_spec = CrewRuntimePlanner().build_specs()[-1]
+
+        execution = manager._execute_spec(
+            context=context,
+            spec=review_spec,
+            stages=[],
+            executions_by_name={"RepairAgent": dependency},
+        )
+
+        self.assertEqual(execution.status, "fail")
+        self.assertEqual(execution.failure_class, "resource_limit")
+        self.assertFalse(execution.context_budget_audit["withinBudget"])
+        self.assertNotIn("ReviewAgent", adapter.prompts)
+        self.assertIsNotNone(execution.review)
+        self.assertEqual(execution.review.failure_class, "resource_limit")
+
+    def test_parallel_stage_audit_records_actual_worker_counts(self):
+        adapter = _RecordingExecutionAdapter(planned_agents=["NamingAgent", "RuntimeAgent"])
+        manager = CrewExecutionManager(adapter=adapter)
+        request = self._request(
+            cloud_mode="cloud_allowed",
+            config={"agentModel": "model-a", "agents": {"maxParallel": 1}},
+        )
+        context = SimpleNamespace(
+            request=request,
+            memory_artifact_ids=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tools"),
+            evidence_refs=[],
+            policy=ModelPolicyResolver().resolve(request),
+            prompt_context={},
+        )
+
+        with patch.object(manager, "_aggregate_provider_draft", return_value=SimpleNamespace()) as aggregate:
+            stages, _ = manager.execute(context=context, specs=CrewRuntimePlanner().build_specs())
+
+        self.assertEqual(aggregate.call_args.kwargs["parallel_stages"], [])
+        self.assertTrue(
+            all(worker_count == 1 for worker_count in aggregate.call_args.kwargs["stage_worker_counts"].values())
+        )
+        specialist_stage = next(stage for stage in stages if stage.stage == "specialists")
+        self.assertTrue(any("serially" in note for note in specialist_stage.notes))
+        stage_plan = manager._stage_plan(
+            stages,
+            stage_worker_counts=aggregate.call_args.kwargs["stage_worker_counts"],
+        )
+        specialist_plan = next(item for item in stage_plan if item["stage"] == "specialists")
+        self.assertFalse(specialist_plan["parallel"])
+        self.assertEqual(specialist_plan["workerCount"], 1)
+
+    def test_resource_limit_review_fails_tool_call_and_reports_actual_parallel_count(self):
+        manager = CrewExecutionManager(adapter=_RecordingExecutionAdapter(planned_agents=["NamingAgent"]))
+        manager.adapter.feedback_refiner = SimpleNamespace(merge=lambda draft, feedback: draft)
+        review_spec = CrewRuntimePlanner().build_specs()[-1]
+        review = AgentReviewDraft(
+            status="fail",
+            decision="Required context exceeded the configured budget.",
+            failure_class="resource_limit",
+        )
+        execution = CrewAgentExecution(
+            spec=review_spec,
+            status="fail",
+            failure_class="resource_limit",
+            attempt=0,
+            duration_ms=0,
+            input_artifact_ids=[],
+            evidence_refs=[],
+            message=review.decision,
+            review=review,
+        )
+        stage = CrewStageExecution(
+            stage="review",
+            status="fail",
+            agent_executions=[execution],
+            duration_ms=0,
+            failure_class="resource_limit",
+        )
+        context = SimpleNamespace(
+            redaction_result=SimpleNamespace(evidence_refs=[]),
+            policy=SimpleNamespace(
+                model_provider="test",
+                model_name="test",
+                prompt_version="test",
+            ),
+            feedback=None,
+            plan_payload={"kind": "agent_plan"},
+        )
+
+        draft = manager._aggregate_provider_draft(
+            context=context,
+            stages=[stage],
+            stage_worker_counts={"review": 1},
+            parallel_stages=[],
+        )
+
+        self.assertEqual(draft.tool_status, "fail")
+        self.assertEqual(draft.tool_failure_class, "resource_limit")
+        self.assertEqual(draft.runtime_diagnoses[0].failure_class, "resource_limit")
+        self.assertEqual(draft.repair_instructions[0].failure_class, "resource_limit")
+        self.assertIn("including 0 parallel group(s)", draft.message)
+
+        failed_review_without_failure_class = replace(review, failure_class="none")
+        failed_execution_without_failure_class = replace(
+            execution,
+            failure_class="none",
+            review=failed_review_without_failure_class,
+        )
+        failed_stage_without_failure_class = replace(
+            stage,
+            failure_class="none",
+            agent_executions=[failed_execution_without_failure_class],
+        )
+        status_only_failure = manager._aggregate_provider_draft(
+            context=context,
+            stages=[failed_stage_without_failure_class],
+            stage_worker_counts={"review": 1},
+            parallel_stages=[],
+        )
+        self.assertEqual(status_only_failure.tool_status, "fail")
 
     def test_parallel_stage_executes_concurrently_and_receives_dependency_outputs(self):
         barrier = threading.Barrier(3)
@@ -577,6 +1102,86 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 self.assertEqual(agent_payload["modelTemperature"], 0.3)
                 self.assertNotIn("secret", serialized)
                 self.assertNotIn("http://", serialized)
+            finally:
+                store.close()
+
+    def test_review_logical_repair_approvals_persist_as_artifact_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                request = self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
+                request = replace(request, job_id=job.id)
+                knowledge = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="knowledge_evidence",
+                    stage="agent_planning",
+                    filename="knowledge.json",
+                    payload={"kind": "knowledge_evidence"},
+                )
+                tools = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="tool_registry",
+                    stage="agent_planning",
+                    filename="tools.json",
+                    payload={"kind": "tool_registry"},
+                )
+                repair_draft = AgentRepairInstructionDraft(
+                    id="RepairAgent:repair:1",
+                    target_stage="runtime_compare",
+                    failure_class="none",
+                    decision="Approved fixture.",
+                    status="planned",
+                    risk_level="low",
+                )
+                provider_draft = AgentProviderDraft(
+                    plan_payload={"kind": "agent_plan"},
+                    evidence_refs=[],
+                    inferences=[],
+                    runtime_diagnoses=[],
+                    report_sections=[],
+                    repair_instructions=[repair_draft],
+                    review=AgentReviewDraft(
+                        status="pass",
+                        decision="Approved fixture.",
+                        failure_class="none",
+                        repair_instruction_ids=[repair_draft.id],
+                    ),
+                    model_provider="test",
+                    model_name="test",
+                    prompt_version="test",
+                    tool_name="test.agent",
+                    tool_version="1",
+                    tool_status="pass",
+                    tool_failure_class="none",
+                    message="done",
+                )
+
+                outputs = AgentArtifactWriter().persist_runtime_outputs(
+                    job_id=job.id,
+                    store=store,
+                    request=request,
+                    provider_draft=provider_draft,
+                    stages=[],
+                    memory_artifact_ids=[],
+                    knowledge_artifact=knowledge,
+                    tool_registry_artifact=tools,
+                    started_at=time.perf_counter(),
+                )
+                review_payload = json.loads(store.read_artifact(job.id, outputs.review_artifact.id))
+                repair_payload = json.loads(store.read_artifact(job.id, outputs.repair_instruction_artifacts[0].id))
+
+                self.assertEqual(
+                    review_payload["repairInstructionIds"],
+                    [outputs.repair_instruction_artifacts[0].id],
+                )
+                self.assertEqual(repair_payload["id"], repair_draft.id)
             finally:
                 store.close()
 
@@ -1030,7 +1635,8 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
     def test_reconstruction_plan_records_writer_feedback_inputs(self):
         class FakeCoreBridge:
-            def reconstruct_input_package(self, *, job_id, input_path, output_dir):
+            def reconstruct_input_package(self, *, job_id, input_path, output_dir, agent_feedback=None):
+                self.agent_feedback = agent_feedback
                 output_dir.mkdir(parents=True)
                 (output_dir / "index.html").write_text("<div>generated</div>", encoding="utf-8")
                 return SimpleNamespace(
@@ -1093,17 +1699,36 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                         "actions": [],
                     },
                 )
+                review = self._write_json_artifact(
+                    store=store,
+                    job_id=job.id,
+                    kind="review_run",
+                    stage="agent_pass",
+                    filename="agent-review.json",
+                    payload={
+                        "kind": "review_run",
+                        "reviewType": "agent_review",
+                        "status": "pass",
+                        "failureClass": "none",
+                        "decision": "Approve the low-risk deterministic repair only.",
+                        "repairInstructionIds": [low_risk_repair.id],
+                        "attempt": 0,
+                    },
+                )
 
                 result = ReconstructionRunner(core_bridge=FakeCoreBridge()).run(
                     job_id=job.id,
                     input_path=input_root,
                     store=store,
-                    parent_artifact_ids=[low_risk_repair.id, high_risk_repair.id],
+                    parent_artifact_ids=[low_risk_repair.id, high_risk_repair.id, review.id],
                 )
                 plan_payload = json.loads(store.read_artifact(job.id, result.plan_artifact.id))
                 feedback = plan_payload["agentFeedbackInputs"]
 
-                self.assertEqual(feedback["consumptionPolicy"], "low_risk_supported_actions_only")
+                self.assertEqual(
+                    feedback["consumptionPolicy"],
+                    "review_approved_planned_low_risk_supported_actions_only",
+                )
                 self.assertEqual(feedback["lowRiskRepairInstructions"][0]["artifactId"], low_risk_repair.id)
                 self.assertEqual(feedback["lowRiskRepairInstructions"][0]["actionCount"], 1)
                 self.assertEqual(feedback["auditOnlyRepairInstructions"][0]["artifactId"], high_risk_repair.id)
@@ -1131,12 +1756,13 @@ class _RecoveringCrewBackend:
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("temporary endpoint failure")
-        return CrewStructuredAgentOutput()
+        return CrewStructuredAgentOutput(plannedAgents=["NamingAgent"])
 
 
 class _BarrierExecutionAdapter:
     tool_name = "test.agent"
     tool_version = "1"
+    parallel_safe = True
 
     def __init__(self, barrier: threading.Barrier) -> None:
         self.barrier = barrier
@@ -1154,6 +1780,37 @@ class _BarrierExecutionAdapter:
             evidence_refs=evidence_refs,
             message="done",
             raw_output={"agent": spec.name},
+            model_provider=policy.model_provider,
+            model_name=policy.model_name,
+        )
+
+
+class _RecordingExecutionAdapter:
+    tool_name = "test.agent"
+    tool_version = "1"
+    parallel_safe = True
+
+    def __init__(self, *, planned_agents: list[str], planner_failure: bool = False) -> None:
+        self.planned_agents = planned_agents
+        self.planner_failure = planner_failure
+        self.prompts: dict[str, dict] = {}
+
+    def execute_agent(self, *, spec, policy, prompt_context, input_artifact_ids, evidence_refs):
+        self.prompts[spec.name] = prompt_context
+        raw_output = {"agent": spec.name}
+        if spec.name == "PlannerAgent":
+            raw_output["plannedAgents"] = self.planned_agents
+        failed = spec.name == "PlannerAgent" and self.planner_failure
+        return CrewAgentExecution(
+            spec=spec,
+            status="fail" if failed else "pass",
+            failure_class="agent_failed" if failed else "none",
+            attempt=0,
+            duration_ms=0.0,
+            input_artifact_ids=input_artifact_ids,
+            evidence_refs=evidence_refs,
+            message="done",
+            raw_output=raw_output,
             model_provider=policy.model_provider,
             model_name=policy.model_name,
         )

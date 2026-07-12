@@ -68,11 +68,14 @@ class AgentToolRegistryBuilder:
                     "review_run",
                     "tool_call",
                 ],
-                failure_classes=["none", "policy_denied", "agent_failed"],
-                description="Runs schema-first Agent analysis over deterministic Core evidence.",
+                failure_classes=["none", "policy_denied", "agent_failed", "resource_limit"],
+                description=(
+                    "Runs schema-first Agent analysis over deterministic Core evidence in an isolated "
+                    "child process with a per-invocation CrewAI storage root."
+                ),
                 stateful=True,
-                parallel_safe=False,
-                side_effects=["model_call", "crewai_storage"],
+                parallel_safe=True,
+                side_effects=["model_call", "isolated_crewai_storage", "child_process"],
             ),
             ToolSpec(
                 name="memory.context",

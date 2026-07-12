@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -8,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from apps.api.app.models import FailureClass
 from packages.knowledge import POST_CORE_KINDS, StaticKnowledgeRetriever
 from packages.memory import JobMemoryService
 
@@ -17,6 +19,7 @@ from .agent_contracts import (
     AGENT_PROMPT_VERSION,
     AGENT_TOOL_VERSION,
     CREW_AGENT_NAMES,
+    SPECIALIST_AGENT_NAMES,
     AgentFeedbackRefinement,
     AgentInferenceDraft,
     AgentModelPolicy,
@@ -150,7 +153,7 @@ class CrewRuntimePlanner:
                 goal="Propose only structured, deterministic-safe repair instructions.",
                 backstory="You never directly mutate source and only output constrained repair actions.",
                 output_kind="repair_instruction",
-                allow_parallel=False,
+                allow_parallel=True,
                 dependencies=["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
             ),
             CrewAgentSpec(
@@ -161,7 +164,7 @@ class CrewRuntimePlanner:
                 goal="Summarize cross-agent findings into report sections for packaging and audit.",
                 backstory="You produce structured report sections and preserve audit traceability.",
                 output_kind="report_section",
-                allow_parallel=False,
+                allow_parallel=True,
                 dependencies=["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
             ),
             CrewAgentSpec(
@@ -169,8 +172,14 @@ class CrewRuntimePlanner:
                 stage="review",
                 responsibility="Review conflicts, consensus, and final runtime verdict only.",
                 role="Review Agent",
-                goal="Review cross-agent findings, detect conflicts, and issue a final verdict.",
-                backstory="You reject unsupported conclusions and preserve uncertainty in audit records.",
+                goal=(
+                    "Review cross-agent findings, detect conflicts, issue a final verdict, and explicitly list only "
+                    "the provided low-risk repair instruction IDs that are approved for deterministic application."
+                ),
+                backstory=(
+                    "You reject unsupported conclusions, never invent repair instruction IDs, and preserve "
+                    "uncertainty in audit records."
+                ),
                 output_kind="review_run",
                 allow_parallel=False,
                 dependencies=["RepairAgent", "ReportAgent"],
@@ -227,20 +236,94 @@ class CrewConflictDetector:
     def detect(self, stage: CrewStageExecution) -> list[CrewConflictRecord]:
         if stage.stage != "specialists":
             return []
-        inference_types: dict[str, list[str]] = {}
+        records: list[dict[str, Any]] = []
         for execution in stage.agent_executions:
-            for inference in execution.inferences:
-                inference_types.setdefault(inference.type, []).append(execution.spec.name)
+            raw_inferences = execution.raw_output.get("inferences", [])
+            for index, inference in enumerate(execution.inferences):
+                raw = raw_inferences[index] if index < len(raw_inferences) and isinstance(raw_inferences[index], dict) else {}
+                records.append(
+                    {
+                        "type": str(raw.get("type") or inference.type),
+                        "target": self._normalized_optional(raw.get("target")),
+                        "value": self._normalized_optional(raw.get("value")),
+                        "agent": execution.spec.name,
+                        "evidenceRefs": [ref.artifact_id for ref in execution.evidence_refs],
+                    }
+                )
         conflicts: list[CrewConflictRecord] = []
-        for inference_type, agents in inference_types.items():
-            unique_agents = sorted(set(agents))
-            if len(unique_agents) > 1:
+        targeted: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        unscoped: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            if record["target"]:
+                targeted.setdefault((record["type"], record["target"]), []).append(record)
+            else:
+                unscoped.setdefault(record["type"], []).append(record)
+
+        for (inference_type, target), grouped in targeted.items():
+            agents = sorted({record["agent"] for record in grouped})
+            if len(agents) < 2:
+                continue
+            values = {record["value"] for record in grouped if record["value"] is not None}
+            evidence_refs = sorted({ref for record in grouped for ref in record["evidenceRefs"]})
+            if len(values) > 1:
                 conflicts.append(
                     CrewConflictRecord(
-                        key=f"inference:{inference_type}",
+                        key=f"conflict:{inference_type}:{target}",
+                        severity="warning",
+                        agents=agents,
+                        summary=f"Agents proposed different {inference_type} values for target {target!r}.",
+                        evidence_refs=evidence_refs,
+                    )
+                )
+            else:
+                conflicts.append(
+                    CrewConflictRecord(
+                        key=f"overlap:{inference_type}:{target}",
                         severity="info",
-                        agents=unique_agents,
-                        summary=f"Multiple agents produced {inference_type} evidence; ReviewAgent should consolidate.",
+                        agents=agents,
+                        summary=f"Agents produced overlapping {inference_type} evidence for target {target!r}.",
+                        evidence_refs=evidence_refs,
+                    )
+                )
+        for inference_type, grouped in unscoped.items():
+            agents = sorted({record["agent"] for record in grouped})
+            if len(agents) > 1:
+                conflicts.append(
+                    CrewConflictRecord(
+                        key=f"overlap:{inference_type}",
+                        severity="info",
+                        agents=agents,
+                        summary=(
+                            f"Multiple agents produced {inference_type} evidence without a common target; "
+                            "ReviewAgent should consolidate the overlap."
+                        ),
+                        evidence_refs=sorted({ref for record in grouped for ref in record["evidenceRefs"]}),
+                    )
+                )
+        records_by_target: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            if record["target"]:
+                records_by_target.setdefault(record["target"], []).append(record)
+        dead_values = {"dead", "remove", "removed", "unused", "delete", "drop"}
+        for target, grouped in records_by_target.items():
+            dead_records = [
+                record
+                for record in grouped
+                if record["type"] == "dead_code" and record["value"] in dead_values
+            ]
+            retained_records = [record for record in grouped if record["type"] != "dead_code"]
+            if dead_records and retained_records:
+                combined = [*dead_records, *retained_records]
+                conflicts.append(
+                    CrewConflictRecord(
+                        key=f"conflict:retention:{target}",
+                        severity="warning",
+                        agents=sorted({record["agent"] for record in combined}),
+                        summary=(
+                            f"Dead-code evidence proposes removing target {target!r} while another specialist "
+                            "produces retained semantic evidence for it."
+                        ),
+                        evidence_refs=sorted({ref for record in combined for ref in record["evidenceRefs"]}),
                     )
                 )
         statuses = {execution.status for execution in stage.agent_executions}
@@ -254,6 +337,12 @@ class CrewConflictDetector:
                 )
             )
         return conflicts
+
+    def _normalized_optional(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(str(value).strip().lower().split())
+        return normalized or None
 
 
 class CrewExecutionManager:
@@ -272,11 +361,41 @@ class CrewExecutionManager:
         stages: list[CrewStageExecution] = []
         stage_order = CrewRuntimePlanner().build_stage_order(specs)
         executions_by_name: dict[str, CrewAgentExecution] = {}
+        requested_max_parallel = self._requested_max_parallel(context)
+        effective_max_parallel = 1
+        scheduler_mode = "serial"
+        stage_worker_counts: dict[str, int] = {}
+        parallel_stages: list[str] = []
+        selection_enabled = any(spec.name == "PlannerAgent" for spec in specs)
+        selected_specialists = [name for name in SPECIALIST_AGENT_NAMES if any(spec.name == name for spec in specs)]
+        planner_fallback_reason: str | None = "planner_not_executed" if selection_enabled else None
 
         for stage_name, stage_specs in stage_order:
+            if stage_name == "specialists" and selection_enabled:
+                stage_specs = [spec for spec in stage_specs if spec.name in selected_specialists]
+            elif stage_name == "synthesis" and selection_enabled:
+                stage_specs = [
+                    replace(
+                        spec,
+                        dependencies=[
+                            name
+                            for name in spec.dependencies
+                            if name not in SPECIALIST_AGENT_NAMES or name in selected_specialists
+                        ],
+                    )
+                    for spec in stage_specs
+                ]
             stage_started = time.perf_counter()
-            if len(stage_specs) > 1 and all(spec.allow_parallel for spec in stage_specs):
-                with ThreadPoolExecutor(max_workers=len(stage_specs), thread_name_prefix=f"agent-{stage_name}") as executor:
+            stage_worker_count = self._stage_worker_count(
+                stage_specs=stage_specs,
+                requested_max_parallel=requested_max_parallel,
+            )
+            stage_worker_counts[stage_name] = stage_worker_count
+            effective_max_parallel = max(effective_max_parallel, stage_worker_count)
+            if stage_worker_count > 1:
+                scheduler_mode = "bounded_parallel"
+                parallel_stages.append(stage_name)
+                with ThreadPoolExecutor(max_workers=stage_worker_count, thread_name_prefix=f"agent-{stage_name}") as executor:
                     futures = {
                         spec.name: executor.submit(
                             self._execute_spec,
@@ -300,6 +419,18 @@ class CrewExecutionManager:
                 ]
             executions_by_name.update({execution.spec.name: execution for execution in stage_executions})
 
+            if stage_name == "planner" and selection_enabled:
+                planner_execution = next(
+                    (execution for execution in stage_executions if execution.spec.name == "PlannerAgent"),
+                    None,
+                )
+                selected_specialists, planner_fallback_reason = self._planner_specialist_selection(
+                    planner_execution=planner_execution,
+                    available_specialists=[
+                        name for name in SPECIALIST_AGENT_NAMES if any(spec.name == name for spec in specs)
+                    ],
+                )
+
             status = self._stage_status(stage_executions)
             failure_class = self._stage_failure_class(stage_executions)
             stage = CrewStageExecution(
@@ -320,11 +451,68 @@ class CrewExecutionManager:
                     duration_ms=stage.duration_ms,
                     failure_class=stage.failure_class,
                     conflict_summary=conflicts,
-                    notes=self._stage_notes(stage_name=stage.stage, conflicts=conflicts),
+                    notes=self._stage_notes(
+                        stage_name=stage.stage,
+                        conflicts=conflicts,
+                        worker_count=stage_worker_count,
+                    ),
                 )
             )
 
-        return stages, self._aggregate_provider_draft(context=context, stages=stages)
+        return stages, self._aggregate_provider_draft(
+            context=context,
+            stages=stages,
+            selected_specialists=selected_specialists,
+            planner_fallback_reason=planner_fallback_reason,
+            requested_max_parallel=requested_max_parallel,
+            effective_max_parallel=effective_max_parallel,
+            scheduler_mode=scheduler_mode,
+            stage_worker_counts=stage_worker_counts,
+            parallel_stages=parallel_stages,
+        )
+
+    def _requested_max_parallel(self, context: RuntimeContext) -> int:
+        agents_config = context.request.job_config.get("agents", {})
+        raw_value = agents_config.get("maxParallel", 5) if isinstance(agents_config, dict) else 5
+        try:
+            return max(1, min(10, int(raw_value)))
+        except (TypeError, ValueError):
+            return 5
+
+    def _stage_worker_count(self, *, stage_specs: list[CrewAgentSpec], requested_max_parallel: int) -> int:
+        if len(stage_specs) <= 1 or not all(spec.allow_parallel for spec in stage_specs):
+            return 1
+        adapter_parallel_safe = bool(
+            getattr(self.adapter, "parallel_safe", False)
+            or getattr(self.adapter, "isolation_mode", None) == "process"
+        )
+        if not adapter_parallel_safe:
+            return 1
+        return max(1, min(requested_max_parallel, len(stage_specs)))
+
+    def _planner_specialist_selection(
+        self,
+        *,
+        planner_execution: CrewAgentExecution | None,
+        available_specialists: list[str],
+    ) -> tuple[list[str], str | None]:
+        fallback = list(available_specialists)
+        if planner_execution is None:
+            return fallback, "planner_execution_missing"
+        if (
+            planner_execution.status in {"fail", "retry", "skipped"}
+            or planner_execution.failure_class != "none"
+        ):
+            return fallback, f"planner_execution_{planner_execution.status}:{planner_execution.failure_class}"
+        raw_selection = planner_execution.raw_output.get("plannedAgents")
+        if not isinstance(raw_selection, list) or not raw_selection:
+            return fallback, "planner_selection_empty"
+        if any(not isinstance(name, str) or name not in SPECIALIST_AGENT_NAMES for name in raw_selection):
+            return fallback, "planner_selection_outside_allowlist"
+        selected = [name for name in SPECIALIST_AGENT_NAMES if name in raw_selection and name in available_specialists]
+        if not selected:
+            return fallback, "planner_selection_unavailable"
+        return selected, None
 
     def _execute_spec(
         self,
@@ -339,6 +527,7 @@ class CrewExecutionManager:
             executions_by_name[name]
             for name in spec.dependencies
             if name in executions_by_name
+            and not (spec.name == "AnalysisAgent" and name == "PlannerAgent")
             and (
                 executions_by_name[name].status in {"fail", "retry", "skipped"}
                 or executions_by_name[name].failure_class != "none"
@@ -363,19 +552,87 @@ class CrewExecutionManager:
                 model_timeout_seconds=context.policy.timeout_seconds,
                 model_temperature=context.policy.temperature,
             )
+        prompt_context = self._prompt_context_for_agent(
+            context=context,
+            spec=spec,
+            stages=stages,
+            executions_by_name=executions_by_name,
+        )
+        prompt_context, budget_audit = self._apply_context_budget(
+            context=context,
+            spec=spec,
+            prompt_context=prompt_context,
+        )
+        if not budget_audit["withinBudget"]:
+            return self._context_budget_exceeded_execution(
+                context=context,
+                spec=spec,
+                started=started,
+                budget_audit=budget_audit,
+            )
         execution = self.adapter.execute_agent(
             spec=spec,
             policy=context.policy,
-            prompt_context=self._prompt_context_for_agent(
-                context=context,
-                spec=spec,
-                stages=stages,
-                executions_by_name=executions_by_name,
-            ),
+            prompt_context=prompt_context,
             input_artifact_ids=self._input_artifact_ids(context),
             evidence_refs=context.evidence_refs,
         )
-        return replace(execution, duration_ms=round((time.perf_counter() - started) * 1000, 3))
+        repair_instructions = [
+            replace(draft, id=draft.id or f"{spec.name}:repair:{index}")
+            for index, draft in enumerate(execution.repair_instructions, start=1)
+        ]
+        return replace(
+            execution,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            context_budget_audit=budget_audit,
+            repair_instructions=repair_instructions,
+        )
+
+    def _context_budget_exceeded_execution(
+        self,
+        *,
+        context: RuntimeContext,
+        spec: CrewAgentSpec,
+        started: float,
+        budget_audit: dict[str, Any],
+    ) -> CrewAgentExecution:
+        message = (
+            f"{spec.name} was not invoked because required context exceeded agents.contextBudget "
+            f"({budget_audit['estimatedTokensAfter']} > {budget_audit['budgetTokens']} estimated tokens)."
+        )
+        review = (
+            AgentReviewDraft(
+                status="fail",
+                decision=message,
+                failure_class="resource_limit",
+            )
+            if spec.name == "ReviewAgent"
+            else None
+        )
+        return CrewAgentExecution(
+            spec=spec,
+            status="fail",
+            failure_class="resource_limit",
+            attempt=0,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            input_artifact_ids=self._input_artifact_ids(context),
+            evidence_refs=context.evidence_refs,
+            message=message,
+            raw_output={
+                "limitations": [message],
+                "contextBudgetAudit": budget_audit,
+            },
+            review=review,
+            model_provider=context.policy.model_provider,
+            model_name=context.policy.model_name,
+            model_base_url_configured=context.policy.base_url_configured,
+            model_api_key_configured=context.policy.api_key_configured,
+            model_custom_endpoint_enabled=context.policy.custom_endpoint_enabled,
+            model_timeout_seconds=context.policy.timeout_seconds,
+            model_temperature=context.policy.temperature,
+            context_budget_audit=budget_audit,
+            isolation_mode=str(getattr(self.adapter, "isolation_mode", "in_process")),
+        )
 
     def _input_artifact_ids(self, context: RuntimeContext) -> list[str]:
         return [
@@ -404,9 +661,16 @@ class CrewExecutionManager:
             }
             for name, execution in executions_by_name.items()
         }
+        context_agent_names = list(spec.dependencies)
+        if spec.name == "ReviewAgent":
+            context_agent_names = [
+                name
+                for name in (*SPECIALIST_AGENT_NAMES, "RepairAgent", "ReportAgent")
+                if name in executions_by_name
+            ]
         dependency_outputs = {
             name: self._structured_output_for_context(executions_by_name[name])
-            for name in spec.dependencies
+            for name in context_agent_names
             if name in executions_by_name
         }
         conflict_summary = [
@@ -426,7 +690,7 @@ class CrewExecutionManager:
             for stage in stages
             if stage.conflict_summary
         ]
-        return {
+        prompt = {
             **context.prompt_context,
             "agent": {
                 "name": spec.name,
@@ -448,6 +712,90 @@ class CrewExecutionManager:
             "conflictSummary": conflict_summary,
             "plannedAgents": list(CREW_AGENT_NAMES),
         }
+        if spec.name == "ReviewAgent":
+            prompt["reviewInputs"] = {
+                "specialists": [name for name in SPECIALIST_AGENT_NAMES if name in dependency_outputs],
+                "synthesis": [name for name in ("RepairAgent", "ReportAgent") if name in dependency_outputs],
+                "normalizedOutputsKey": "dependencyOutputs",
+            }
+        return prompt
+
+    def _apply_context_budget(
+        self,
+        *,
+        context: RuntimeContext,
+        spec: CrewAgentSpec,
+        prompt_context: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        agents_config = context.request.job_config.get("agents", {})
+        raw_budget = agents_config.get("contextBudget", 16_000) if isinstance(agents_config, dict) else 16_000
+        try:
+            budget = max(1_000, min(1_000_000, int(raw_budget)))
+        except (TypeError, ValueError):
+            budget = 16_000
+        trimmed = self._context_value(prompt_context)
+        before = self._estimate_prompt_tokens(trimmed)
+        omissions = {
+            "historicalKnowledgeHits": 0,
+            "memory": 0,
+            "nonDependencyAgentSummaries": 0,
+            "evidenceExcerpts": 0,
+        }
+
+        knowledge_hits = trimmed.get("knowledgeHits")
+        if isinstance(knowledge_hits, list) and self._estimate_prompt_tokens(trimmed) > budget:
+            retained_hits = []
+            for hit in knowledge_hits:
+                if isinstance(hit, dict) and str(hit.get("category", "")).startswith("historical_"):
+                    omissions["historicalKnowledgeHits"] += 1
+                else:
+                    retained_hits.append(hit)
+            trimmed["knowledgeHits"] = retained_hits
+
+        if self._estimate_prompt_tokens(trimmed) > budget and trimmed.get("memory"):
+            trimmed["memory"] = "[omitted by context budget]"
+            omissions["memory"] = 1
+
+        completed_agents = trimmed.get("completedAgents")
+        if isinstance(completed_agents, dict) and self._estimate_prompt_tokens(trimmed) > budget:
+            dependency_names = set(spec.dependencies)
+            if spec.name == "ReviewAgent":
+                dependency_names.update((*SPECIALIST_AGENT_NAMES, "RepairAgent", "ReportAgent"))
+            for name in list(completed_agents):
+                if name not in dependency_names:
+                    completed_agents.pop(name, None)
+                    omissions["nonDependencyAgentSummaries"] += 1
+                    if self._estimate_prompt_tokens(trimmed) <= budget:
+                        break
+
+        evidence_refs = trimmed.get("evidenceRefs")
+        if isinstance(evidence_refs, list) and self._estimate_prompt_tokens(trimmed) > budget:
+            for evidence_ref in evidence_refs:
+                if not isinstance(evidence_ref, dict) or not evidence_ref.get("excerpt"):
+                    continue
+                evidence_ref["excerpt"] = "[omitted by context budget]"
+                omissions["evidenceExcerpts"] += 1
+                if self._estimate_prompt_tokens(trimmed) <= budget:
+                    break
+
+        after = self._estimate_prompt_tokens(trimmed)
+        audit = {
+            "agentName": spec.name,
+            "budgetTokens": budget,
+            "estimatedTokensBefore": before,
+            "estimatedTokensAfter": after,
+            "omissions": omissions,
+            "withinBudget": after <= budget,
+            "estimateMethod": "ceil_utf8_bytes_div_4",
+        }
+        trimmed["contextBudgetAudit"] = audit
+        audit["estimatedTokensAfter"] = self._estimate_prompt_tokens(trimmed)
+        audit["withinBudget"] = audit["estimatedTokensAfter"] <= budget
+        return trimmed, audit
+
+    def _estimate_prompt_tokens(self, value: Any) -> int:
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return math.ceil(len(serialized.encode("utf-8")) / 4)
 
     def _structured_output_for_context(self, execution: CrewAgentExecution) -> dict[str, Any]:
         return {
@@ -473,7 +821,19 @@ class CrewExecutionManager:
             return [self._context_value(item) for item in value]
         return value
 
-    def _aggregate_provider_draft(self, *, context: RuntimeContext, stages: list[CrewStageExecution]) -> AgentProviderDraft:
+    def _aggregate_provider_draft(
+        self,
+        *,
+        context: RuntimeContext,
+        stages: list[CrewStageExecution],
+        selected_specialists: list[str] | None = None,
+        planner_fallback_reason: str | None = None,
+        requested_max_parallel: int = 5,
+        effective_max_parallel: int = 1,
+        scheduler_mode: str = "serial",
+        stage_worker_counts: dict[str, int] | None = None,
+        parallel_stages: list[str] | None = None,
+    ) -> AgentProviderDraft:
         executions = [execution for stage in stages for execution in stage.agent_executions]
         planner = next((execution for execution in executions if execution.spec.name == "PlannerAgent"), None)
         review_execution = next((execution for execution in executions if execution.spec.name == "ReviewAgent"), None)
@@ -491,15 +851,46 @@ class CrewExecutionManager:
             decision="CrewAI runtime completed without an explicit ReviewAgent verdict.",
             failure_class=fallback_failure_class,  # type: ignore[arg-type]
         )
+        known_repair_ids = {draft.id for draft in aggregated_repairs if draft.id}
+        unknown_review_ids = sorted(set(review.repair_instruction_ids) - known_repair_ids)
+        if unknown_review_ids:
+            review = replace(
+                review,
+                status="fail",
+                decision=(
+                    f"{review.decision} ReviewAgent referenced unknown repair instruction IDs: "
+                    f"{', '.join(unknown_review_ids)}."
+                ),
+                failure_class="agent_failed",
+                repair_instruction_ids=[
+                    instruction_id
+                    for instruction_id in review.repair_instruction_ids
+                    if instruction_id in known_repair_ids
+                ],
+            )
 
         plan_payload = {
             **context.plan_payload,
             "runtimeStatus": self._runtime_status(stages),
             "plannedAgents": planner.raw_output.get("plannedAgents", list(CREW_AGENT_NAMES)) if planner else list(CREW_AGENT_NAMES),
+            "selectedAgents": list(selected_specialists or SPECIALIST_AGENT_NAMES),
+            "fallbackReason": planner_fallback_reason,
+            "requestedMaxParallel": requested_max_parallel,
+            "effectiveMaxParallel": effective_max_parallel,
+            "schedulerMode": scheduler_mode,
+            "stageWorkerCounts": dict(stage_worker_counts or {}),
+            "contextBudgetUsage": [
+                execution.context_budget_audit
+                for execution in executions
+                if execution.context_budget_audit
+            ],
             "agentGraph": self._agent_graph(stages),
-            "stagePlan": self._stage_plan(stages),
+            "stagePlan": self._stage_plan(
+                stages,
+                stage_worker_counts=stage_worker_counts or {},
+            ),
             "stageSummaries": self._stage_summaries(stages),
-            "parallelStages": [stage.stage for stage in stages if len(stage.agent_executions) > 1],
+            "parallelStages": list(parallel_stages or []),
             "conflictSummary": [
                 {
                     "stage": stage.stage,
@@ -533,18 +924,27 @@ class CrewExecutionManager:
             prompt_version=context.policy.prompt_version,
             tool_name=self.adapter.tool_name,
             tool_version=self.adapter.tool_version,
-            tool_status="fail" if review.failure_class in {"policy_denied", "agent_failed"} else "pass",
+            tool_status=(
+                "pass"
+                if review.status == "pass" and review.failure_class == "none"
+                else "fail"
+            ),
             tool_failure_class=review.failure_class,
-            message=self._message(stages=stages, review=review),
+            message=self._message(
+                stages=stages,
+                review=review,
+                parallel_count=len(parallel_stages or []),
+            ),
         )
         return self.adapter.feedback_refiner.merge(draft, context.feedback)
 
-    def _default_runtime_diagnoses(self, failure_class: str) -> list[AgentRuntimeDiagnosisDraft]:
+    def _default_runtime_diagnoses(self, failure_class: FailureClass) -> list[AgentRuntimeDiagnosisDraft]:
+        fallback_failure_class: FailureClass = failure_class if failure_class != "none" else "agent_failed"
         return [
             AgentRuntimeDiagnosisDraft(
                 target_stage="runtime_compare",
                 status="best_effort" if failure_class == "policy_denied" else "fail",
-                failure_class="policy_denied" if failure_class == "policy_denied" else "agent_failed",
+                failure_class=fallback_failure_class,
                 diagnosis=(
                     "RuntimeAgent preserved runtime uncertainty because CrewAI execution could not produce "
                     "agent-specific runtime diagnosis output."
@@ -561,7 +961,7 @@ class CrewExecutionManager:
             )
         ]
 
-    def _default_report_sections(self, failure_class: str, decision: str) -> list[AgentReportSectionDraft]:
+    def _default_report_sections(self, failure_class: FailureClass, decision: str) -> list[AgentReportSectionDraft]:
         status = "best_effort" if failure_class == "policy_denied" else "fail"
         return [
             AgentReportSectionDraft(
@@ -582,12 +982,17 @@ class CrewExecutionManager:
             )
         ]
 
-    def _default_repair_instructions(self, failure_class: str, decision: str) -> list[AgentRepairInstructionDraft]:
+    def _default_repair_instructions(
+        self,
+        failure_class: FailureClass,
+        decision: str,
+    ) -> list[AgentRepairInstructionDraft]:
         status = "skipped" if failure_class == "policy_denied" else "skipped"
+        fallback_failure_class: FailureClass = failure_class if failure_class != "none" else "agent_failed"
         return [
             AgentRepairInstructionDraft(
                 target_stage="runtime_compare",
-                failure_class="policy_denied" if failure_class == "policy_denied" else "agent_failed",  # type: ignore[arg-type]
+                failure_class=fallback_failure_class,
                 decision=(
                     "Repair Agent recorded no free-form source mutation. "
                     f"{decision} Deterministic build/runtime repair loops remain responsible for applied changes."
@@ -614,11 +1019,17 @@ class CrewExecutionManager:
                 )
         return graph
 
-    def _stage_plan(self, stages: list[CrewStageExecution]) -> list[dict[str, Any]]:
+    def _stage_plan(
+        self,
+        stages: list[CrewStageExecution],
+        *,
+        stage_worker_counts: dict[str, int],
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "stage": stage.stage,
-                "parallel": len(stage.agent_executions) > 1,
+                "parallel": stage_worker_counts.get(stage.stage, 1) > 1,
+                "workerCount": stage_worker_counts.get(stage.stage, 1),
                 "agents": [execution.spec.name for execution in stage.agent_executions],
                 "status": stage.status,
                 "failureClass": stage.failure_class,
@@ -675,16 +1086,28 @@ class CrewExecutionManager:
                 return execution.failure_class
         return "none"
 
-    def _stage_notes(self, *, stage_name: CrewStageName, conflicts: list[CrewConflictRecord]) -> list[str]:
+    def _stage_notes(
+        self,
+        *,
+        stage_name: CrewStageName,
+        conflicts: list[CrewConflictRecord],
+        worker_count: int,
+    ) -> list[str]:
         notes: list[str] = []
         if stage_name == "specialists":
-            notes.append("Parallel specialist crews executed in isolated runtime contexts.")
+            execution_mode = "in parallel" if worker_count > 1 else "serially"
+            notes.append(f"Specialist crews executed {execution_mode} in isolated runtime contexts.")
         if conflicts:
             notes.append("Conflict summary persisted for ReviewAgent consumption.")
         return notes
 
-    def _message(self, *, stages: list[CrewStageExecution], review: AgentReviewDraft) -> str:
-        parallel_count = sum(1 for stage in stages if len(stage.agent_executions) > 1)
+    def _message(
+        self,
+        *,
+        stages: list[CrewStageExecution],
+        review: AgentReviewDraft,
+        parallel_count: int,
+    ) -> str:
         return (
             "CrewAI runtime executed staged multi-agent analysis "
             f"across {len(stages)} stage(s), including {parallel_count} parallel group(s). "

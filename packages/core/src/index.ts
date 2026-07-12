@@ -71,12 +71,56 @@ export interface ReconstructionPlan {
     symbolCount: number;
   };
   limitations: string[];
+  agentFeedback?: AgentFeedbackResult;
 }
 
 export interface WriteProjectConfig {
   inputPath: string;
   outputDir: string;
   packageName?: string;
+  agentFeedback?: unknown;
+}
+
+export type AgentFeedbackActionName =
+  | "add_package_script"
+  | "replace_package_script"
+  | "mirror_original_static_entry";
+
+export interface AgentFeedbackAction {
+  sourceArtifactId: string;
+  repairInstructionId?: string;
+  action: AgentFeedbackActionName;
+  path: string;
+  value: string;
+  reason: string;
+}
+
+export interface AgentFeedbackRejection {
+  sourceArtifactId?: string;
+  repairInstructionId?: string;
+  action?: string;
+  path?: string;
+  reason: string;
+}
+
+export interface AgentFeedbackInput {
+  kind: "agent_feedback";
+  protocolVersion: 1;
+  sourceReviewArtifactIds: string[];
+  approvedActions: AgentFeedbackAction[];
+  rejectedActions: AgentFeedbackRejection[];
+}
+
+export interface AppliedAgentFeedbackAction extends AgentFeedbackAction {
+  changed: boolean;
+  detail: string;
+}
+
+export interface AgentFeedbackResult {
+  sourceReviewArtifactIds: string[];
+  approvedActions: AgentFeedbackAction[];
+  appliedActions: AppliedAgentFeedbackAction[];
+  rejectedActions: AgentFeedbackRejection[];
 }
 
 export interface GeneratedProjectManifest {
@@ -94,6 +138,7 @@ export interface GeneratedProjectManifest {
   analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
+  agentFeedback?: AgentFeedbackResult;
 }
 
 export interface WriteProjectResult {
@@ -1803,6 +1848,7 @@ export function planReconstruction(
 export async function writeProject(plan: ReconstructionPlan, config: WriteProjectConfig): Promise<WriteProjectResult> {
   const normalized = await normalizeInputPackage(config.inputPath);
   try {
+    const agentFeedback = config.agentFeedback === undefined ? undefined : validateAgentFeedbackInput(config.agentFeedback);
     const inputRoot = path.resolve(normalized.rootDir);
     const projectRoot = assertSafeOutputDir(config.outputDir);
     await fs.rm(projectRoot, { recursive: true, force: true });
@@ -1952,6 +1998,19 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
     await fs.writeFile(path.join(projectRoot, "scripts", "build.mjs"), buildScriptSource(), "utf8");
     await fs.writeFile(path.join(projectRoot, "scripts", "typecheck.mjs"), typecheckScriptSource(), "utf8");
 
+    if (agentFeedback) {
+      const feedbackResult = await applyAgentFeedback(projectRoot, agentFeedback, plan);
+      plan.agentFeedback = feedbackResult;
+      manifest.agentFeedback = feedbackResult;
+      await writeJson(path.join(projectRoot, "src", "reconstruction-manifest.json"), manifest);
+      await fs.writeFile(path.join(projectRoot, "src", "main.ts"), mainTsSource(manifest), "utf8");
+      await fs.writeFile(
+        path.join(projectRoot, "src", "entrypoints", "reconstruction-entry.ts"),
+        reconstructionEntrySource(plan, manifest),
+        "utf8"
+      );
+    }
+
     return {
       projectPath: projectRoot,
       manifest
@@ -1959,6 +2018,312 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
   } finally {
     await normalized.cleanup();
   }
+}
+
+const SUPPORTED_AGENT_FEEDBACK_ACTIONS = new Set<AgentFeedbackActionName>([
+  "add_package_script",
+  "replace_package_script",
+  "mirror_original_static_entry"
+]);
+const SAFE_PACKAGE_SCRIPTS: Record<string, string> = {
+  build: "node scripts/build.mjs",
+  typecheck: "node scripts/typecheck.mjs",
+  check: "node scripts/typecheck.mjs"
+};
+const MIRROR_PROTECTED_ROOTS = new Set(["src", "scripts", "node_modules", ".git"]);
+const MIRROR_PROTECTED_FILES = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.ts",
+  "rollup.config.js",
+  "webpack.config.js"
+]);
+const MIRROR_ALLOWED_EXTENSIONS = new Set([
+  ".html",
+  ".htm",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".css",
+  ".json",
+  ".webmanifest",
+  ".map",
+  ".wasm",
+  ".txt",
+  ".xml",
+  ".svg",
+  ".ico",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".avif",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf",
+  ".eot",
+  ".mp3",
+  ".mp4",
+  ".webm",
+  ".ogg"
+]);
+
+export function validateAgentFeedbackInput(payload: unknown): AgentFeedbackInput {
+  if (!isJsonObject(payload) || payload.kind !== "agent_feedback" || payload.protocolVersion !== 1) {
+    throw new Error("Agent feedback must be an object with kind=agent_feedback and protocolVersion=1.");
+  }
+  if (!Array.isArray(payload.sourceReviewArtifactIds) || !payload.sourceReviewArtifactIds.every(isNonEmptyString)) {
+    throw new Error("Agent feedback sourceReviewArtifactIds must be a string array.");
+  }
+  if (!Array.isArray(payload.approvedActions) || !Array.isArray(payload.rejectedActions)) {
+    throw new Error("Agent feedback approvedActions and rejectedActions must be arrays.");
+  }
+
+  const rejectedActions = payload.rejectedActions.map(validateFeedbackRejection);
+  const approvedActions: AgentFeedbackAction[] = [];
+  for (const item of payload.approvedActions) {
+    if (!isJsonObject(item)) {
+      throw new Error("Each approved agent feedback action must be an object.");
+    }
+    for (const field of ["sourceArtifactId", "action", "path", "value", "reason"] as const) {
+      if (!isNonEmptyString(item[field])) {
+        throw new Error(`Approved agent feedback action field ${field} must be a non-empty string.`);
+      }
+    }
+    const sourceArtifactId = item.sourceArtifactId as string;
+    const actionName = item.action as string;
+    const actionPath = item.path as string;
+    const actionValue = item.value as string;
+    const actionReason = item.reason as string;
+    if (item.repairInstructionId !== undefined && !isNonEmptyString(item.repairInstructionId)) {
+      throw new Error("Approved agent feedback repairInstructionId must be a non-empty string when present.");
+    }
+    if (!SUPPORTED_AGENT_FEEDBACK_ACTIONS.has(actionName as AgentFeedbackActionName)) {
+      rejectedActions.push({
+        sourceArtifactId,
+        repairInstructionId: typeof item.repairInstructionId === "string" ? item.repairInstructionId : undefined,
+        action: actionName,
+        path: actionPath,
+        reason: `Unsupported agent feedback action: ${actionName}.`
+      });
+      continue;
+    }
+    approvedActions.push({
+      sourceArtifactId,
+      repairInstructionId: typeof item.repairInstructionId === "string" ? item.repairInstructionId : undefined,
+      action: actionName as AgentFeedbackActionName,
+      path: actionPath,
+      value: actionValue,
+      reason: actionReason
+    });
+  }
+
+  return {
+    kind: "agent_feedback",
+    protocolVersion: 1,
+    sourceReviewArtifactIds: [...new Set(payload.sourceReviewArtifactIds)],
+    approvedActions,
+    rejectedActions
+  };
+}
+
+async function applyAgentFeedback(
+  projectRoot: string,
+  feedback: AgentFeedbackInput,
+  plan: ReconstructionPlan
+): Promise<AgentFeedbackResult> {
+  const appliedActions: AppliedAgentFeedbackAction[] = [];
+  const rejectedActions = [...feedback.rejectedActions];
+  const conflicts = conflictingFeedbackActionIndexes(feedback.approvedActions);
+  const seen = new Set<string>();
+
+  for (let index = 0; index < feedback.approvedActions.length; index += 1) {
+    const action = feedback.approvedActions[index];
+    if (conflicts.has(index)) {
+      rejectedActions.push(rejectedFeedbackAction(action, "Conflicting approved actions target the same generated-project field."));
+      continue;
+    }
+    const identity = `${action.action}\u0000${action.path}\u0000${action.value}`;
+    if (seen.has(identity)) {
+      rejectedActions.push(rejectedFeedbackAction(action, "Duplicate approved action was not applied twice."));
+      continue;
+    }
+    seen.add(identity);
+
+    if (action.action === "mirror_original_static_entry") {
+      if (action.path !== "projectRoot" || action.value !== "public/original") {
+        rejectedActions.push(rejectedFeedbackAction(action, "Static-entry mirroring requires projectRoot <- public/original."));
+        continue;
+      }
+      const mirrorResult = await mirrorOriginalStaticEntry(projectRoot, staticMirrorCandidates(plan));
+      if (mirrorResult.copied < 1) {
+        rejectedActions.push(rejectedFeedbackAction(action, "No safe original static files were available to mirror."));
+        continue;
+      }
+      appliedActions.push({
+        ...action,
+        changed: true,
+        detail: `Mirrored ${mirrorResult.copied} safe static file(s); skipped ${mirrorResult.skipped}.`
+      });
+      continue;
+    }
+
+    const scriptName = packageScriptName(action.path);
+    if (!scriptName || SAFE_PACKAGE_SCRIPTS[scriptName] !== action.value) {
+      rejectedActions.push(
+        rejectedFeedbackAction(action, "Package-script actions require a supported script name and its matching deterministic shim value.")
+      );
+      continue;
+    }
+    const packagePath = path.join(projectRoot, "package.json");
+    const packagePayload = JSON.parse(await fs.readFile(packagePath, "utf8")) as unknown;
+    if (!isJsonObject(packagePayload)) {
+      throw new Error("Generated package.json is not a JSON object.");
+    }
+    const scripts = isJsonObject(packagePayload.scripts) ? { ...packagePayload.scripts } : {};
+    const existing = scripts[scriptName];
+    if (action.action === "add_package_script" && existing !== undefined) {
+      rejectedActions.push(rejectedFeedbackAction(action, `Package script ${scriptName} already exists.`));
+      continue;
+    }
+    if (action.action === "replace_package_script" && typeof existing !== "string") {
+      rejectedActions.push(rejectedFeedbackAction(action, `Package script ${scriptName} does not exist.`));
+      continue;
+    }
+    scripts[scriptName] = action.value;
+    packagePayload.scripts = scripts;
+    await writeJson(packagePath, packagePayload);
+    appliedActions.push({
+      ...action,
+      changed: existing !== action.value,
+      detail: `${action.action === "add_package_script" ? "Added" : "Replaced"} package script ${scriptName}.`
+    });
+  }
+
+  return {
+    sourceReviewArtifactIds: feedback.sourceReviewArtifactIds,
+    approvedActions: feedback.approvedActions,
+    appliedActions,
+    rejectedActions
+  };
+}
+
+function conflictingFeedbackActionIndexes(actions: AgentFeedbackAction[]): Set<number> {
+  const byTarget = new Map<string, Array<{ index: number; signature: string }>>();
+  actions.forEach((action, index) => {
+    const target = action.action === "mirror_original_static_entry" ? "mirror:projectRoot" : `script:${action.path}`;
+    const records = byTarget.get(target) ?? [];
+    records.push({ index, signature: `${action.action}\u0000${action.value}` });
+    byTarget.set(target, records);
+  });
+  const conflicts = new Set<number>();
+  for (const records of byTarget.values()) {
+    if (new Set(records.map((record) => record.signature)).size > 1) {
+      records.forEach((record) => conflicts.add(record.index));
+    }
+  }
+  return conflicts;
+}
+
+function packageScriptName(actionPath: string): string | null {
+  const match = /^package\.json:scripts\.([A-Za-z0-9:_-]+)$/.exec(actionPath);
+  return match?.[1] ?? null;
+}
+
+function staticMirrorCandidates(plan: ReconstructionPlan): Set<string> {
+  return new Set(
+    [
+      ...plan.inputInventory.entries,
+      ...plan.inputInventory.scripts,
+      ...plan.inputInventory.styles,
+      ...plan.inputInventory.assets,
+      ...plan.inputInventory.manifests
+    ].map((item) => toPosix(item))
+  );
+}
+
+async function mirrorOriginalStaticEntry(
+  projectRoot: string,
+  allowedRelativePaths: Set<string>
+): Promise<{ copied: number; skipped: number }> {
+  const sourceRoot = path.join(projectRoot, "public", "original");
+  const files = await listFiles(sourceRoot);
+  let copied = 0;
+  let skipped = 0;
+  for (const sourceFile of files) {
+    const relative = toPosix(path.relative(sourceRoot, sourceFile));
+    const parts = relative.split("/");
+    const lowerRelative = relative.toLowerCase();
+    const basename = parts.at(-1)?.toLowerCase() ?? "";
+    const extension = path.extname(basename);
+    if (
+      !relative ||
+      relative.startsWith("../") ||
+      !allowedRelativePaths.has(relative) ||
+      parts.some((part) => part.startsWith(".")) ||
+      MIRROR_PROTECTED_ROOTS.has(parts[0].toLowerCase()) ||
+      MIRROR_PROTECTED_FILES.has(lowerRelative) ||
+      basename.includes(".config.") ||
+      basename.endsWith("rc") ||
+      !MIRROR_ALLOWED_EXTENSIONS.has(extension)
+    ) {
+      skipped += 1;
+      continue;
+    }
+    const stat = await fs.lstat(sourceFile);
+    if (stat.isSymbolicLink()) {
+      skipped += 1;
+      continue;
+    }
+    const target = path.join(projectRoot, safeRelativePath(relative));
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(sourceFile, target);
+    copied += 1;
+  }
+  return { copied, skipped };
+}
+
+function validateFeedbackRejection(value: unknown): AgentFeedbackRejection {
+  if (!isJsonObject(value) || !isNonEmptyString(value.reason)) {
+    throw new Error("Each rejected agent feedback action must contain a non-empty reason.");
+  }
+  const result: AgentFeedbackRejection = { reason: value.reason };
+  for (const field of ["sourceArtifactId", "repairInstructionId", "action", "path"] as const) {
+    if (value[field] !== undefined) {
+      if (!isNonEmptyString(value[field])) {
+        throw new Error(`Rejected agent feedback field ${field} must be a non-empty string when present.`);
+      }
+      result[field] = value[field];
+    }
+  }
+  return result;
+}
+
+function rejectedFeedbackAction(action: AgentFeedbackAction, reason: string): AgentFeedbackRejection {
+  return {
+    sourceArtifactId: action.sourceArtifactId,
+    repairInstructionId: action.repairInstructionId,
+    action: action.action,
+    path: action.path,
+    reason
+  };
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Promise<SourceMapArtifactAnalysis> {

@@ -265,7 +265,7 @@ class AgentArtifactWriter:
         report_section_artifact_ids = [artifact.id for artifact in report_section_artifacts]
         for index, draft in enumerate(provider_draft.repair_instructions, start=1):
             repair_instruction = RepairInstruction(
-                id=f"repair_{uuid4().hex[:12]}",
+                id=draft.id or f"repair_{uuid4().hex[:12]}",
                 job_id=job_id,
                 attempt=0,
                 target_stage=draft.target_stage,  # type: ignore[arg-type]
@@ -296,7 +296,15 @@ class AgentArtifactWriter:
                 )
             )
 
-        repair_instruction_artifact_ids = [artifact.id for artifact in repair_instruction_artifacts]
+        repair_artifact_ids_by_logical_id = {
+            draft.id: artifact.id
+            for draft, artifact in zip(
+                provider_draft.repair_instructions,
+                repair_instruction_artifacts,
+                strict=True,
+            )
+            if draft.id
+        }
         review_artifact_payload = ReviewRun(
             id=f"review_{uuid4().hex[:12]}",
             job_id=job_id,
@@ -306,7 +314,11 @@ class AgentArtifactWriter:
             decision=provider_draft.review.decision,
             failure_class=provider_draft.review.failure_class,
             evidence_refs=provider_draft.evidence_refs,
-            repair_instruction_ids=[*provider_draft.review.repair_instruction_ids, *repair_instruction_artifact_ids],
+            repair_instruction_ids=[
+                repair_artifact_ids_by_logical_id[instruction_id]
+                for instruction_id in provider_draft.review.repair_instruction_ids
+                if instruction_id in repair_artifact_ids_by_logical_id
+            ],
             logs_artifact_id=provider_draft.review.logs_artifact_id,
         )
 
@@ -415,6 +427,11 @@ class AgentArtifactWriter:
                     "modelCustomEndpointEnabled": execution.model_custom_endpoint_enabled,
                     "modelTimeoutSeconds": execution.model_timeout_seconds,
                     "modelTemperature": execution.model_temperature,
+                    "contextBudgetAudit": execution.context_budget_audit,
+                    "isolationMode": execution.isolation_mode,
+                    "processExitStatus": execution.process_exit_status,
+                    "processDataRootConfigured": execution.process_data_root_configured,
+                    "roleSchemaValidated": execution.role_schema_validated,
                     "inputArtifactIds": execution.input_artifact_ids,
                     "evidenceRefs": [ref.model_dump(by_alias=True, exclude_none=True) for ref in execution.evidence_refs],
                     "message": execution.message,

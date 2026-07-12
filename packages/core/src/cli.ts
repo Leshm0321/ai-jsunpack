@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { CONTRACT_SCHEMA_VERSION } from "@ai-jsunpack/shared";
 import { analyzeInputPackage, normalizeInputPackage, planReconstruction, writeProject } from "./index.js";
+import { readFile } from "node:fs/promises";
 
 interface CliOptions {
   command?: string;
   inputPath?: string;
   jobId?: string;
   outputDir?: string;
+  agentFeedbackFile?: string;
 }
 
 interface ArtifactPayload {
@@ -31,6 +33,11 @@ function parseArgs(args: string[]): CliOptions {
       index += 1;
       continue;
     }
+    if (arg === "--agent-feedback-file") {
+      options.agentFeedbackFile = args[index + 1];
+      index += 1;
+      continue;
+    }
     positional.push(arg);
   }
 
@@ -42,7 +49,7 @@ function usage(): string {
   return [
     "Usage:",
     "  node packages/core/dist/cli.js analyze <inputPath> --job-id <jobId>",
-    "  node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output-dir <dir>"
+    "  node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output-dir <dir> [--agent-feedback-file <json>]"
   ].join("\n");
 }
 
@@ -65,9 +72,13 @@ async function main(): Promise<void> {
         inputSourceKind: normalized.sourceKind
       });
       const plan = planReconstruction(result, { jobId: options.jobId });
+      const agentFeedback = options.agentFeedbackFile
+        ? (JSON.parse(await readFile(options.agentFeedbackFile, "utf8")) as unknown)
+        : undefined;
       const generatedProject = await writeProject(plan, {
         inputPath: normalized.rootDir,
-        outputDir: options.outputDir
+        outputDir: options.outputDir,
+        agentFeedback
       });
       const reconstructionPlanPayload: ArtifactPayload & { plan: typeof plan } = {
         schemaVersion: CONTRACT_SCHEMA_VERSION,

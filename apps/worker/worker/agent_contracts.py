@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from apps.api.app.models import (
     ArtifactRecord,
@@ -13,6 +13,10 @@ from apps.api.app.models import (
     InferenceType,
     InferenceValidationStatus,
     RepairAction,
+    RepairActionName,
+    RepairInstructionStatus,
+    RepairRiskLevel,
+    RepairTargetStage,
     RunStatus,
     ToolCallStatus,
 )
@@ -49,6 +53,21 @@ CREW_AGENT_NAMES: tuple[str, ...] = (
     "ReportAgent",
     "ReviewAgent",
 )
+
+SPECIALIST_AGENT_NAMES: tuple[str, ...] = (
+    "NamingAgent",
+    "TypeAgent",
+    "FrameworkAgent",
+    "DeadCodeAgent",
+    "RuntimeAgent",
+)
+SpecialistAgentName = Literal[
+    "NamingAgent",
+    "TypeAgent",
+    "FrameworkAgent",
+    "DeadCodeAgent",
+    "RuntimeAgent",
+]
 
 
 class AgentRuntimeError(RuntimeError):
@@ -182,6 +201,7 @@ class AgentRepairInstructionDraft:
     status: str = "skipped"
     risk_level: str = "low"
     actions: list[RepairAction] = field(default_factory=list)
+    id: str = ""
 
 
 @dataclass(frozen=True)
@@ -238,6 +258,11 @@ class CrewAgentExecution:
     model_custom_endpoint_enabled: bool = False
     model_timeout_seconds: float = 30.0
     model_temperature: float | None = None
+    context_budget_audit: dict[str, Any] = field(default_factory=dict)
+    isolation_mode: str = "in_process"
+    process_exit_status: int | None = None
+    process_data_root_configured: bool = False
+    role_schema_validated: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,6 +325,8 @@ class CrewInferenceOutput(BaseModel):
     uncertainty_reasons: list[str] = Field(default_factory=list, alias="uncertaintyReasons")
     alternatives: list[str] = Field(default_factory=list)
     validation_status: str = Field(default="needs_review", alias="validationStatus")
+    target: str | None = None
+    value: str | None = None
 
 
 class CrewRuntimeDiagnosisOutput(BaseModel):
@@ -337,22 +364,22 @@ class CrewReportSectionOutput(BaseModel):
 
 
 class CrewRepairActionOutput(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    action: str
-    path: str | None = None
-    value: str | None = None
-    reason: str
+    action: RepairActionName
+    path: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 class CrewRepairInstructionOutput(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    target_stage: str = Field(default="runtime_compare", alias="targetStage")
-    failure_class: str = Field(default="none", alias="failureClass")
+    target_stage: RepairTargetStage = Field(default="runtime_compare", alias="targetStage")
+    failure_class: FailureClass = Field(default="none", alias="failureClass")
     decision: str = "No deterministic repair action proposed."
-    status: str = "skipped"
-    risk_level: str = Field(default="low", alias="riskLevel")
+    status: RepairInstructionStatus = "skipped"
+    risk_level: RepairRiskLevel = Field(default="low", alias="riskLevel")
     actions: list[CrewRepairActionOutput] = Field(default_factory=list)
 
 
@@ -391,6 +418,127 @@ class CrewStructuredAgentOutput(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class _CrewRoleOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    limitations: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CrewPlannerAgentOutput(_CrewRoleOutput):
+    planned_agents: list[SpecialistAgentName] = Field(min_length=1, alias="plannedAgents")
+    stage_plan: list[CrewStagePlanOutput] = Field(default_factory=list, alias="stagePlan")
+    evidence_focus: list[str] = Field(default_factory=list, alias="evidenceFocus")
+
+
+class _CrewInferenceAgentOutput(_CrewRoleOutput):
+    allowed_inference_types: ClassVar[frozenset[str]] = frozenset()
+
+    inferences: list[CrewInferenceOutput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_inference_scope(self) -> _CrewInferenceAgentOutput:
+        invalid = sorted({item.type for item in self.inferences if item.type not in self.allowed_inference_types})
+        if invalid:
+            allowed = ", ".join(sorted(self.allowed_inference_types))
+            raise ValueError(f"Inference types {invalid!r} are outside this role contract; allowed: {allowed}.")
+        return self
+
+
+class CrewAnalysisAgentOutput(_CrewInferenceAgentOutput):
+    allowed_inference_types = frozenset({"module_split"})
+
+
+class CrewNamingAgentOutput(_CrewInferenceAgentOutput):
+    allowed_inference_types = frozenset({"naming"})
+
+
+class CrewTypeAgentOutput(_CrewInferenceAgentOutput):
+    allowed_inference_types = frozenset({"type_inference"})
+
+
+class CrewFrameworkAgentOutput(_CrewInferenceAgentOutput):
+    allowed_inference_types = frozenset({"framework"})
+
+
+class CrewDeadCodeAgentOutput(_CrewInferenceAgentOutput):
+    allowed_inference_types = frozenset({"dead_code"})
+
+
+class CrewRuntimeAgentOutput(_CrewRoleOutput):
+    runtime_diagnoses: list[CrewRuntimeDiagnosisOutput] = Field(min_length=1, alias="runtimeDiagnoses")
+
+
+class CrewRepairAgentOutput(_CrewRoleOutput):
+    repair_instructions: list[CrewRepairInstructionOutput] = Field(min_length=1, alias="repairInstructions")
+
+
+class CrewReportAgentOutput(_CrewRoleOutput):
+    report_sections: list[CrewReportSectionOutput] = Field(min_length=1, alias="reportSections")
+
+
+class CrewReviewAgentOutput(_CrewRoleOutput):
+    review: CrewReviewOutput
+
+
+CREW_ROLE_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
+    "PlannerAgent": CrewPlannerAgentOutput,
+    "AnalysisAgent": CrewAnalysisAgentOutput,
+    "NamingAgent": CrewNamingAgentOutput,
+    "TypeAgent": CrewTypeAgentOutput,
+    "FrameworkAgent": CrewFrameworkAgentOutput,
+    "DeadCodeAgent": CrewDeadCodeAgentOutput,
+    "RuntimeAgent": CrewRuntimeAgentOutput,
+    "RepairAgent": CrewRepairAgentOutput,
+    "ReportAgent": CrewReportAgentOutput,
+    "ReviewAgent": CrewReviewAgentOutput,
+}
+
+
+def crew_output_model_for_agent(agent_name: str) -> type[BaseModel]:
+    """Return the strict role contract used for one CrewAI task output."""
+
+    try:
+        return CREW_ROLE_OUTPUT_MODELS[agent_name]
+    except KeyError as error:
+        raise AgentRuntimeError(f"No structured output contract is registered for agent {agent_name!r}.") from error
+
+
+def validate_crew_output_for_agent(
+    agent_name: str,
+    output: CrewStructuredAgentOutput | BaseModel | dict[str, Any],
+) -> CrewStructuredAgentOutput:
+    """Validate a role-scoped payload and normalize it to the provider-compatible envelope.
+
+    Model-provided identity is never trusted: fields carrying ``agentName`` are
+    deterministically rebound to the executing agent before validation.
+    """
+
+    if isinstance(output, BaseModel):
+        payload = output.model_dump(by_alias=True, exclude_none=True)
+        for field_name in (
+            "plannedAgents",
+            "stagePlan",
+            "evidenceFocus",
+            "inferences",
+            "runtimeDiagnoses",
+            "reportSections",
+            "repairInstructions",
+        ):
+            if payload.get(field_name) == []:
+                payload.pop(field_name, None)
+    else:
+        payload = dict(output)
+    for collection_name in ("inferences", "runtimeDiagnoses", "reportSections"):
+        collection = payload.get(collection_name)
+        if isinstance(collection, list):
+            for item in collection:
+                if isinstance(item, dict):
+                    item["agentName"] = agent_name
+    validated = crew_output_model_for_agent(agent_name).model_validate(payload)
+    return CrewStructuredAgentOutput.model_validate(validated.model_dump(by_alias=True, exclude_none=True))
+
+
 class CrewAgentPassOutput(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
@@ -412,21 +560,33 @@ __all__ = [
     "AGENT_TOOL_VERSION",
     "CREWAI_DATA_ROOT_ENV",
     "CREW_AGENT_NAMES",
+    "CREW_ROLE_OUTPUT_MODELS",
+    "SPECIALIST_AGENT_NAMES",
     "CrewAgentPassOutput",
+    "CrewAnalysisAgentOutput",
     "CrewAgentSpec",
     "CrewConflictRecord",
     "CrewExecutionStatus",
     "CrewInferenceOutput",
+    "CrewDeadCodeAgentOutput",
+    "CrewFrameworkAgentOutput",
+    "CrewNamingAgentOutput",
+    "CrewPlannerAgentOutput",
     "CrewRepairActionOutput",
     "CrewRepairInstructionOutput",
+    "CrewRepairAgentOutput",
     "CrewReportSectionDetailOutput",
     "CrewReportSectionOutput",
+    "CrewReportAgentOutput",
     "CrewReviewOutput",
+    "CrewReviewAgentOutput",
     "CrewRuntimeDiagnosisOutput",
+    "CrewRuntimeAgentOutput",
     "CrewStageExecution",
     "CrewStageName",
     "CrewStagePlanOutput",
     "CrewStructuredAgentOutput",
+    "CrewTypeAgentOutput",
     "CrewTaskSpec",
     "LOCAL_AGENT_API_KEY_ENV",
     "LOCAL_AGENT_BASE_URL_ENV",
@@ -446,4 +606,6 @@ __all__ = [
     "AgentRuntimeRequest",
     "AgentRuntimeResult",
     "CrewAgentExecution",
+    "crew_output_model_for_agent",
+    "validate_crew_output_for_agent",
 ]
