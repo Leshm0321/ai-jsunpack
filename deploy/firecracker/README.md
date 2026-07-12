@@ -24,7 +24,7 @@ AI_JSUNPACK_SANDBOX_RUNTIME_VERSION=1.9.1
 AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND="/usr/local/bin/ai-jsunpack-firecracker-launcher --kernel /srv/ai-jsunpack/firecracker/vmlinux --rootfs /srv/ai-jsunpack/firecracker/rootfs.ext4 --jailer /usr/bin/firecracker-jailer --firecracker /usr/bin/firecracker --socket-dir /run/ai-jsunpack/firecracker --wrapper-command /usr/local/bin/ai-jsunpack-firecracker-wrapper"
 ```
 
-`worker.env.example` 将该值留空，因为本地开发和 CI 通常没有 KVM、kernel、rootfs 和 jailer 资产。
+`deploy/env/worker.env.example` 将该值留空，因为本地开发和 CI 通常没有 KVM、kernel、rootfs 和 jailer 资产。
 
 ## 请求协议
 
@@ -112,15 +112,17 @@ wrapper 可以直接打印最终 launcher response JSON，也可以打印普通 
 
 ## 部署 Smoke 测试
 
-仅协议 dry run：
+在已经准备好真实 kernel、rootfs、jailer 和 Firecracker binary 的主机上，可以用 `--dry-run` 验证请求、路径和控制文档，而不启动 microVM。该模式仍会检查所有运行时资产，并创建 socket 目录，因此不是脱离部署依赖的纯协议测试：
 
 ```bash
-printf '%s' '{"version":1,"runnerKind":"firecracker","workspace":"/tmp/work","workingDirectory":".","command":["node","--version"],"stdinBase64":null,"environment":{},"timeoutMs":1000,"outputLimitBytes":4096,"networkPolicy":"deny","resourcePolicy":{"runnerKind":"firecracker"}}' \
+workspace="$(mktemp -d)"
+printf '{"version":1,"runnerKind":"firecracker","workspace":"%s","workingDirectory":".","command":["node","--version"],"stdinBase64":null,"environment":{},"timeoutMs":1000,"outputLimitBytes":4096,"networkPolicy":"deny","resourcePolicy":{"runnerKind":"firecracker"}}' "$workspace" \
   | /usr/local/bin/ai-jsunpack-firecracker-launcher \
       --kernel /srv/ai-jsunpack/firecracker/vmlinux \
       --rootfs /srv/ai-jsunpack/firecracker/rootfs.ext4 \
       --jailer /usr/bin/firecracker-jailer \
       --firecracker /usr/bin/firecracker \
+      --socket-dir "$workspace/sockets" \
       --dry-run
 ```
 
@@ -131,6 +133,6 @@ printf '%s' '{"version":1,"runnerKind":"firecracker","workspace":"/tmp/work","wo
 - `networkPolicy=deny` 会生成无出站网络的 guest。
 - 命令超过 `timeoutMs` 时返回 `failureClass=timeout`。
 - 输出过量时设置 `outputTruncated=true`。
-- 非零 build 命令会在 Worker evidence 中返回命令对应的失败分类。
+- Wrapper 应把非零 guest 命令映射为结构化响应中的明确 `failureClass`（例如 `build_error` 或 `type_error`）；如果只返回普通非零退出码和非 JSON stdout，launcher 会保守归类为 `unknown`。
 - `build_artifact.resourcePolicy.runnerKind` 为 `firecracker`，`enforcement` 为 `runtime_isolated`。
 - Worker 报告保留 `build_log`、`build_artifact`、Review evidence 和 result package lineage。
