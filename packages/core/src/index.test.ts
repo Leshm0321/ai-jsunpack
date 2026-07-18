@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { deflateRawSync, gzipSync } from "node:zlib";
 import { analyzeInputPackage, planReconstruction, writeProject } from "./index.js";
 
@@ -95,6 +96,51 @@ test("analyzeInputPackage builds analysis graphs and low-risk transform evidence
     assert.ok(result.transformAnalysis.rollbackMap.every((entry) => entry.riskLevel && entry.reversible === true));
     assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("window.document"));
     assert.ok(result.transformAnalysis.scriptTransforms[0].transformedSource.includes("const value = 3"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("analyzeInputPackage statically restores rotated string-array decoder calls", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-string-decoder-"));
+  try {
+    const inputPath = path.join(root, "bundle.js");
+    await writeFile(
+      inputPath,
+      [
+        "const lookup = decode;",
+        "(function(factory, target){",
+        "  const d = decode, values = factory();",
+        "  while (!![]) {",
+        "    try {",
+        "      const checksum = parseInt(d(0x10)) + parseInt(d(0x11));",
+        "      if (checksum === target) break;",
+        "      values.push(values.shift());",
+        "    } catch (error) { values.push(values.shift()); }",
+        "  }",
+        "})(strings, 30);",
+        "export const message = lookup(0x12) + ' ' + lookup(0x13);",
+        "function decode(value){",
+        "  const values = strings();",
+        "  return decode = function(index){ index = index - 0x10; return values[index]; }, decode(value);",
+        "}",
+        "function strings(){",
+        "  const values = ['20', 'hello', 'world', '10'];",
+        "  strings = function(){ return values; };",
+        "  return strings();",
+        "}"
+      ].join("\n")
+    );
+
+    const result = await analyzeInputPackage(inputPath);
+    const transformed = result.transformAnalysis.scriptTransforms[0];
+
+    assert.ok(result.transformAnalysis.transformLog.some((entry) => entry.kind === "string_array_decoder_restore" && entry.status === "applied"));
+    assert.ok(transformed.transforms.includes("string_array_decoder_restore"));
+    assert.ok(transformed.transformedSource.includes("hello"));
+    assert.ok(transformed.transformedSource.includes("world"));
+    assert.ok(!transformed.transformedSource.includes("lookup(0x12)"));
+    assert.ok(!transformed.transformedSource.includes("lookup(0x13)"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -582,6 +628,127 @@ test("writeProject accepts single JavaScript input and copies the wrapped static
     );
     await runScript(outputDir, ["scripts/typecheck.mjs"]);
     await runScript(outputDir, ["scripts/build.mjs"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("writeProject loads single .js inputs with ESM syntax as modules", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-single-js-esm-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(inputPath, "import { generateText } from './aiTextApi.js'; export const plan = generateText();");
+
+    const analysis = await analyzeInputPackage(inputPath, { jobId: "job_single_writer_esm_test" });
+    const plan = planReconstruction(analysis, { jobId: "job_single_writer_esm_test" });
+    const outputDir = path.join(root, "generated_project");
+    await writeProject(plan, { inputPath, outputDir });
+
+    const hostHtml = await readFile(path.join(outputDir, "public", "original", "index.html"), "utf8");
+    assert.ok(hostHtml.includes('<script type="module" src="./agentApi.js"></script>'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing static relative ESM dependencies produce audited throwing placeholders", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-missing-dependency-"));
+  try {
+    await writeFile(
+      path.join(root, "index.html"),
+      '<script type="module" src="./main.js"></script>'
+    );
+    await writeFile(
+      path.join(root, "main.js"),
+      [
+        "import missingDefault, { generateText as text } from './aiTextApi.js';",
+        "import * as missingNamespace from './aiTextApi.js';",
+        "import './aiTextApi.js';",
+        "export { generateText as forwardedText } from './aiTextApi.js';",
+        "export * from './aiTextApi.js';",
+        "globalThis.__placeholderBindings = [missingDefault, text, missingNamespace];"
+      ].join("\n")
+    );
+
+    const analysis = await analyzeInputPackage(root, { jobId: "job_missing_dependency" });
+    assert.equal(analysis.dependencyPlaceholders.length, 1);
+    assert.deepEqual(analysis.dependencyPlaceholders[0], {
+      importerPath: "main.js",
+      specifier: "./aiTextApi.js",
+      resolvedPath: "aiTextApi.js",
+      importedNames: ["generateText"],
+      reExportedNames: ["forwardedText"],
+      defaultImport: true,
+      namespaceImport: true,
+      sideEffectOnly: true,
+      exportAll: true,
+      reason: "missing_static_relative_dependency",
+      status: "generated",
+      limitation: "Load-only continuity is provided; the dependency's semantic behavior is unavailable and generated exports throw when called."
+    });
+
+    const plan = planReconstruction(analysis, { jobId: "job_missing_dependency" });
+    assert.equal(plan.evidenceSummary.dependencyPlaceholderCount, 1);
+    assert.ok(plan.limitations.some((limitation) => limitation.includes("load-only placeholders")));
+    const outputDir = path.join(root, "generated_project");
+    await writeProject(plan, { inputPath: root, outputDir });
+
+    const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
+      dependencyPlaceholderFiles: string[];
+      dependencyPlaceholders: Array<{ resolvedPath: string; status: string }>;
+      analysisFiles: string[];
+    };
+    assert.ok(manifest.dependencyPlaceholderFiles.includes("aiTextApi.js"));
+    assert.ok(manifest.dependencyPlaceholderFiles.includes("public/original/aiTextApi.js"));
+    assert.deepEqual(manifest.dependencyPlaceholders, plan.dependencyPlaceholders);
+    assert.ok(manifest.analysisFiles.includes("src/analysis/dependency-placeholders.json"));
+    const analysisPayload = JSON.parse(
+      await readFile(path.join(outputDir, "src", "analysis", "dependency-placeholders.json"), "utf8")
+    ) as { contract: { errorCode: string; semanticBehaviorAvailable: boolean } };
+    assert.equal(analysisPayload.contract.errorCode, "AI_JSUNPACK_MISSING_DEPENDENCY");
+    assert.equal(analysisPayload.contract.semanticBehaviorAvailable, false);
+
+    const placeholderUrl = `${pathToFileURL(path.join(outputDir, "aiTextApi.js")).href}?test=${Date.now()}`;
+    const placeholder = await import(placeholderUrl) as {
+      default: () => never;
+      generateText: () => never;
+    };
+    for (const invoke of [placeholder.default, placeholder.generateText]) {
+      assert.throws(invoke, (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.name, "MissingDependencyPlaceholderError");
+        assert.equal((error as Error & { code?: string }).code, "AI_JSUNPACK_MISSING_DEPENDENCY");
+        return true;
+      });
+    }
+    await assert.rejects(readFile(path.join(root, "aiTextApi.js"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("existing relative ESM dependencies do not produce placeholders", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-existing-dependency-"));
+  try {
+    await writeFile(path.join(root, "main.js"), "import { helper } from './helper.js'; helper();");
+    await writeFile(path.join(root, "helper.js"), "export function helper(){ return 'ok'; }");
+    const analysis = await analyzeInputPackage(root);
+    assert.deepEqual(analysis.dependencyPlaceholders, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("relative dependencies that escape the input root remain report-only", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-unsafe-dependency-"));
+  try {
+    const inputPath = path.join(root, "main.js");
+    await writeFile(inputPath, "import { outside } from '../outside.js'; outside();");
+    const analysis = await analyzeInputPackage(inputPath);
+    assert.equal(analysis.dependencyPlaceholders.length, 1);
+    assert.equal(analysis.dependencyPlaceholders[0].status, "unsupported");
+    assert.equal(analysis.dependencyPlaceholders[0].reason, "unsafe_relative_dependency");
+    assert.equal(analysis.dependencyPlaceholders[0].resolvedPath, null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

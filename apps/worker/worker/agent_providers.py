@@ -70,6 +70,10 @@ OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 30.0
 DEFAULT_BACKEND_FAILURE_CACHE_SECONDS = 30.0
 BACKEND_FAILURE_CACHE_SECONDS_ENV = "AI_JSUNPACK_AGENT_FAILURE_CACHE_SECONDS"
+DEFAULT_BACKEND_MAX_ATTEMPTS = 2
+BACKEND_MAX_ATTEMPTS_ENV = "AI_JSUNPACK_AGENT_BACKEND_MAX_ATTEMPTS"
+DEFAULT_BACKEND_RETRY_BACKOFF_SECONDS = 1.0
+BACKEND_RETRY_BACKOFF_SECONDS_ENV = "AI_JSUNPACK_AGENT_BACKEND_RETRY_BACKOFF_SECONDS"
 
 
 class ModelPolicyResolver:
@@ -299,6 +303,14 @@ class OpenAICompatibleCrewAILLM:
             ) -> str | Any:
                 del callbacks, available_functions
                 formatted_messages = self._format_messages(messages)
+                if response_model is not None:
+                    formatted_messages.insert(
+                        0,
+                        {
+                            "role": "system",
+                            "content": self._structured_output_instruction(response_model),
+                        },
+                    )
                 payload: dict[str, Any] = {
                     "model": self.model,
                     "messages": formatted_messages,
@@ -309,6 +321,20 @@ class OpenAICompatibleCrewAILLM:
                     payload["tools"] = tools
                 content = self._post_chat_completions(payload)
                 return self._validate_structured_output(content, response_model)
+
+            def _structured_output_instruction(self, response_model: type[BaseModel]) -> str:
+                schema = response_model.model_json_schema(by_alias=True)
+                allowed_inference_types = sorted(getattr(response_model, "allowed_inference_types", ()))
+                role_constraints = ""
+                if allowed_inference_types:
+                    allowed = ", ".join(json.dumps(value) for value in allowed_inference_types)
+                    role_constraints = f" Every inferences item must use type exactly equal to one of: {allowed}."
+                return (
+                    "Return only one JSON object that validates against the following JSON Schema. "
+                    "Use the exact property names and enum/const values from the schema; do not add Markdown fences "
+                    f"or explanatory text.{role_constraints}\n\n"
+                    f"JSON Schema:\n{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
+                )
 
             def _post_chat_completions(self, payload: dict[str, Any]) -> str:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -523,11 +549,19 @@ class CrewAIExecutionAdapter:
 
             backend = IsolatedCrewAIBackend()
         self.backend = backend
-        self._cached_backend_failures: dict[tuple[str, str, str], tuple[float, str]] = {}
+        self._cached_backend_failures: dict[tuple[str, str, str, str], tuple[float, str]] = {}
         self._failure_cache_lock = threading.Lock()
         self._failure_cache_seconds = self._positive_float_env(
             BACKEND_FAILURE_CACHE_SECONDS_ENV,
             DEFAULT_BACKEND_FAILURE_CACHE_SECONDS,
+        )
+        self._backend_max_attempts = self._positive_int_env(
+            BACKEND_MAX_ATTEMPTS_ENV,
+            DEFAULT_BACKEND_MAX_ATTEMPTS,
+        )
+        self._backend_retry_backoff_seconds = self._positive_float_env(
+            BACKEND_RETRY_BACKOFF_SECONDS_ENV,
+            DEFAULT_BACKEND_RETRY_BACKOFF_SECONDS,
         )
 
     @property
@@ -596,7 +630,7 @@ class CrewAIExecutionAdapter:
                 ),
                 isolation_mode=self.isolation_mode,
             )
-        cache_key = self._failure_cache_key(policy)
+        cache_key = self._failure_cache_key(spec, policy)
         cached_failure = self._cached_failure(cache_key)
         if cached_failure:
             return replace(
@@ -610,23 +644,29 @@ class CrewAIExecutionAdapter:
                 isolation_mode=self.isolation_mode,
             )
 
-        try:
-            output = self.backend.run_agent(spec=spec, prompt_context=prompt_context, policy=policy)
-            output = validate_crew_output_for_agent(spec.name, output)
-        except Exception as error:
-            if self._should_cache_backend_failure(error):
-                self._cache_failure(cache_key, str(error))
-            metadata = self._process_metadata(error)
-            return replace(
-                self._failed_execution(
-                    spec=spec,
-                    policy=policy,
-                    input_artifact_ids=input_artifact_ids,
-                    evidence_refs=evidence_refs,
-                    error=error,
-                ),
-                **metadata,
-            )
+        for attempt in range(self._backend_max_attempts):
+            try:
+                output = self.backend.run_agent(spec=spec, prompt_context=prompt_context, policy=policy)
+                output = validate_crew_output_for_agent(spec.name, output)
+            except Exception as error:
+                if attempt + 1 < self._backend_max_attempts and self._should_retry_backend_failure(error):
+                    time.sleep(self._backend_retry_backoff_seconds * (2**attempt))
+                    continue
+                if self._should_cache_backend_failure(error):
+                    self._cache_failure(cache_key, str(error))
+                metadata = self._process_metadata(error)
+                return replace(
+                    self._failed_execution(
+                        spec=spec,
+                        policy=policy,
+                        input_artifact_ids=input_artifact_ids,
+                        evidence_refs=evidence_refs,
+                        error=error,
+                    ),
+                    attempt=attempt,
+                    **metadata,
+                )
+            break
         with self._failure_cache_lock:
             self._cached_backend_failures.pop(cache_key, None)
         metadata = self._process_metadata()
@@ -638,6 +678,7 @@ class CrewAIExecutionAdapter:
                 evidence_refs=evidence_refs,
                 output=output,
             ),
+            attempt=attempt,
             **metadata,
         )
 
@@ -661,14 +702,24 @@ class CrewAIExecutionAdapter:
             return False
         return True
 
-    def _failure_cache_key(self, policy: AgentModelPolicy) -> tuple[str, str, str]:
+    def _should_retry_backend_failure(self, error: Exception) -> bool:
+        if isinstance(error, ValidationError):
+            return False
+        result = getattr(error, "result", None)
+        status = getattr(result, "status", None)
+        if status is not None:
+            return status in {"timeout", "child_error", "exit_error", "process_error"}
+        return True
+
+    def _failure_cache_key(self, spec: CrewAgentSpec, policy: AgentModelPolicy) -> tuple[str, str, str, str]:
         return (
             policy.model_provider.strip().lower(),
             policy.model_name.strip(),
             (policy.base_url or "").strip().rstrip("/").lower(),
+            spec.name,
         )
 
-    def _cached_failure(self, key: tuple[str, str, str]) -> str | None:
+    def _cached_failure(self, key: tuple[str, str, str, str]) -> str | None:
         now = time.monotonic()
         with self._failure_cache_lock:
             cached = self._cached_backend_failures.get(key)
@@ -680,13 +731,20 @@ class CrewAIExecutionAdapter:
                 return None
             return message
 
-    def _cache_failure(self, key: tuple[str, str, str], message: str) -> None:
+    def _cache_failure(self, key: tuple[str, str, str, str], message: str) -> None:
         with self._failure_cache_lock:
             self._cached_backend_failures[key] = (time.monotonic() + self._failure_cache_seconds, message)
 
     def _positive_float_env(self, name: str, default: float) -> float:
         with contextlib.suppress(ValueError):
             value = float(os.getenv(name, str(default)))
+            if value > 0:
+                return value
+        return default
+
+    def _positive_int_env(self, name: str, default: int) -> int:
+        with contextlib.suppress(ValueError):
+            value = int(os.getenv(name, str(default)))
             if value > 0:
                 return value
         return default

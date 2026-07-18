@@ -395,6 +395,7 @@ export const zh = {
     "stage.runtime_compare": "运行时对比",
     "stage.reviewing": "评审与修复",
     "stage.completed": "结果包就绪",
+    "stage.completed_best_effort": "结果包已生成（尽力完成）",
     "stage.failed": "失败",
     "stage.cancelled": "已取消",
     "support.generatedProject": "目录产物请通过结果包下载查看。",

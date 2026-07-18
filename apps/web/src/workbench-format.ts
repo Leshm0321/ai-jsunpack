@@ -21,11 +21,16 @@ export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
-export function formatDuration(seconds: number): string {
-  if (seconds < 1) {
-    return `${Math.round(seconds * 1000)} ms`;
+export function formatDurationMs(milliseconds: number): string {
+  if (milliseconds < 1000) {
+    return `${Math.round(milliseconds)} ms`;
   }
-  return `${seconds.toFixed(2)} s`;
+  const seconds = milliseconds / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(2)} s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${Math.round(seconds - minutes * 60)}s`;
 }
 
 export function formatIdList(ids: string[], t?: (key: string) => string): string {
@@ -42,8 +47,11 @@ export function downloadJsonFile(filename: string, payload: unknown): void {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function errorMessage(error: unknown): string {

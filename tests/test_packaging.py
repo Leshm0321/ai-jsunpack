@@ -11,6 +11,81 @@ from apps.worker.worker.packaging import PackagingRunner
 
 
 class PackagingRunnerTest(unittest.TestCase):
+    def test_packaging_reports_missing_dependency_placeholder_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                plan_artifact = store.write_artifact(
+                    job.id,
+                    kind="reconstruction_plan",
+                    stage="reconstructing",
+                    filename="reconstruction-plan.json",
+                    content=json.dumps(
+                        {
+                            "kind": "reconstruction_plan",
+                            "jobId": job.id,
+                            "plan": {
+                                "dependencyPlaceholders": [
+                                    {
+                                        "importerPath": "agentApi.js",
+                                        "specifier": "./aiTextApi.js",
+                                        "resolvedPath": "aiTextApi.js",
+                                        "importedNames": ["generateText"],
+                                        "reExportedNames": [],
+                                        "defaultImport": False,
+                                        "namespaceImport": False,
+                                        "sideEffectOnly": False,
+                                        "exportAll": False,
+                                        "reason": "missing_static_relative_dependency",
+                                        "status": "generated",
+                                        "limitation": (
+                                            "Load-only continuity is provided; semantic behavior is unavailable and generated exports throw."
+                                        ),
+                                    }
+                                ]
+                            },
+                        }
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
+
+                result = PackagingRunner().run(
+                    job_id=job.id,
+                    store=store,
+                    parent_artifact_ids=[plan_artifact.id],
+                )
+                report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
+                html_report = Path(result.html_report_artifact.storage_uri).read_text(encoding="utf-8")
+                evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
+                sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
+                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                    audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
+
+                self.assertIn("## Dependency Placeholder Summary", report)
+                self.assertIn("agentApi.js", report)
+                self.assertIn("aiTextApi.js", report)
+                self.assertIn("generateText", report)
+                self.assertIn("AI_JSUNPACK_MISSING_DEPENDENCY", report)
+                self.assertIn("Dependency Placeholder Summary", html_report)
+                self.assertIn("dependency-placeholder-summary", sections)
+                self.assertEqual(sections["dependency-placeholder-summary"]["details"][0]["status"], "generated")
+                self.assertEqual(
+                    sections["dependency-placeholder-summary"]["details"][0]["semanticBehaviorAvailable"],
+                    False,
+                )
+                self.assertEqual(
+                    audit_payload["reconstructionPlans"][0]["plan"]["dependencyPlaceholders"][0]["resolvedPath"],
+                    "aiTextApi.js",
+                )
+            finally:
+                store.close()
+
     def test_packaging_includes_ops_alert_event_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -132,6 +207,83 @@ class PackagingRunnerTest(unittest.TestCase):
         self.assertEqual(decision["status"], "completed")
         self.assertEqual(decision["failureClass"], "none")
         self.assertEqual(decision["observations"], [])
+
+    def test_completion_decision_supersedes_pre_runtime_agent_uncertainty_after_runtime_passes(self):
+        decision = PackagingRunner()._completion_decision(
+            {
+                "buildArtifacts": [],
+                "runtimeReports": [
+                    {
+                        "target": "reconstructed",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "comparisonArtifactId": None,
+                    },
+                    {
+                        "target": "reconstructed",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "comparisonArtifactId": "comparison_1",
+                    },
+                ],
+                "reviewRuns": [
+                    {
+                        "reviewType": "agent_review",
+                        "attempt": 0,
+                        "status": "best_effort",
+                        "failureClass": "unknown",
+                        "decision": "Runtime evidence remains inconclusive without current runtime comparison evidence.",
+                    },
+                    {
+                        "reviewType": "runtime_compare",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "decision": "Runtime compare passed.",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(decision["status"], "completed")
+        self.assertEqual(decision["observations"], [])
+
+    def test_completion_decision_preserves_non_runtime_agent_best_effort(self):
+        decision = PackagingRunner()._completion_decision(
+            {
+                "buildArtifacts": [],
+                "runtimeReports": [
+                    {
+                        "target": "reconstructed",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "comparisonArtifactId": "comparison_1",
+                    }
+                ],
+                "reviewRuns": [
+                    {
+                        "reviewType": "agent_review",
+                        "attempt": 0,
+                        "status": "best_effort",
+                        "failureClass": "unknown",
+                        "decision": "Source semantics remain ambiguous after analysis.",
+                    },
+                    {
+                        "reviewType": "runtime_compare",
+                        "attempt": 1,
+                        "status": "pass",
+                        "failureClass": "none",
+                        "decision": "Runtime compare passed.",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(decision["status"], "completed_best_effort")
+        self.assertEqual(decision["observations"][0]["group"], "reviewRuns")
 
     def test_evidence_attachment_include_kinds_filter_controls_zip_entries(self):
         with tempfile.TemporaryDirectory() as temp_dir:

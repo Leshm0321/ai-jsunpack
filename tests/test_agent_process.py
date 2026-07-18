@@ -212,6 +212,28 @@ class AgentProcessWorkerTest(unittest.TestCase):
 
         self.assertEqual(json.loads(output.getvalue())["errorKind"], "schema_error")
 
+    def test_worker_classifies_structured_output_value_errors_as_schema_errors(self):
+        class InvalidStructuredOutputBackend:
+            def run_agent(self, *, spec, prompt_context, policy):
+                del spec, prompt_context, policy
+                raise ValueError("No JSON found in response")
+
+        request = invocation_request()
+        payload = SubprocessCrewAIInvoker()._request_payload(  # noqa: SLF001 - protocol unit test
+            request,
+            invocation_id="invocation-1",
+            data_root=Path("D:/tmp/isolated"),
+        )
+        output = io.StringIO()
+
+        worker_main(
+            input_stream=io.StringIO(json.dumps(payload)),
+            output_stream=output,
+            backend_factory=InvalidStructuredOutputBackend,
+        )
+
+        self.assertEqual(json.loads(output.getvalue())["errorKind"], "schema_error")
+
 
 class SubprocessCrewAIInvokerTest(unittest.TestCase):
     def test_success_redacts_api_key_and_base_url_from_model_output(self):
@@ -368,6 +390,107 @@ class SubprocessCrewAIInvokerTest(unittest.TestCase):
         self.assertEqual(adapter.execute_agent(**kwargs).status, "fail")
         self.assertEqual(adapter.execute_agent(**kwargs).status, "fail")
         self.assertEqual(invoker.calls, 2)
+
+    def test_transient_child_failure_is_retried_and_recovers(self):
+        class RecoveringInvoker:
+            parallel_safe = True
+            isolation_mode = "process"
+
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    return CrewAIProcessResult(
+                        status="child_error",
+                        message="CrewAI child invocation failed.",
+                        duration_ms=1.0,
+                        data_root="isolated",
+                        invocation_id="failed",
+                        process_exit_status=0,
+                    )
+                return CrewAIProcessResult(
+                    status="success",
+                    message="done",
+                    duration_ms=1.0,
+                    data_root="isolated",
+                    invocation_id="recovered",
+                    output=FakeBackend().run_agent(
+                        spec=request.spec,
+                        prompt_context=request.prompt_context,
+                        policy=request.policy,
+                    ),
+                    process_exit_status=0,
+                )
+
+        invoker = RecoveringInvoker()
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_AGENT_BACKEND_MAX_ATTEMPTS": "2",
+                "AI_JSUNPACK_AGENT_BACKEND_RETRY_BACKOFF_SECONDS": "0.001",
+            },
+            clear=False,
+        ):
+            adapter = CrewAIExecutionAdapter(backend=IsolatedCrewAIBackend(invoker=invoker))
+
+        execution = adapter.execute_agent(
+            spec=agent_spec(),
+            policy=model_policy(),
+            prompt_context={"jobId": "job"},
+            input_artifact_ids=[],
+            evidence_refs=[],
+        )
+
+        self.assertEqual(execution.status, "pass")
+        self.assertEqual(execution.attempt, 1)
+        self.assertEqual(invoker.calls, 2)
+
+    def test_persistent_child_failure_stops_at_retry_bound_without_cross_agent_cache(self):
+        class FailingInvoker:
+            parallel_safe = True
+            isolation_mode = "process"
+
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def invoke(self, request):
+                self.calls.append(request.spec.name)
+                return CrewAIProcessResult(
+                    status="child_error",
+                    message="CrewAI child invocation failed.",
+                    duration_ms=1.0,
+                    data_root="isolated",
+                    invocation_id=str(len(self.calls)),
+                    process_exit_status=0,
+                )
+
+        invoker = FailingInvoker()
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_AGENT_BACKEND_MAX_ATTEMPTS": "2",
+                "AI_JSUNPACK_AGENT_BACKEND_RETRY_BACKOFF_SECONDS": "0.001",
+            },
+            clear=False,
+        ):
+            adapter = CrewAIExecutionAdapter(backend=IsolatedCrewAIBackend(invoker=invoker))
+        common = {
+            "policy": model_policy(),
+            "prompt_context": {"jobId": "job"},
+            "input_artifact_ids": [],
+            "evidence_refs": [],
+        }
+
+        naming = adapter.execute_agent(spec=agent_spec("NamingAgent"), **common)
+        type_result = adapter.execute_agent(spec=agent_spec("TypeAgent"), **common)
+
+        self.assertEqual(naming.status, "fail")
+        self.assertEqual(naming.attempt, 1)
+        self.assertEqual(type_result.status, "fail")
+        self.assertEqual(type_result.attempt, 1)
+        self.assertEqual(invoker.calls, ["NamingAgent", "NamingAgent", "TypeAgent", "TypeAgent"])
 
     def test_execution_adapter_records_process_isolation_metadata(self):
         class SuccessfulInvoker:

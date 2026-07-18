@@ -22,6 +22,7 @@ export interface CoreAnalysisResult extends HeadlessAnalysisResult {
   graphAnalysis: GraphAnalysis;
   transformAnalysis: TransformAnalysis;
   moduleRecoveryAnalysis: ModuleRecoveryAnalysis;
+  dependencyPlaceholders: DependencyPlaceholderRecord[];
 }
 
 export interface NormalizedInputPackage {
@@ -55,6 +56,7 @@ export interface ReconstructionPlan {
   moduleBoundaries: ModuleBoundaryCandidate[];
   importExportCandidates: ImportExportCandidate[];
   generatedModules: GeneratedModuleRecord[];
+  dependencyPlaceholders: DependencyPlaceholderRecord[];
   scriptTransforms: ScriptTransformRecord[];
   transformLog: TransformLogEntry[];
   rollbackMap: RollbackMapEntry[];
@@ -67,6 +69,7 @@ export interface ReconstructionPlan {
     moduleBoundaryCount: number;
     importExportCandidateCount: number;
     generatedModuleCount: number;
+    dependencyPlaceholderCount: number;
     transformCount: number;
     symbolCount: number;
   };
@@ -135,6 +138,8 @@ export interface GeneratedProjectManifest {
   entrypointFiles: string[];
   typeDefinitionFiles: string[];
   runtimeShimFiles: string[];
+  dependencyPlaceholderFiles: string[];
+  dependencyPlaceholders: DependencyPlaceholderRecord[];
   analysisFiles: string[];
   sourceRoot: string;
   limitations: string[];
@@ -304,6 +309,21 @@ export interface GeneratedModuleRecord {
   evidenceRefs: string[];
 }
 
+export interface DependencyPlaceholderRecord {
+  importerPath: string;
+  specifier: string;
+  resolvedPath: string | null;
+  importedNames: string[];
+  reExportedNames: string[];
+  defaultImport: boolean;
+  namespaceImport: boolean;
+  sideEffectOnly: boolean;
+  exportAll: boolean;
+  reason: "missing_static_relative_dependency" | "unsafe_relative_dependency" | "dependency_path_conflict";
+  status: "generated" | "unsupported";
+  limitation: string;
+}
+
 export interface ModuleRecoveryAnalysis {
   runtimeWrappers: RuntimeWrapperCandidate[];
   moduleBoundaries: ModuleBoundaryCandidate[];
@@ -380,6 +400,7 @@ const GENERATED_PROJECT_FILES = [
   "src/analysis/module-boundaries.json",
   "src/analysis/import-export-candidates.json",
   "src/analysis/generated-modules.json",
+  "src/analysis/dependency-placeholders.json",
   "src/analysis/transform-log.json",
   "src/analysis/rollback-map.json",
   "src/entrypoints/reconstruction-entry.ts",
@@ -429,6 +450,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
     const graphAnalysis = buildGraphAnalysis(inventory, astIndexes, sourceMapAnalysis);
     const transformAnalysis = await buildTransformAnalysis(rootDir, astIndexes);
     const moduleRecoveryAnalysis = await buildModuleRecoveryAnalysis(rootDir, inventory, astIndexes, sourceMapAnalysis, detectedRuntime);
+    const dependencyPlaceholders = await analyzeDependencyPlaceholders(rootDir, inventory);
 
     return {
       inventory,
@@ -438,6 +460,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
       graphAnalysis,
       transformAnalysis,
       moduleRecoveryAnalysis,
+      dependencyPlaceholders,
       artifacts: []
     };
   } finally {
@@ -516,8 +539,9 @@ async function normalizeSingleScriptInput(sourcePath: string): Promise<Normalize
 
   const scriptName = safeSingleScriptFilename(sourcePath);
   try {
+    const scriptSource = await fs.readFile(sourcePath, "utf8");
     await fs.copyFile(sourcePath, path.join(tempRoot, scriptName));
-    await fs.writeFile(path.join(tempRoot, "index.html"), singleScriptHostHtml(scriptName), "utf8");
+    await fs.writeFile(path.join(tempRoot, "index.html"), singleScriptHostHtml(scriptName, scriptSource), "utf8");
   } catch (error) {
     await cleanup();
     throw error;
@@ -656,6 +680,203 @@ export async function buildAstIndexForFile(filePath: string, rootDir = path.dirn
     exports: [...exports],
     warnings
   };
+}
+
+interface StaticDependencyUsage {
+  importerPath: string;
+  specifier: string;
+  importedNames: Set<string>;
+  reExportedNames: Set<string>;
+  defaultImport: boolean;
+  namespaceImport: boolean;
+  sideEffectOnly: boolean;
+  exportAll: boolean;
+}
+
+async function analyzeDependencyPlaceholders(
+  rootDir: string,
+  inventory: InputInventory
+): Promise<DependencyPlaceholderRecord[]> {
+  const absoluteRoot = path.resolve(rootDir);
+  const usages = new Map<string, StaticDependencyUsage>();
+
+  for (const importerPath of inventory.scripts) {
+    const source = await fs.readFile(path.join(absoluteRoot, safeRelativePath(importerPath)), "utf8");
+    let ast: ReturnType<typeof parse>;
+    try {
+      ast = parse(source, {
+        sourceType: "unambiguous",
+        plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+        errorRecovery: true
+      });
+    } catch {
+      continue;
+    }
+
+    for (const statement of ast.program.body) {
+      if (t.isImportDeclaration(statement)) {
+        const usage = dependencyUsage(usages, importerPath, statement.source.value);
+        usage.sideEffectOnly ||= statement.specifiers.length === 0;
+        for (const specifier of statement.specifiers) {
+          if (t.isImportDefaultSpecifier(specifier)) {
+            usage.defaultImport = true;
+          } else if (t.isImportNamespaceSpecifier(specifier)) {
+            usage.namespaceImport = true;
+          } else {
+            usage.importedNames.add(importSpecifierName(specifier));
+          }
+        }
+        continue;
+      }
+      if (t.isExportAllDeclaration(statement)) {
+        const usage = dependencyUsage(usages, importerPath, statement.source.value);
+        usage.exportAll = true;
+        continue;
+      }
+      if (!t.isExportNamedDeclaration(statement) || !statement.source) {
+        continue;
+      }
+      const usage = dependencyUsage(usages, importerPath, statement.source.value);
+      for (const specifier of statement.specifiers) {
+        if (t.isExportNamespaceSpecifier(specifier)) {
+          usage.namespaceImport = true;
+          usage.reExportedNames.add(exportName(specifier.exported));
+          continue;
+        }
+        if (!t.isExportSpecifier(specifier)) {
+          continue;
+        }
+        const importedName = exportName(specifier.local);
+        const exportedName = exportName(specifier.exported);
+        if (importedName === "default") {
+          usage.defaultImport = true;
+        } else {
+          usage.importedNames.add(importedName);
+        }
+        usage.reExportedNames.add(exportedName);
+      }
+    }
+  }
+
+  const records: DependencyPlaceholderRecord[] = [];
+  for (const usage of usages.values()) {
+    if (!usage.specifier.startsWith("./") && !usage.specifier.startsWith("../")) {
+      continue;
+    }
+    const specifierPath = usage.specifier.split(/[?#]/, 1)[0];
+    const importerDirectory = path.posix.dirname(toPosix(usage.importerPath));
+    const resolvedPath = path.posix.normalize(path.posix.join(importerDirectory, specifierPath));
+    const baseRecord = dependencyPlaceholderRecordBase(usage);
+    if (
+      !specifierPath ||
+      specifierPath.includes("\\") ||
+      path.posix.isAbsolute(resolvedPath) ||
+      resolvedPath === ".." ||
+      resolvedPath.startsWith("../")
+    ) {
+      records.push({
+        ...baseRecord,
+        resolvedPath: null,
+        reason: "unsafe_relative_dependency",
+        status: "unsupported",
+        limitation: "The dependency resolves outside the normalized input root or uses an unsafe path and was not written."
+      });
+      continue;
+    }
+
+    let safeResolvedPath: string;
+    try {
+      safeResolvedPath = toPosix(safeArchiveRelativePath(resolvedPath));
+    } catch {
+      records.push({
+        ...baseRecord,
+        resolvedPath: null,
+        reason: "unsafe_relative_dependency",
+        status: "unsupported",
+        limitation: "The dependency path could not be normalized safely and was not written."
+      });
+      continue;
+    }
+
+    const targetPath = path.join(absoluteRoot, safeResolvedPath);
+    let targetStat: Awaited<ReturnType<typeof fs.lstat>> | null = null;
+    try {
+      targetStat = await fs.lstat(targetPath);
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (targetStat?.isFile()) {
+      continue;
+    }
+    if (targetStat) {
+      records.push({
+        ...baseRecord,
+        resolvedPath: safeResolvedPath,
+        reason: "dependency_path_conflict",
+        status: "unsupported",
+        limitation: "The dependency path exists but is not a regular file, so no placeholder was written."
+      });
+      continue;
+    }
+    records.push({
+      ...baseRecord,
+      resolvedPath: safeResolvedPath,
+      reason: "missing_static_relative_dependency",
+      status: "generated",
+      limitation: "Load-only continuity is provided; the dependency's semantic behavior is unavailable and generated exports throw when called."
+    });
+  }
+
+  return records.sort((left, right) =>
+    `${left.resolvedPath ?? ""}\0${left.importerPath}\0${left.specifier}`.localeCompare(
+      `${right.resolvedPath ?? ""}\0${right.importerPath}\0${right.specifier}`
+    )
+  );
+}
+
+function dependencyUsage(
+  usages: Map<string, StaticDependencyUsage>,
+  importerPath: string,
+  specifier: string
+): StaticDependencyUsage {
+  const key = `${importerPath}\0${specifier}`;
+  const existing = usages.get(key);
+  if (existing) {
+    return existing;
+  }
+  const created: StaticDependencyUsage = {
+    importerPath: toPosix(importerPath),
+    specifier,
+    importedNames: new Set<string>(),
+    reExportedNames: new Set<string>(),
+    defaultImport: false,
+    namespaceImport: false,
+    sideEffectOnly: false,
+    exportAll: false
+  };
+  usages.set(key, created);
+  return created;
+}
+
+function dependencyPlaceholderRecordBase(
+  usage: StaticDependencyUsage
+): Omit<DependencyPlaceholderRecord, "resolvedPath" | "reason" | "status" | "limitation"> {
+  return {
+    importerPath: usage.importerPath,
+    specifier: usage.specifier,
+    importedNames: [...usage.importedNames].sort(),
+    reExportedNames: [...usage.reExportedNames].sort(),
+    defaultImport: usage.defaultImport,
+    namespaceImport: usage.namespaceImport,
+    sideEffectOnly: usage.sideEffectOnly,
+    exportAll: usage.exportAll
+  };
+}
+
+function exportName(node: t.Identifier | t.StringLiteral): string {
+  return t.isIdentifier(node) ? node.name : node.value;
 }
 
 function indexProgramDeclarations(
@@ -1272,6 +1493,7 @@ function transformScriptSource(
   }
 
   markProgramWrappers(filePath, ast.program.body, wrapperMarks, transformLog);
+  restoreStaticStringArrayDecoders(filePath, ast, transforms, transformLog, rollbackMap);
   const traverseAst = getTraverse();
 
   traverseAst(ast, {
@@ -1337,6 +1559,390 @@ function transformScriptSource(
     transformLog,
     rollbackMap
   };
+}
+
+interface StaticStringArrayProvider {
+  name: string;
+  node: t.FunctionDeclaration;
+  values: string[];
+}
+
+interface StaticStringDecoderCandidate {
+  decoderName: string;
+  infrastructureNodes: Set<t.Node>;
+  offset: number;
+  values: string[];
+}
+
+type StaticPrimitive = string | number | boolean | null;
+
+function restoreStaticStringArrayDecoders(
+  filePath: string,
+  ast: ReturnType<typeof parse>,
+  transforms: Set<string>,
+  transformLog: TransformLogEntry[],
+  rollbackMap: RollbackMapEntry[]
+): void {
+  const providers = new Map<string, StaticStringArrayProvider>();
+  for (const statement of ast.program.body) {
+    if (!t.isFunctionDeclaration(statement)) continue;
+    const provider = extractStaticStringArrayProvider(statement);
+    if (provider) providers.set(provider.name, provider);
+  }
+
+  const candidates: StaticStringDecoderCandidate[] = [];
+  for (const statement of ast.program.body) {
+    if (!t.isFunctionDeclaration(statement)) continue;
+    const decoder = extractStaticStringDecoder(statement, providers);
+    if (!decoder) continue;
+    const rotation = extractStaticStringArrayRotation(ast.program.body, decoder, providers.get(decoder.providerName));
+    if (!rotation) continue;
+    candidates.push({
+      decoderName: decoder.decoderName,
+      infrastructureNodes: new Set([statement, decoder.providerNode, rotation.node]),
+      offset: decoder.offset,
+      values: rotation.values
+    });
+  }
+  if (candidates.length === 0) return;
+
+  const traverseAst = getTraverse();
+  traverseAst(ast, {
+    CallExpression(path: NodePath<t.CallExpression>) {
+      if (!t.isIdentifier(path.node.callee)) return;
+      const firstArgument = path.node.arguments[0];
+      if (!firstArgument || !t.isExpression(firstArgument)) return;
+      const index = staticNumericExpression(firstArgument);
+      if (index === undefined) return;
+
+      for (const candidate of candidates) {
+        if (path.findParent((parent) => candidate.infrastructureNodes.has(parent.node))) continue;
+        const calleePath = path.get("callee");
+        if (!calleePath.isIdentifier() || !identifierResolvesToDecoder(calleePath, candidate.decoderName)) continue;
+        const valueIndex = index - candidate.offset;
+        if (!Number.isInteger(valueIndex) || valueIndex < 0 || valueIndex >= candidate.values.length) continue;
+        const decodedValue = candidate.values[valueIndex];
+        const originalSnippet = codeForNode(path.node);
+        const originalLoc = formatNodeLoc(path.node);
+        const literal = t.stringLiteral(decodedValue);
+        path.replaceWith(literal);
+        transforms.add("string_array_decoder_restore");
+        logAppliedTransform(
+          filePath,
+          "string_array_decoder_restore",
+          originalLoc,
+          originalSnippet,
+          codeForNode(literal),
+          transformLog,
+          rollbackMap
+        );
+        break;
+      }
+    }
+  });
+}
+
+function extractStaticStringArrayProvider(node: t.FunctionDeclaration): StaticStringArrayProvider | null {
+  const functionName = node.id?.name;
+  if (!functionName) return null;
+  let arrayName: string | null = null;
+  let values: string[] | null = null;
+  for (const statement of node.body.body) {
+    if (!t.isVariableDeclaration(statement)) continue;
+    for (const declaration of statement.declarations) {
+      if (!t.isIdentifier(declaration.id) || !t.isArrayExpression(declaration.init)) continue;
+      if (declaration.init.elements.some((element) => !t.isStringLiteral(element))) continue;
+      arrayName = declaration.id.name;
+      values = declaration.init.elements.map((element) => (element as t.StringLiteral).value);
+      break;
+    }
+    if (values) break;
+  }
+  if (!arrayName || !values || values.length === 0) return null;
+
+  const hasSelfReplacement = node.body.body.some((statement) => {
+    if (!t.isExpressionStatement(statement) || !t.isAssignmentExpression(statement.expression, { operator: "=" })) return false;
+    const assignment = statement.expression;
+    if (!t.isIdentifier(assignment.left, { name: functionName }) || !t.isFunctionExpression(assignment.right)) return false;
+    return assignment.right.body.body.some(
+      (innerStatement) => t.isReturnStatement(innerStatement) && t.isIdentifier(innerStatement.argument, { name: arrayName })
+    );
+  });
+  const returnsSelfCall = node.body.body.some(
+    (statement) =>
+      t.isReturnStatement(statement) &&
+      t.isCallExpression(statement.argument) &&
+      t.isIdentifier(statement.argument.callee, { name: functionName }) &&
+      statement.argument.arguments.length === 0
+  );
+  if (!hasSelfReplacement || !returnsSelfCall) return null;
+  return { name: functionName, node, values };
+}
+
+function extractStaticStringDecoder(
+  node: t.FunctionDeclaration,
+  providers: Map<string, StaticStringArrayProvider>
+): { decoderName: string; offset: number; providerName: string; providerNode: t.FunctionDeclaration } | null {
+  const decoderName = node.id?.name;
+  if (!decoderName) return null;
+  let providerName: string | null = null;
+  let arrayAlias: string | null = null;
+  for (const statement of node.body.body) {
+    if (!t.isVariableDeclaration(statement)) continue;
+    for (const declaration of statement.declarations) {
+      if (
+        t.isIdentifier(declaration.id) &&
+        t.isCallExpression(declaration.init) &&
+        t.isIdentifier(declaration.init.callee) &&
+        declaration.init.arguments.length === 0 &&
+        providers.has(declaration.init.callee.name)
+      ) {
+        arrayAlias = declaration.id.name;
+        providerName = declaration.init.callee.name;
+        break;
+      }
+    }
+    if (providerName) break;
+  }
+  if (!providerName || !arrayAlias) return null;
+
+  const returnStatement = node.body.body.find(
+    (statement): statement is t.ReturnStatement => t.isReturnStatement(statement) && t.isSequenceExpression(statement.argument)
+  );
+  if (!returnStatement || !t.isSequenceExpression(returnStatement.argument)) return null;
+  const assignment = returnStatement.argument.expressions.find(
+    (expression): expression is t.AssignmentExpression =>
+      t.isAssignmentExpression(expression, { operator: "=" }) &&
+      t.isIdentifier(expression.left, { name: decoderName }) &&
+      t.isFunctionExpression(expression.right)
+  );
+  if (!assignment || !t.isFunctionExpression(assignment.right)) return null;
+  const innerFunction = assignment.right;
+  const indexParameter = innerFunction.params[0];
+  if (!t.isIdentifier(indexParameter)) return null;
+
+  let offset: number | undefined;
+  let valueName: string | null = null;
+  let returnsArrayValue = false;
+  for (const statement of innerFunction.body.body) {
+    if (
+      t.isExpressionStatement(statement) &&
+      t.isAssignmentExpression(statement.expression, { operator: "=" }) &&
+      t.isIdentifier(statement.expression.left, { name: indexParameter.name }) &&
+      t.isBinaryExpression(statement.expression.right, { operator: "-" }) &&
+      t.isIdentifier(statement.expression.right.left, { name: indexParameter.name })
+    ) {
+      offset = staticNumericExpression(statement.expression.right.right);
+      continue;
+    }
+    if (t.isVariableDeclaration(statement)) {
+      for (const declaration of statement.declarations) {
+        if (
+          t.isIdentifier(declaration.id) &&
+          t.isMemberExpression(declaration.init, { computed: true }) &&
+          t.isIdentifier(declaration.init.object, { name: arrayAlias }) &&
+          t.isIdentifier(declaration.init.property, { name: indexParameter.name })
+        ) {
+          valueName = declaration.id.name;
+        }
+      }
+      continue;
+    }
+    if (t.isReturnStatement(statement)) {
+      if (valueName && t.isIdentifier(statement.argument, { name: valueName })) returnsArrayValue = true;
+      if (
+        t.isMemberExpression(statement.argument, { computed: true }) &&
+        t.isIdentifier(statement.argument.object, { name: arrayAlias }) &&
+        t.isIdentifier(statement.argument.property, { name: indexParameter.name })
+      ) {
+        returnsArrayValue = true;
+      }
+    }
+  }
+  if (offset === undefined || !returnsArrayValue) return null;
+  const provider = providers.get(providerName);
+  if (!provider) return null;
+  return { decoderName, offset, providerName, providerNode: provider.node };
+}
+
+function extractStaticStringArrayRotation(
+  body: t.Statement[],
+  decoder: { decoderName: string; offset: number; providerName: string },
+  provider: StaticStringArrayProvider | undefined
+): { node: t.ExpressionStatement; values: string[] } | null {
+  if (!provider) return null;
+  for (const statement of body) {
+    if (!t.isExpressionStatement(statement) || !t.isCallExpression(statement.expression)) continue;
+    const call = statement.expression;
+    if (!t.isFunctionExpression(call.callee) || call.arguments.length < 2) continue;
+    const providerArgument = call.arguments[0];
+    const targetArgument = call.arguments[1];
+    if (!t.isIdentifier(providerArgument, { name: decoder.providerName }) || !t.isExpression(targetArgument)) continue;
+    const target = staticNumericExpression(targetArgument);
+    if (target === undefined) continue;
+    const providerParameter = call.callee.params[0];
+    if (!t.isIdentifier(providerParameter)) continue;
+
+    const declarations: Array<{ id: string; init: t.Expression | null }> = [];
+    let arrayName: string | null = null;
+    let rotatesArray = false;
+    t.traverseFast(call.callee.body, (child) => {
+      if (t.isVariableDeclarator(child) && t.isIdentifier(child.id)) {
+        declarations.push({ id: child.id.name, init: t.isExpression(child.init) ? child.init : null });
+        if (
+          t.isCallExpression(child.init) &&
+          t.isIdentifier(child.init.callee, { name: providerParameter.name }) &&
+          child.init.arguments.length === 0
+        ) {
+          arrayName = child.id.name;
+        }
+      }
+    });
+    if (!arrayName) continue;
+    t.traverseFast(call.callee.body, (child) => {
+      if (!t.isCallExpression(child) || !t.isMemberExpression(child.callee)) return;
+      if (!t.isIdentifier(child.callee.object, { name: arrayName ?? undefined })) return;
+      if (memberPropertyName(child.callee) !== "push" || child.arguments.length !== 1) return;
+      const shifted = child.arguments[0];
+      if (
+        t.isCallExpression(shifted) &&
+        t.isMemberExpression(shifted.callee) &&
+        t.isIdentifier(shifted.callee.object, { name: arrayName ?? undefined }) &&
+        memberPropertyName(shifted.callee) === "shift"
+      ) {
+        rotatesArray = true;
+      }
+    });
+    if (!rotatesArray) continue;
+
+    const decoderAliases = new Set([decoder.decoderName]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const declaration of declarations) {
+        if (t.isIdentifier(declaration.init) && decoderAliases.has(declaration.init.name) && !decoderAliases.has(declaration.id)) {
+          decoderAliases.add(declaration.id);
+          changed = true;
+        }
+      }
+    }
+    for (const declaration of declarations) {
+      if (!declaration.init) continue;
+      const values = rotateStringArrayUntilTarget(provider.values, declaration.init, target, decoderAliases, decoder.offset);
+      if (values) return { node: statement, values };
+    }
+  }
+  return null;
+}
+
+function rotateStringArrayUntilTarget(
+  initialValues: string[],
+  checksumExpression: t.Expression,
+  target: number,
+  decoderAliases: Set<string>,
+  offset: number
+): string[] | null {
+  const values = [...initialValues];
+  for (let rotation = 0; rotation < values.length; rotation += 1) {
+    const checksum = evaluateStaticDecoderExpression(checksumExpression, values, decoderAliases, offset);
+    if (typeof checksum === "number" && checksum === target) return values;
+    values.push(values.shift() as string);
+  }
+  return null;
+}
+
+function evaluateStaticDecoderExpression(
+  node: t.Expression,
+  values: string[],
+  decoderAliases: Set<string>,
+  offset: number
+): StaticPrimitive | undefined {
+  const literal = literalValueForExpression(node);
+  if (literal !== undefined) return literal;
+  if (t.isUnaryExpression(node) && t.isExpression(node.argument)) {
+    const argument = evaluateStaticDecoderExpression(node.argument, values, decoderAliases, offset);
+    if (argument === undefined) return undefined;
+    if (node.operator === "+") return Number(argument);
+    if (node.operator === "-") return -Number(argument);
+    if (node.operator === "!") return !argument;
+    if (node.operator === "~") return ~Number(argument);
+    return undefined;
+  }
+  if (t.isBinaryExpression(node) && t.isExpression(node.left) && t.isExpression(node.right)) {
+    const left = evaluateStaticDecoderExpression(node.left, values, decoderAliases, offset);
+    const right = evaluateStaticDecoderExpression(node.right, values, decoderAliases, offset);
+    if (left === undefined || right === undefined) return undefined;
+    switch (node.operator) {
+      case "+":
+        return typeof left === "string" || typeof right === "string" ? String(left) + String(right) : Number(left) + Number(right);
+      case "-": return Number(left) - Number(right);
+      case "*": return Number(left) * Number(right);
+      case "/": return Number(left) / Number(right);
+      case "%": return Number(left) % Number(right);
+      case "**": return Number(left) ** Number(right);
+      case "|": return Number(left) | Number(right);
+      case "&": return Number(left) & Number(right);
+      case "^": return Number(left) ^ Number(right);
+      case "<<": return Number(left) << Number(right);
+      case ">>": return Number(left) >> Number(right);
+      case ">>>": return Number(left) >>> Number(right);
+      default: return undefined;
+    }
+  }
+  if (t.isCallExpression(node) && t.isIdentifier(node.callee)) {
+    if (decoderAliases.has(node.callee.name)) {
+      const argument = node.arguments[0];
+      if (!argument || !t.isExpression(argument)) return undefined;
+      const index = staticNumericExpression(argument);
+      if (index === undefined) return undefined;
+      const valueIndex = index - offset;
+      return Number.isInteger(valueIndex) && valueIndex >= 0 && valueIndex < values.length ? values[valueIndex] : undefined;
+    }
+    if (node.callee.name === "parseInt") {
+      const argument = node.arguments[0];
+      if (!argument || !t.isExpression(argument)) return undefined;
+      const value = evaluateStaticDecoderExpression(argument, values, decoderAliases, offset);
+      if (value === undefined) return undefined;
+      const radixArgument = node.arguments[1];
+      const radix = radixArgument && t.isExpression(radixArgument) ? staticNumericExpression(radixArgument) : undefined;
+      return Number.parseInt(String(value), radix);
+    }
+  }
+  return undefined;
+}
+
+function staticNumericExpression(node: t.Expression): number | undefined {
+  if (t.isNumericLiteral(node)) return node.value;
+  if (t.isUnaryExpression(node) && (node.operator === "+" || node.operator === "-") && t.isNumericLiteral(node.argument)) {
+    return node.operator === "-" ? -node.argument.value : node.argument.value;
+  }
+  return undefined;
+}
+
+function memberPropertyName(node: t.MemberExpression): string | null {
+  if (!node.computed && t.isIdentifier(node.property)) return node.property.name;
+  if (node.computed && t.isStringLiteral(node.property)) return node.property.value;
+  return null;
+}
+
+function identifierResolvesToDecoder(
+  path: NodePath<t.Identifier>,
+  decoderName: string,
+  seenNodes: Set<t.Node> = new Set()
+): boolean {
+  const binding = path.scope.getBinding(path.node.name);
+  if (!binding || seenNodes.has(binding.path.node)) return false;
+  seenNodes.add(binding.path.node);
+  if (binding.path.isFunctionDeclaration()) {
+    return binding.path.node.id?.name === decoderName;
+  }
+  if (binding.path.isVariableDeclarator() && t.isIdentifier(binding.path.node.init)) {
+    const initPath = binding.path.get("init");
+    return !Array.isArray(initPath) && initPath.isIdentifier()
+      ? identifierResolvesToDecoder(initPath as NodePath<t.Identifier>, decoderName, seenNodes)
+      : false;
+  }
+  return false;
 }
 
 function addGraphNode(nodes: Map<string, GraphNodeRecord>, id: string, kind: string, label: string): void {
@@ -1803,6 +2409,18 @@ export function planReconstruction(
     "Generated project is a deterministic static host shell; semantic module recovery remains evidence-bound future work.",
     "Build and typecheck scripts are offline validation shims until dependency installation policy is implemented."
   ];
+  const generatedDependencyPlaceholders = analysis.dependencyPlaceholders.filter((record) => record.status === "generated");
+  const unsupportedDependencyPlaceholders = analysis.dependencyPlaceholders.filter((record) => record.status === "unsupported");
+  if (generatedDependencyPlaceholders.length > 0) {
+    limitations.push(
+      `${generatedDependencyPlaceholders.length} missing static relative ESM dependency reference(s) use explicit load-only placeholders; semantic behavior remains unavailable and placeholder exports throw when called.`
+    );
+  }
+  if (unsupportedDependencyPlaceholders.length > 0) {
+    limitations.push(
+      `${unsupportedDependencyPlaceholders.length} missing static relative ESM dependency reference(s) could not be safely placeholdered and remain report-only.`
+    );
+  }
 
   return {
     kind: "reconstruction_plan",
@@ -1816,7 +2434,7 @@ export function planReconstruction(
     sourceMaps: analysis.inventory.sourceMaps,
     manifests: analysis.inventory.manifests,
     detectedRuntime: analysis.detectedRuntime,
-    generatedFiles: GENERATED_PROJECT_FILES,
+    generatedFiles: [...GENERATED_PROJECT_FILES, ...dependencyPlaceholderProjectPaths(analysis.dependencyPlaceholders)],
     inputInventory: analysis.inventory,
     astIndexes: analysis.astIndexes,
     sourceMapAnalysis: analysis.sourceMapAnalysis,
@@ -1826,6 +2444,7 @@ export function planReconstruction(
     moduleBoundaries: analysis.moduleRecoveryAnalysis.moduleBoundaries,
     importExportCandidates: analysis.moduleRecoveryAnalysis.importExportCandidates,
     generatedModules: analysis.moduleRecoveryAnalysis.generatedModules,
+    dependencyPlaceholders: analysis.dependencyPlaceholders,
     scriptTransforms: analysis.transformAnalysis.scriptTransforms,
     transformLog: analysis.transformAnalysis.transformLog,
     rollbackMap: analysis.transformAnalysis.rollbackMap,
@@ -1838,6 +2457,7 @@ export function planReconstruction(
       moduleBoundaryCount: analysis.moduleRecoveryAnalysis.moduleBoundaries.length,
       importExportCandidateCount: analysis.moduleRecoveryAnalysis.importExportCandidates.length,
       generatedModuleCount: analysis.moduleRecoveryAnalysis.generatedModules.length,
+      dependencyPlaceholderCount: analysis.dependencyPlaceholders.length,
       transformCount: analysis.transformAnalysis.transformLog.filter((entry) => entry.status === "applied" && entry.kind !== "wrapper_mark").length,
       symbolCount: analysis.astIndexes.reduce((count, index) => count + index.symbols.length, 0)
     },
@@ -1890,10 +2510,12 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       "src/analysis/module-boundaries.json",
       "src/analysis/import-export-candidates.json",
       "src/analysis/generated-modules.json",
+      "src/analysis/dependency-placeholders.json",
       "src/analysis/transform-log.json",
       "src/analysis/rollback-map.json"
     ];
     const generatedModuleFiles = await writeGeneratedModules(projectRoot, plan);
+    const dependencyPlaceholderFiles = await writeDependencyPlaceholders(projectRoot, plan.dependencyPlaceholders);
     const entrypointFiles = ["src/entrypoints/reconstruction-entry.ts"];
     const typeDefinitionFiles = ["src/types/reconstruction.d.ts"];
     const runtimeShimFiles = ["src/runtime-shims/browser-globals.ts"];
@@ -1903,13 +2525,15 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       jobId: plan.jobId,
       projectPath: ".",
       entrypoint: "index.html",
-      generatedFiles: GENERATED_PROJECT_FILES,
+      generatedFiles: [...GENERATED_PROJECT_FILES, ...dependencyPlaceholderFiles],
       copiedSourceFiles,
       transformedSourceFiles,
       generatedModuleFiles,
       entrypointFiles,
       typeDefinitionFiles,
       runtimeShimFiles,
+      dependencyPlaceholderFiles,
+      dependencyPlaceholders: plan.dependencyPlaceholders,
       analysisFiles,
       sourceRoot: "public/original",
       limitations: plan.limitations
@@ -1978,6 +2602,17 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       kind: "generated_modules",
       jobId: plan.jobId,
       generatedModules: plan.generatedModules
+    });
+    await writeJson(path.join(projectRoot, "src", "analysis", "dependency-placeholders.json"), {
+      kind: "dependency_placeholders",
+      jobId: plan.jobId,
+      dependencyPlaceholders: plan.dependencyPlaceholders,
+      contract: {
+        continuity: "load_only",
+        errorName: "MissingDependencyPlaceholderError",
+        errorCode: "AI_JSUNPACK_MISSING_DEPENDENCY",
+        semanticBehaviorAvailable: false
+      }
     });
     await writeJson(path.join(projectRoot, "src", "analysis", "transform-log.json"), {
       kind: "transform_log",
@@ -2534,6 +3169,127 @@ async function writeGeneratedModules(projectRoot: string, plan: ReconstructionPl
   return [...new Set(writtenFiles)].sort();
 }
 
+function dependencyPlaceholderProjectPaths(records: DependencyPlaceholderRecord[]): string[] {
+  const paths = new Set<string>();
+  for (const record of records) {
+    if (record.status !== "generated" || !record.resolvedPath) {
+      continue;
+    }
+    paths.add(`public/original/${record.resolvedPath}`);
+    if (dependencyPlaceholderRootPathAllowed(record.resolvedPath)) {
+      paths.add(record.resolvedPath);
+    }
+  }
+  return [...paths].sort();
+}
+
+async function writeDependencyPlaceholders(
+  projectRoot: string,
+  records: DependencyPlaceholderRecord[]
+): Promise<string[]> {
+  const recordsByPath = new Map<string, DependencyPlaceholderRecord[]>();
+  for (const record of records) {
+    if (record.status !== "generated" || !record.resolvedPath) {
+      continue;
+    }
+    const grouped = recordsByPath.get(record.resolvedPath) ?? [];
+    grouped.push(record);
+    recordsByPath.set(record.resolvedPath, grouped);
+  }
+
+  const writtenFiles: string[] = [];
+  for (const [resolvedPath, groupedRecords] of recordsByPath) {
+    const source = dependencyPlaceholderSource(resolvedPath, groupedRecords);
+    const candidatePaths = [`public/original/${resolvedPath}`];
+    if (dependencyPlaceholderRootPathAllowed(resolvedPath)) {
+      candidatePaths.push(resolvedPath);
+    }
+    for (const candidatePath of candidatePaths) {
+      const safePath = safeRelativePath(candidatePath);
+      const targetPath = path.join(projectRoot, safePath);
+      try {
+        await fs.lstat(targetPath);
+        continue;
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, source, "utf8");
+      writtenFiles.push(toPosix(safePath));
+    }
+  }
+  return [...new Set(writtenFiles)].sort();
+}
+
+function dependencyPlaceholderRootPathAllowed(resolvedPath: string): boolean {
+  const normalized = toPosix(resolvedPath);
+  const firstSegment = normalized.split("/")[0]?.toLowerCase() ?? "";
+  if (["src", "scripts", "public", "dist", "node_modules"].includes(firstSegment)) {
+    return false;
+  }
+  return !new Set(["index.html", "package.json", "tsconfig.json"]).has(normalized.toLowerCase());
+}
+
+function dependencyPlaceholderSource(
+  resolvedPath: string,
+  records: DependencyPlaceholderRecord[]
+): string {
+  const importedNames = [...new Set(records.flatMap((record) => record.importedNames))]
+    .filter((name) => name !== "default")
+    .sort();
+  const hasDefault = records.some((record) => record.defaultImport || record.importedNames.includes("default"));
+  const metadata = {
+    code: "AI_JSUNPACK_MISSING_DEPENDENCY",
+    resolvedPath,
+    importers: [...new Set(records.map((record) => record.importerPath))].sort(),
+    specifiers: [...new Set(records.map((record) => record.specifier))].sort(),
+    importedNames,
+    defaultImport: hasDefault,
+    namespaceImport: records.some((record) => record.namespaceImport),
+    sideEffectOnly: records.some((record) => record.sideEffectOnly),
+    exportAll: records.some((record) => record.exportAll),
+    semanticBehaviorAvailable: false
+  };
+  const lines = [
+    "// Generated by AI JS Unpack because a required static relative ESM dependency was absent.",
+    `const __missingDependencyMetadata = ${JSON.stringify(metadata, null, 2)};`,
+    "globalThis.console?.warn?.(\"[AI JS Unpack] Missing dependency placeholder loaded.\", __missingDependencyMetadata);",
+    "class MissingDependencyPlaceholderError extends Error {",
+    "  constructor(exportName) {",
+    "    super(`Missing dependency placeholder export ${exportName} from ${__missingDependencyMetadata.resolvedPath} was called; semantic behavior is unavailable.`);",
+    "    this.name = \"MissingDependencyPlaceholderError\";",
+    "    this.code = \"AI_JSUNPACK_MISSING_DEPENDENCY\";",
+    "    this.dependencyPath = __missingDependencyMetadata.resolvedPath;",
+    "    this.exportName = exportName;",
+    "    this.importers = [...__missingDependencyMetadata.importers];",
+    "  }",
+    "}",
+    "function __throwMissingDependency(exportName) {",
+    "  throw new MissingDependencyPlaceholderError(exportName);",
+    "}"
+  ];
+  importedNames.forEach((name, index) => {
+    const localName = `__missingDependencyExport${index}`;
+    lines.push(`const ${localName} = (..._args) => __throwMissingDependency(${JSON.stringify(name)});`);
+    lines.push(`export { ${localName} as ${dependencyPlaceholderExportName(name)} };`);
+  });
+  if (hasDefault) {
+    lines.push("const __missingDependencyDefault = (..._args) => __throwMissingDependency(\"default\");");
+    lines.push("export default __missingDependencyDefault;");
+  }
+  if (importedNames.length === 0 && !hasDefault) {
+    lines.push("export {};");
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function dependencyPlaceholderExportName(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
+}
+
 function recoveredModuleSource(generatedModule: GeneratedModuleRecord, recoveredSource: SourceMapRecoveredSource): string {
   return `// Recovered from source map sourcesContent.
 // Source: ${recoveredSource.source}
@@ -2967,8 +3723,8 @@ function safeSingleScriptFilename(filePath: string): string {
   return filename;
 }
 
-function singleScriptHostHtml(scriptName: string): string {
-  const scriptType = path.extname(scriptName).toLowerCase() === ".mjs" ? ' type="module"' : "";
+function singleScriptHostHtml(scriptName: string, scriptSource: string): string {
+  const scriptType = singleScriptUsesModuleSyntax(scriptName, scriptSource) ? ' type="module"' : "";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -2981,6 +3737,26 @@ function singleScriptHostHtml(scriptName: string): string {
   </body>
 </html>
 `;
+}
+
+function singleScriptUsesModuleSyntax(scriptName: string, scriptSource: string): boolean {
+  const extension = path.extname(scriptName).toLowerCase();
+  if (extension === ".mjs") {
+    return true;
+  }
+  if (extension === ".cjs") {
+    return false;
+  }
+  try {
+    const ast = parse(scriptSource, {
+      sourceType: "unambiguous",
+      plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+      errorRecovery: true
+    });
+    return ast.program.sourceType === "module";
+  } catch {
+    return false;
+  }
 }
 
 function escapeHtmlAttribute(value: string): string {

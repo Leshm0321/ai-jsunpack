@@ -89,6 +89,22 @@ class NonPngBrowserAdapter:
         )
 
 
+class EquivalentOriginBrowserAdapter:
+    def __init__(self) -> None:
+        self.requests: list[BrowserSmokeRequest] = []
+
+    def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
+        actual_origin = f"http://browser-runner.local:{41001 + len(self.requests)}"
+        actual_url = f"{actual_origin}/index.html"
+        self.requests.append(request)
+        request.screenshot_path.write_bytes(_encode_png_rgba(1, 1, b"\x00\x80\xff\xff"))
+        return BrowserSmokeCapture(
+            responses=[f"200 {actual_url}", f"200 {actual_origin}/app.js"],
+            console_messages=[f"log: loaded {actual_url}"],
+            dom_summary={"title": "same", "url": actual_url, "nodeCount": 2},
+        )
+
+
 class RemoteRunnerHandler(BaseHTTPRequestHandler):
     requests: list[dict] = []
     screenshot = b"\x89PNG\r\n\x1a\nremote"
@@ -380,7 +396,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(comparison_payload["differences"]["comparisonScope"]["scenarioName"], "fixture scenario")
                 self.assertEqual(comparison_payload["differences"]["comparisonScope"]["viewport"]["width"], 1365)
                 self.assertIn("title", [item["path"] for item in comparison_payload["differences"]["domDifferences"]])
-                self.assertEqual(comparison_payload["differences"]["networkDiff"]["changed"], True)
+                self.assertEqual(comparison_payload["differences"]["networkDiff"]["changed"], False)
                 self.assertIn("status_2xx", comparison_payload["differences"]["networkDiff"]["groups"])
                 self.assertEqual(comparison_payload["differences"]["consoleDiff"]["changed"], True)
                 self.assertIn("log", comparison_payload["differences"]["consoleDiff"]["groups"])
@@ -395,6 +411,45 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertFalse(matrix_trace_payload["pruned"])
                 self.assertEqual(validation_payload["comparisonArtifactId"], comparisons[0].id)
                 self.assertEqual(set(validation_payload["screenshotArtifactIds"]), {artifact.id for artifact in screenshots})
+            finally:
+                store.close()
+
+    def test_runtime_compare_uses_generated_original_overlay_for_dependency_placeholders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            overlay_root = reconstructed_root / "public" / "original"
+            original_root.mkdir()
+            overlay_root.mkdir(parents=True)
+            (original_root / "index.html").write_text('<script type="module" src="./main.js"></script>', encoding="utf-8")
+            (original_root / "main.js").write_text("import { generateText } from './aiTextApi.js';", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Generated</h1>", encoding="utf-8")
+            (overlay_root / "index.html").write_text('<script type="module" src="./main.js"></script>', encoding="utf-8")
+            (overlay_root / "main.js").write_text("import { generateText } from './aiTextApi.js';", encoding="utf-8")
+            (overlay_root / "aiTextApi.js").write_text(
+                "export const generateText = () => { const error = new Error('missing'); error.code = 'AI_JSUNPACK_MISSING_DEPENDENCY'; throw error; };",
+                encoding="utf-8",
+            )
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = FakeBrowserAdapter()
+                RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                )
+
+                self.assertEqual(len(adapter.requests), 2)
+                self.assertEqual(adapter.requests[0].source_root, overlay_root)
+                self.assertEqual(adapter.requests[1].source_root, reconstructed_root)
+                self.assertTrue((adapter.requests[0].source_root / "aiTextApi.js").is_file())
+                self.assertFalse((original_root / "aiTextApi.js").exists())
             finally:
                 store.close()
 
@@ -440,6 +495,39 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(screenshot_diff["height"], 1)
                 self.assertIn(screenshot_diff["diffArtifactId"], [artifact.id for artifact in screenshots])
                 self.assertIn(screenshot_diff["diffArtifactId"], comparison_payload["screenshotArtifactIds"])
+            finally:
+                store.close()
+
+    def test_runtime_compare_normalizes_ephemeral_server_origins(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            reconstructed_root = root / "reconstructed"
+            original_root.mkdir()
+            reconstructed_root.mkdir()
+            (original_root / "index.html").write_text("<h1>Same</h1>", encoding="utf-8")
+            (reconstructed_root / "index.html").write_text("<h1>Same</h1>", encoding="utf-8")
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                adapter = EquivalentOriginBrowserAdapter()
+                result = RuntimeCompareRunner(browser_adapter=adapter).run_compare(
+                    job_id=job.id,
+                    store=store,
+                    original_input_path=original_root,
+                    reconstructed_input_path=reconstructed_root,
+                )
+                comparison = json.loads(store.read_artifact(job.id, result.comparison_artifact.id))
+
+                self.assertEqual(result.validation.status, "pass")
+                self.assertFalse(comparison["differences"]["domChanged"])
+                self.assertFalse(comparison["differences"]["networkChanged"])
+                self.assertFalse(comparison["differences"]["consoleChanged"])
+                self.assertEqual(comparison["differences"]["networkDiff"]["originalOnly"], [])
+                self.assertEqual(comparison["differences"]["networkDiff"]["reconstructedOnly"], [])
             finally:
                 store.close()
 

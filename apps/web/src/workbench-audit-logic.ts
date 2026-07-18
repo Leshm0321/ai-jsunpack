@@ -1,7 +1,7 @@
 import type { AuditFilterState, NormalizedAuditRecord } from "./workbench-types";
 import type { AuditRiskGroup, AuditRiskGroupId, JobEvidence, SavedAuditFilter } from "./workbench-types";
 import { auditFilterStorageKey } from "./workbench-types";
-import { formatDuration, formatPercent, isRecord } from "./workbench-format";
+import { formatDurationMs, formatPercent, isRecord } from "./workbench-format";
 
 export function readSavedAuditFilters(): SavedAuditFilter[] {
   if (typeof window === "undefined") {
@@ -81,7 +81,7 @@ export function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[
     ...evidence.toolCalls.map((call) => ({
       artifactIds: [...call.inputArtifactIds, ...call.outputArtifactIds],
       category: "tool" as const,
-      detail: `${call.caller} / ${formatDuration(call.duration)}`,
+      detail: `${call.caller} / ${formatDurationMs(call.duration)}`,
       evidenceRefs: [],
       failureClass: call.failureClass,
       id: call.id,

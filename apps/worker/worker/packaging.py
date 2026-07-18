@@ -174,6 +174,7 @@ class PackagingRunner:
             "reportSections": self._load_json_artifacts(job.id, artifacts, store, "report_section"),
             "buildArtifacts": self._load_json_artifacts(job.id, artifacts, store, "build_artifact"),
             "repairInstructions": self._load_json_artifacts(job.id, artifacts, store, "repair_instruction"),
+            "reconstructionPlans": self._load_json_artifacts(job.id, artifacts, store, "reconstruction_plan"),
             "opsAlertEvents": self._load_ops_alert_events(store),
         }
         payload["reviewFixSummary"] = self._review_fix_summary(payload["runtimeTraces"])
@@ -258,6 +259,11 @@ class PackagingRunner:
         for group, records in decision_records.items():
             for record in records:
                 status = record.get("status")
+                if group == "reviewRuns" and self._runtime_uncertainty_review_is_superseded(
+                    record=record,
+                    decision_records=decision_records,
+                ):
+                    continue
                 if status in {"fail", "retry", "best_effort"}:
                     observations.append(
                         {
@@ -284,6 +290,36 @@ class PackagingRunner:
             "reason": reason,
             "observations": observations,
         }
+
+    def _runtime_uncertainty_review_is_superseded(
+        self,
+        *,
+        record: dict[str, Any],
+        decision_records: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        if record.get("reviewType") != "agent_review" or record.get("status") != "best_effort":
+            return False
+        if str(record.get("failureClass") or "unknown") not in {"none", "unknown"}:
+            return False
+        decision = str(record.get("decision") or "").lower()
+        runtime_uncertainty = "runtime evidence" in decision and any(
+            phrase in decision
+            for phrase in ("inconclusive", "without current runtime", "no current runtime", "runtime comparison evidence")
+        )
+        if not runtime_uncertainty:
+            return False
+        runtime_reviews = [
+            item
+            for item in decision_records.get("reviewRuns", [])
+            if item.get("reviewType") == "runtime_compare"
+        ]
+        runtime_reports = decision_records.get("runtimeReports", [])
+        return (
+            bool(runtime_reviews)
+            and all(item.get("status") == "pass" for item in runtime_reviews)
+            and bool(runtime_reports)
+            and all(item.get("status") == "pass" for item in runtime_reports)
+        )
 
     def _latest_decision_records(self, records: list[dict[str, Any]], *, key_name: str | None) -> list[dict[str, Any]]:
         latest_attempt_by_key: dict[str, int] = {}
@@ -332,6 +368,7 @@ class PackagingRunner:
         runtime_diagnoses = audit_payload["runtimeDiagnoses"]
         report_sections = audit_payload["reportSections"]
         build_artifacts = audit_payload["buildArtifacts"]
+        dependency_placeholders = self._dependency_placeholder_rows(audit_payload["reconstructionPlans"])
         review_fix_summary = audit_payload["reviewFixSummary"]
         ops_alert_events = self._ops_alert_event_rows(audit_payload["opsAlertEvents"])
         attachments = evidence_index["attachments"]
@@ -370,6 +407,21 @@ class PackagingRunner:
             self._status_table(decision["observations"], ("group", "status", "failureClass", "decision"))
             if decision["observations"]
             else "No failing or best-effort observations were collected.",
+            "",
+            "## Dependency Placeholder Summary",
+            "",
+            (
+                "Missing dependencies listed here received load-only continuity. Their real semantic behavior was not recovered; "
+                "generated named/default exports throw `MissingDependencyPlaceholderError` with code "
+                "`AI_JSUNPACK_MISSING_DEPENDENCY` when called."
+            ),
+            "",
+            self._status_table(
+                dependency_placeholders,
+                ("status", "importer", "specifier", "resolvedPath", "placeholderExports", "runtimeContract", "limitation"),
+            )
+            if dependency_placeholders
+            else "No missing static relative ESM dependencies required placeholders.",
             "",
             "## Build And Typecheck",
             "",
@@ -487,6 +539,7 @@ class PackagingRunner:
         review_runs = audit_payload["reviewRuns"]
         agent_executions = audit_payload["agentExecutions"]
         build_artifacts = audit_payload["buildArtifacts"]
+        dependency_placeholders = self._dependency_placeholder_rows(audit_payload["reconstructionPlans"])
         tool_registry = audit_payload["toolRegistry"]
         memory_records = audit_payload["memoryRecords"]
         runtime_diagnoses = audit_payload["runtimeDiagnoses"]
@@ -530,6 +583,7 @@ class PackagingRunner:
                 self._metric_html("Tool registry", str(len(tool_registry))),
                 self._metric_html("Memory records", str(len(memory_records))),
                 self._metric_html("Evidence attachments", str(sum(1 for item in attachments if item["included"]))),
+                self._metric_html("Dependency placeholders", str(len(dependency_placeholders))),
                 "</section>",
                 "<h2>Completion Decision</h2>",
                 f'<div class="notice">{escape(decision_text)}</div>',
@@ -552,6 +606,16 @@ class PackagingRunner:
                 self._html_table(decision["observations"], ("group", "status", "failureClass", "decision"))
                 if decision["observations"]
                 else '<div class="notice">No failing or best-effort observations were collected.</div>',
+                "<h2>Dependency Placeholder Summary</h2>",
+                (
+                    '<div class="notice">Missing dependencies listed here received load-only continuity. Their real semantic '
+                    'behavior was not recovered; generated named/default exports throw <code>MissingDependencyPlaceholderError</code> '
+                    'with code <code>AI_JSUNPACK_MISSING_DEPENDENCY</code> when called.</div>'
+                ),
+                self._html_table(
+                    dependency_placeholders,
+                    ("status", "importer", "specifier", "resolvedPath", "placeholderExports", "runtimeContract", "limitation"),
+                ),
                 "<h2>Build And Typecheck</h2>",
                 self._html_table(build_artifacts, ("reviewType", "status", "failureClass", "decision")),
                 "<h2>Runtime Evidence</h2>",
@@ -645,6 +709,42 @@ class PackagingRunner:
 
     def _count_summary(self, counts: dict[str, int]) -> str:
         return ", ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "none"
+
+    def _dependency_placeholder_rows(self, plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for plan_payload in plans:
+            plan = plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else plan_payload
+            records = plan.get("dependencyPlaceholders")
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                exports = self._string_list(record.get("importedNames"))
+                if record.get("defaultImport") is True and "default" not in exports:
+                    exports.insert(0, "default")
+                if record.get("namespaceImport") is True:
+                    exports.append("namespace(load-only)")
+                if record.get("exportAll") is True:
+                    exports.append("export-all(load-only)")
+                status = self._optional_string(record.get("status")) or "unsupported"
+                rows.append(
+                    {
+                        "status": status,
+                        "importer": self._optional_string(record.get("importerPath")) or "unknown",
+                        "specifier": self._optional_string(record.get("specifier")) or "unknown",
+                        "resolvedPath": self._optional_string(record.get("resolvedPath")) or "not-written",
+                        "placeholderExports": ", ".join(dict.fromkeys(exports)) or "side-effect/load-only",
+                        "runtimeContract": (
+                            "warning on load; throws AI_JSUNPACK_MISSING_DEPENDENCY when a generated export is called"
+                            if status == "generated"
+                            else "report-only; no file written"
+                        ),
+                        "semanticBehaviorAvailable": False,
+                        "limitation": self._optional_string(record.get("limitation")) or "Semantic behavior is unavailable.",
+                    }
+                )
+        return rows
 
     def _memory_record_summary(self, records: list[dict[str, Any]]) -> str:
         counts: dict[str, int] = {}
@@ -1373,6 +1473,9 @@ class PackagingRunner:
         review_details = self._review_report_details(job_id=job_id, store=store, artifacts=artifacts)
         runtime_compare_details = self._runtime_compare_report_details(job_id=job_id, store=store, artifacts=artifacts)
         review_fix_details = self._review_fix_report_details(job_id=job_id, store=store, artifacts=artifacts)
+        dependency_placeholder_details = self._dependency_placeholder_rows(
+            self._load_json_artifacts(job_id, artifacts, store, "reconstruction_plan")
+        )
         ops_alert_details = self._ops_alert_report_details(store)
         risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details, *review_fix_details, *ops_alert_details])
         return [
@@ -1390,6 +1493,17 @@ class PackagingRunner:
                 artifact_kinds=("build_artifact", "runtime_validation", "review_run", "runtime_trace"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=risk_details,
+            ),
+            self._report_section(
+                title="Dependency Placeholder Summary",
+                anchor="dependency-placeholder-summary",
+                summary=(
+                    "Missing static relative ESM dependencies, referring importers, generated exports, "
+                    "and the load-only runtime contract."
+                ),
+                artifact_kinds=("reconstruction_plan", "generated_project"),
+                artifact_ids_by_kind=artifact_ids_by_kind,
+                details=dependency_placeholder_details,
             ),
             self._report_section(
                 title="Review/Fix Convergence",

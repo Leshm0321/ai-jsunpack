@@ -798,11 +798,25 @@ class CrewExecutionManager:
         return math.ceil(len(serialized.encode("utf-8")) / 4)
 
     def _structured_output_for_context(self, execution: CrewAgentExecution) -> dict[str, Any]:
+        raw_output = self._context_value(execution.raw_output)
+        if isinstance(raw_output, dict):
+            raw_output = dict(raw_output)
+            for duplicated_key in (
+                "inferences",
+                "runtimeDiagnoses",
+                "runtime_diagnoses",
+                "reportSections",
+                "report_sections",
+                "repairInstructions",
+                "repair_instructions",
+                "review",
+            ):
+                raw_output.pop(duplicated_key, None)
         return {
             "status": execution.status,
             "failureClass": execution.failure_class,
             "message": execution.message,
-            "rawOutput": self._context_value(execution.raw_output),
+            "rawOutput": raw_output,
             "inferences": self._context_value(execution.inferences),
             "runtimeDiagnoses": self._context_value(execution.runtime_diagnoses),
             "reportSections": self._context_value(execution.report_sections),

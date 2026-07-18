@@ -22,16 +22,6 @@ export const appMotion = {
   }
 } as const;
 
-const pageTargets = [
-  ".application-topbar",
-  ".application-sidebar",
-  ".page-heading",
-  ".route-panel",
-  ".overview-metric",
-  ".settings-section",
-  ".readiness-card"
-].join(", ");
-
 export function useApplicationMotion(
   root: RefObject<HTMLElement>,
   dependencies: ReadonlyArray<unknown>
@@ -46,29 +36,42 @@ export function useApplicationMotion(
           reduceMotion: "(prefers-reduced-motion: reduce)"
         },
         (context) => {
+          const rootElement = root.current;
+          if (!rootElement) return;
           const reduceMotion = Boolean(context.conditions?.reduceMotion);
           const desktop = Boolean(context.conditions?.desktop);
+          const topbar = rootElement.querySelector<HTMLElement>(".application-topbar");
+          const sidebar = rootElement.querySelector<HTMLElement>(".application-sidebar");
+          const heading = rootElement.querySelector<HTMLElement>(".page-heading");
+          const panels = gsap.utils.toArray<HTMLElement>(
+            ".route-panel, .overview-metric, .settings-section, .readiness-card",
+            rootElement
+          );
+          const targets = [topbar, sidebar, heading, ...panels].filter(
+            (target): target is HTMLElement => target !== null
+          );
           if (reduceMotion) {
-            gsap.set(pageTargets, { autoAlpha: 1, clearProps: "transform" });
+            if (targets.length > 0) {
+              gsap.set(targets, { autoAlpha: 1, clearProps: "transform" });
+            }
             return;
           }
 
           const timeline = gsap.timeline({
             defaults: { duration: appMotion.duration.normal, ease: appMotion.ease.enter }
           });
-          timeline
-            .from(".application-topbar", { y: -14, autoAlpha: 0, duration: appMotion.duration.fast })
-            .from(
-              ".application-sidebar",
-              { x: desktop ? -22 : 0, y: desktop ? 0 : -10, autoAlpha: 0 },
-              "<0.04"
-            )
-            .from(".page-heading", { y: 22, autoAlpha: 0 }, "<0.08")
-            .from(
-              ".route-panel, .overview-metric, .settings-section, .readiness-card",
-              { y: 26, autoAlpha: 0, stagger: appMotion.stagger.normal },
-              "<0.1"
-            );
+          if (topbar) {
+            timeline.from(topbar, { y: -14, autoAlpha: 0, duration: appMotion.duration.fast }, 0);
+          }
+          if (sidebar) {
+            timeline.from(sidebar, { x: desktop ? -22 : 0, y: desktop ? 0 : -10, autoAlpha: 0 }, 0.04);
+          }
+          if (heading) {
+            timeline.from(heading, { y: 22, autoAlpha: 0 }, 0.08);
+          }
+          if (panels.length > 0) {
+            timeline.from(panels, { y: 26, autoAlpha: 0, stagger: appMotion.stagger.normal }, 0.1);
+          }
 
           return () => timeline.kill();
         }
@@ -93,6 +96,7 @@ export function useApplicationScrollMotion(
           root.current
         )
         .slice(0, 80);
+      if (targets.length === 0) return;
       const mm = gsap.matchMedia();
       mm.add(
         {
@@ -166,8 +170,10 @@ export function useMetricMotion(
   useGSAP(
     () => {
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      const targets = gsap.utils.toArray<HTMLElement>(".motion-metric-value", root.current);
+      if (targets.length === 0) return;
       gsap.fromTo(
-        ".motion-metric-value",
+        targets,
         { y: 8, autoAlpha: 0, scale: 0.96 },
         {
           y: 0,

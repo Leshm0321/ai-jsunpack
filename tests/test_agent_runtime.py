@@ -20,6 +20,7 @@ from apps.worker.worker.agent_contracts import (
     CrewAgentExecution,
     CrewAgentSpec,
     CrewStageExecution,
+    crew_output_model_for_agent,
     validate_crew_output_for_agent,
 )
 from apps.worker.worker.agent_runtime import (
@@ -124,6 +125,8 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             {
                 "AI_JSUNPACK_LOCAL_AGENT_BASE_URL": "http://127.0.0.1:11434/v1",
                 "AI_JSUNPACK_LOCAL_AGENT_API_KEY": "",
+                "AI_JSUNPACK_AGENT_TIMEOUT_SECONDS": "",
+                "AI_JSUNPACK_AGENT_TEMPERATURE": "",
             },
             clear=False,
         ):
@@ -291,9 +294,14 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertIn("resource_limit", crewai_entry.failure_classes)
 
     def test_crewai_backend_uses_string_model_when_no_custom_endpoint(self):
-        policy = ModelPolicyResolver().resolve(
-            self._request(cloud_mode="cloud_allowed", config={"agentModel": "provider/model-a"})
-        )
+        with patch.dict(
+            os.environ,
+            {"AI_JSUNPACK_AGENT_BASE_URL": "", "AI_JSUNPACK_AGENT_API_KEY": ""},
+            clear=False,
+        ):
+            policy = ModelPolicyResolver().resolve(
+                self._request(cloud_mode="cloud_allowed", config={"agentModel": "provider/model-a"})
+            )
 
         self.assertEqual(CrewAIBackend()._llm_for_policy(policy), "provider/model-a")
 
@@ -364,6 +372,51 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         finally:
             server.close()
 
+    def test_openai_compatible_llm_includes_role_schema_for_structured_output(self):
+        server = _OpenAICompatibleTestServer(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "inferences": [
+                                            {
+                                                "type": "naming",
+                                                "agentName": "NamingAgent",
+                                                "confidence": 0.8,
+                                                "uncertaintyReasons": ["fixture"],
+                                                "alternatives": ["keep current"],
+                                            }
+                                        ]
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+        try:
+            llm = OpenAICompatibleCrewAILLM(
+                model="private-model",
+                base_url=server.base_url,
+                api_key=None,
+                timeout_seconds=5,
+            )
+
+            result = llm.call("hello", response_model=crew_output_model_for_agent("NamingAgent"))
+
+            messages = server.requests[0]["body"]["messages"]
+            self.assertEqual(messages[0]["role"], "system")
+            self.assertIn("JSON Schema", messages[0]["content"])
+            self.assertIn('type exactly equal to one of: "naming"', messages[0]["content"])
+            self.assertEqual(messages[1], {"role": "user", "content": "hello"})
+            self.assertEqual(result.inferences[0].type, "naming")
+        finally:
+            server.close()
+
     def test_openai_compatible_llm_raises_readable_http_error(self):
         server = _OpenAICompatibleTestServer([{"status": 500, "body": {"error": "failed"}}])
         try:
@@ -405,11 +458,19 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(OpenAICompatibleLLMError, "request failed|timed out"):
             llm.call("hello")
 
-    def test_backend_failure_cache_is_endpoint_scoped_and_expires(self):
+    def test_backend_failure_cache_is_agent_scoped_and_expires(self):
         backend = _RecoveringCrewBackend()
-        with patch.dict(os.environ, {"AI_JSUNPACK_AGENT_FAILURE_CACHE_SECONDS": "0.01"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_AGENT_FAILURE_CACHE_SECONDS": "0.01",
+                "AI_JSUNPACK_AGENT_BACKEND_MAX_ATTEMPTS": "1",
+            },
+            clear=False,
+        ):
             adapter = CrewAIExecutionAdapter(backend=backend)
         spec = CrewRuntimePlanner().build_specs()[0]
+        other_spec = CrewRuntimePlanner().build_specs()[1]
         policy = ModelPolicyResolver().resolve(
             self._request(cloud_mode="cloud_allowed", config={"agentModel": "model-a"})
         )
@@ -423,13 +484,15 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
         first = adapter.execute_agent(**args)
         cached = adapter.execute_agent(**args)
+        other_agent = adapter.execute_agent(**{**args, "spec": other_spec})
         time.sleep(0.02)
         recovered = adapter.execute_agent(**args)
 
         self.assertEqual(first.status, "fail")
         self.assertEqual(cached.status, "fail")
+        self.assertEqual(other_agent.status, "pass")
         self.assertEqual(recovered.status, "pass")
-        self.assertEqual(backend.calls, 2)
+        self.assertEqual(backend.calls, 3)
 
     def test_agent_plan_rejects_missing_and_same_stage_dependencies(self):
         planner = CrewRuntimePlanner()
@@ -852,6 +915,48 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertNotIn("ReviewAgent", adapter.prompts)
         self.assertIsNotNone(execution.review)
         self.assertEqual(execution.review.failure_class, "resource_limit")
+
+    def test_dependency_context_does_not_duplicate_structured_output_inside_raw_output(self):
+        manager = CrewExecutionManager(adapter=_RecordingExecutionAdapter(planned_agents=[]))
+        spec = CrewAgentSpec(
+            name="NamingAgent",
+            stage="specialists",
+            responsibility="Name",
+            role="Naming",
+            goal="Name",
+            backstory="Naming",
+            output_kind="inference_record",
+            allow_parallel=True,
+        )
+        execution = CrewAgentExecution(
+            spec=spec,
+            status="pass",
+            failure_class="none",
+            attempt=0,
+            duration_ms=0,
+            input_artifact_ids=[],
+            evidence_refs=[],
+            message="done",
+            raw_output={
+                "agent": "NamingAgent",
+                "inferences": [{"type": "naming", "summary": "duplicated structured payload"}],
+                "reportSections": [{"title": "duplicated"}],
+            },
+            inferences=[
+                AgentInferenceDraft(
+                    type="naming",
+                    agent_name="NamingAgent",
+                    confidence=0.8,
+                    uncertainty_reasons=[],
+                    alternatives=[],
+                )
+            ],
+        )
+
+        compact = manager._structured_output_for_context(execution)
+
+        self.assertEqual(compact["rawOutput"], {"agent": "NamingAgent"})
+        self.assertEqual(compact["inferences"][0]["agent_name"], "NamingAgent")
 
     def test_parallel_stage_audit_records_actual_worker_counts(self):
         adapter = _RecordingExecutionAdapter(planned_agents=["NamingAgent", "RuntimeAgent"])
@@ -1756,7 +1861,20 @@ class _RecoveringCrewBackend:
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("temporary endpoint failure")
-        return CrewStructuredAgentOutput(plannedAgents=["NamingAgent"])
+        spec = kwargs["spec"]
+        if spec.name == "PlannerAgent":
+            return CrewStructuredAgentOutput(plannedAgents=["NamingAgent"])
+        return CrewStructuredAgentOutput(
+            inferences=[
+                {
+                    "type": "module_split",
+                    "agentName": spec.name,
+                    "confidence": 0.8,
+                    "uncertaintyReasons": ["fixture"],
+                    "alternatives": ["keep current"],
+                }
+            ]
+        )
 
 
 class _BarrierExecutionAdapter:

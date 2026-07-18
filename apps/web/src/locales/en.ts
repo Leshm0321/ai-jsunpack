@@ -393,6 +393,7 @@ export const en = {
     "stage.runtime_compare": "Runtime compare",
     "stage.reviewing": "Review and repair",
     "stage.completed": "Package ready",
+    "stage.completed_best_effort": "Package ready (best effort)",
     "stage.failed": "Failed",
     "stage.cancelled": "Cancelled",
     "support.generatedProject": "Directory artifacts are available through the packaged result download.",

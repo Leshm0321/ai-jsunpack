@@ -1609,6 +1609,10 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
     ) -> RuntimeCompareResult:
         parents = parent_artifact_ids or []
         store.update_status(job_id, "runtime_compare")
+        original_capture_path = self._original_overlay_path(
+            original_input_path=original_input_path,
+            reconstructed_input_path=reconstructed_input_path,
+        )
         matrix, matrix_plan = self._scenario_matrix_from_config(job_id=job_id, config=scenario_config)
         matrix_trace_artifact = self._write_matrix_trace(
             job_id=job_id,
@@ -1623,7 +1627,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             self._run_single_compare(
                 job_id=job_id,
                 store=store,
-                original_input_path=original_input_path,
+                original_input_path=original_capture_path,
                 reconstructed_input_path=reconstructed_input_path,
                 scenario=item.scenario,
                 image_diff_policy=item.image_diff_policy,
@@ -1664,6 +1668,24 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 f"with aggregate status {aggregate_status}."
             ),
         )
+
+    def _original_overlay_path(
+        self,
+        *,
+        original_input_path: Path | str | None,
+        reconstructed_input_path: Path | str | None,
+    ) -> Path | str | None:
+        if reconstructed_input_path is None:
+            return original_input_path
+        reconstructed_root = Path(reconstructed_input_path)
+        if not reconstructed_root.is_dir():
+            return original_input_path
+        overlay_root = reconstructed_root / "public" / "original"
+        if not overlay_root.is_dir():
+            return original_input_path
+        if (overlay_root / "index.html").is_file() or any(overlay_root.rglob("*.html")):
+            return overlay_root
+        return original_input_path
 
     def _run_single_compare(
         self,
@@ -2229,14 +2251,38 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         scenario: RuntimeScenario,
         screenshot_diff: RuntimeScreenshotDiff,
     ) -> RuntimeDifferenceSet:
-        original_requests = sorted(set(original.responses + original.failed_requests))
-        reconstructed_requests = sorted(set(reconstructed.responses + reconstructed.failed_requests))
-        original_console = sorted(set(original.console_messages + original.console_errors))
-        reconstructed_console = sorted(set(reconstructed.console_messages + reconstructed.console_errors))
+        original_origins = self._runtime_origins(original)
+        reconstructed_origins = self._runtime_origins(reconstructed)
+        original_requests = sorted(
+            {
+                self._normalize_runtime_text(item, original_origins)
+                for item in original.responses + original.failed_requests
+            }
+        )
+        reconstructed_requests = sorted(
+            {
+                self._normalize_runtime_text(item, reconstructed_origins)
+                for item in reconstructed.responses + reconstructed.failed_requests
+            }
+        )
+        original_console = sorted(
+            {
+                self._normalize_runtime_text(item, original_origins)
+                for item in original.console_messages + original.console_errors
+            }
+        )
+        reconstructed_console = sorted(
+            {
+                self._normalize_runtime_text(item, reconstructed_origins)
+                for item in reconstructed.console_messages + reconstructed.console_errors
+            }
+        )
+        original_dom = self._normalize_runtime_value(original.dom_summary, original_origins)
+        reconstructed_dom = self._normalize_runtime_value(reconstructed.dom_summary, reconstructed_origins)
         changed_dom_fields = sorted(
             key
-            for key in set(original.dom_summary) | set(reconstructed.dom_summary)
-            if original.dom_summary.get(key) != reconstructed.dom_summary.get(key)
+            for key in set(original_dom) | set(reconstructed_dom)
+            if original_dom.get(key) != reconstructed_dom.get(key)
         )
         return RuntimeDifferenceSet(
             screenshot_changed=screenshot_diff.changed,
@@ -2249,7 +2295,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             reconstructed_only_console=sorted(set(reconstructed_console) - set(original_console)),
             changed_dom_fields=changed_dom_fields,
             screenshot_diff=screenshot_diff,
-            dom_differences=self._dom_differences(original.dom_summary, reconstructed.dom_summary),
+            dom_differences=self._dom_differences(original_dom, reconstructed_dom),
             network_diff=self._collection_diff(original_requests, reconstructed_requests, "network"),
             console_diff=self._collection_diff(original_console, reconstructed_console, "console"),
             comparison_scope=RuntimeComparisonScope(
@@ -2259,6 +2305,33 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 viewport=scenario.viewport or RuntimeViewport(**DEFAULT_VIEWPORT),
             ),
         )
+
+    def _runtime_origins(self, capture: RuntimeCaptureSummary) -> list[str]:
+        urls = [capture.entry_url]
+        dom_url = capture.dom_summary.get("url") if isinstance(capture.dom_summary, dict) else None
+        if isinstance(dom_url, str):
+            urls.append(dom_url)
+        origins: set[str] = set()
+        for url in urls:
+            parsed = urlparse(url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        return sorted(origins, key=len, reverse=True)
+
+    def _normalize_runtime_value(self, value: Any, origins: list[str]) -> Any:
+        if isinstance(value, dict):
+            return {key: self._normalize_runtime_value(item, origins) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_runtime_value(item, origins) for item in value]
+        if isinstance(value, str):
+            return self._normalize_runtime_text(value, origins)
+        return value
+
+    def _normalize_runtime_text(self, value: str, origins: list[str]) -> str:
+        normalized = value
+        for origin in origins:
+            normalized = normalized.replace(origin, "<runtime-origin>")
+        return normalized
 
     def _screenshot_diff(
         self,

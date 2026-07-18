@@ -1,6 +1,6 @@
 import type { Artifact, AstIndex, InputInventory } from "@ai-jsunpack/shared";
 import type { EvidenceGraph, EvidenceGraphEdge, EvidenceGraphNode, EvidenceGraphSourceState, JobEvidence } from "./workbench-types";
-import { formatDuration, formatPercent, isRecord, readStringArray, shortId, trimMiddle } from "./workbench-format";
+import { formatDurationMs, formatPercent, isRecord, readStringArray, shortId, trimMiddle } from "./workbench-format";
 import { statusTokenTone } from "./workbench-audit-logic";
 
 export function buildArtifactLineageGraph(artifacts: Artifact[], selectedArtifactId: string | null, t: (key: string) => string): EvidenceGraph {
@@ -183,7 +183,7 @@ export function buildAgentFlowGraph(artifacts: Artifact[], evidence: JobEvidence
     const nodeId = `agent:tool:${call.id}`;
     nodes.set(nodeId, {
       column: 1,
-      detail: `${call.caller} / ${formatDuration(call.duration)}`,
+      detail: `${call.caller} / ${formatDurationMs(call.duration)}`,
       id: nodeId,
       kind: "tool",
       title: call.toolName,

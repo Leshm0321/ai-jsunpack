@@ -56,7 +56,7 @@ def run_request(payload: Any, *, backend_factory: Callable[[], AgentBackend] = C
             "status": "success",
             "output": output.model_dump(by_alias=True, exclude_none=True),
         }
-    except (ValidationError, json.JSONDecodeError):
+    except (ValidationError, json.JSONDecodeError, ValueError):
         return _error_response("schema_error")
     except Exception:  # noqa: BLE001 - child boundary must translate every backend failure.
         return _error_response("backend_error")
