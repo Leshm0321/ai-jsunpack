@@ -236,6 +236,56 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIn("ai-jsunpack-test-image", argv)
         self.assertNotIn(f"{secret_name}=secret", argv)
 
+    def test_container_runner_maps_named_volume_subpath(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_runtime = root / "fake_container_runtime.py"
+            fake_runtime.write_text(
+                "import json, sys\nprint(json.dumps({'argv': sys.argv[1:]}))\n",
+                encoding="utf-8",
+            )
+            workspace_root = root / "workspaces"
+            runner = ContainerSandboxRunner(
+                SandboxPolicy(allowed_commands=("node",)),
+                image="ai-jsunpack-test-image",
+                runtime_command=(sys.executable, str(fake_runtime)),
+                workspace_root=workspace_root,
+                volume_name="ai-jsunpack-sandbox-workspaces",
+            )
+            with runner.attempt_workspace() as workspace:
+                (workspace / "project").mkdir()
+                result = runner.run_in_workspace(
+                    SandboxCommand(executable="node", working_directory="project"),
+                    workspace,
+                )
+
+        argv = json.loads(result.stdout)["argv"]
+        mount = argv[argv.index("--mount") + 1]
+        self.assertIn("type=volume", mount)
+        self.assertIn("src=ai-jsunpack-sandbox-workspaces", mount)
+        self.assertIn("dst=/workspace", mount)
+        self.assertIn("volume-subpath=ai-jsunpack-sandbox-", mount)
+        self.assertNotIn("-v", argv)
+        self.assertEqual(argv[argv.index("-w") + 1], "/workspace/project")
+        filesystem = {item.name: item for item in result.resource_policy.capabilities}["filesystem"]
+        self.assertIn("Docker volume 'ai-jsunpack-sandbox-workspaces'", filesystem.detail)
+
+    def test_container_runner_denies_workspace_outside_named_volume_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runner = ContainerSandboxRunner(
+                SandboxPolicy(allowed_commands=("node",)),
+                runtime_command=(sys.executable, "unused"),
+                workspace_root=root / "configured-root",
+                volume_name="ai-jsunpack-sandbox-workspaces",
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            result = runner.run_in_workspace(SandboxCommand(executable="node"), outside)
+
+        self.assertEqual(result.failure_class, "sandbox_denied")
+        self.assertIn("outside the configured named-volume root", result.denied_reason or "")
+
     def test_gvisor_profile_records_unsupported_capabilities_without_adapter(self):
         policy = sandbox_resource_policy_profile(
             SandboxResourcePolicy(process_limit=8),

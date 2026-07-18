@@ -233,6 +233,25 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 thread.join(timeout=2)
                 store.close()
 
+    def test_remote_browser_runner_adapter_reads_token_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_file = Path(temp_dir) / "browser-runner-token"
+            token_file.write_text("file-token\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "AI_JSUNPACK_BROWSER_RUNNER_URL": "http://browser-runner:8000",
+                    "AI_JSUNPACK_BROWSER_RUNNER_TOKEN": "",
+                    "AI_JSUNPACK_BROWSER_RUNNER_TOKEN_FILE": str(token_file),
+                },
+                clear=False,
+            ):
+                adapter = RemoteBrowserRunnerAdapter.from_environment()
+                token_file.write_text("refreshed-file-token\n", encoding="utf-8")
+                self.assertIsNotNone(adapter)
+                self.assertEqual(adapter.token, "file-token")
+                self.assertEqual(adapter._authorization_token(), "refreshed-file-token")
+
     def test_runtime_smoke_persists_report_trace_and_screenshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

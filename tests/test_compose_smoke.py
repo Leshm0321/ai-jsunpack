@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ComposeSmokeTest(unittest.TestCase):
     def test_compose_file_declares_builds_healthchecks_and_bucket_init(self):
         compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+        development = (ROOT / "deploy" / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        production = (ROOT / "deploy" / "docker-compose.prod.yml").read_text(encoding="utf-8")
 
         for dockerfile in (
             "deploy/docker/api.Dockerfile",
@@ -29,6 +31,13 @@ class ComposeSmokeTest(unittest.TestCase):
         self.assertIn("/minio/health/ready", compose)
         self.assertIn("http://127.0.0.1:8000/health", compose)
         self.assertIn("http://127.0.0.1:5173/", compose)
+        self.assertIn("sandbox-workspaces", compose)
+        self.assertIn("/var/run/docker.sock", compose)
+        self.assertIn("auth-init:", development)
+        self.assertIn("AI_JSUNPACK_WEB_AUTH_TOKEN_FILE", development)
+        self.assertIn("AI_JSUNPACK_BROWSER_RUNNER_TOKEN_FILE", development)
+        self.assertIn("AI_JSUNPACK_WEB_AUTH_TOKEN is required", production)
+        self.assertIn("AI_JSUNPACK_BROWSER_RUNNER_TOKEN is required", production)
 
     def test_dockerfiles_exist_and_use_service_entrypoints(self):
         dockerfiles = {
@@ -42,6 +51,11 @@ class ComposeSmokeTest(unittest.TestCase):
             content = (ROOT / "deploy" / "docker" / name).read_text(encoding="utf-8")
             self.assertIn(expected, content)
             self.assertNotIn("dev_docs", content)
+
+        worker = (ROOT / "deploy" / "docker" / "worker.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("FROM docker:29-cli AS docker-cli", worker)
+        self.assertIn("COPY --from=docker-cli /usr/local/bin/docker", worker)
+        self.assertIn("COPY packages/configuration ./packages/configuration", worker)
 
     def test_compose_smoke_dry_run_writes_command_plan_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:

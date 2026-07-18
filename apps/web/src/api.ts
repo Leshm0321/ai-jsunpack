@@ -6,10 +6,11 @@ export interface JobSummary {
   artifacts: Artifact[];
 }
 
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
-const configuredUserId = import.meta.env.VITE_API_USER_ID?.trim();
-const configuredProjectId = import.meta.env.VITE_API_PROJECT_ID?.trim();
-const configuredAuthToken = import.meta.env.VITE_API_AUTH_TOKEN?.trim();
+const runtimeConfig = window.__AI_JSUNPACK_CONFIG__ || {};
+const configuredBaseUrl = (runtimeConfig.apiBaseUrl || import.meta.env.VITE_API_BASE_URL)?.replace(/\/+$/, "");
+const configuredUserId = (runtimeConfig.userId || import.meta.env.VITE_API_USER_ID)?.trim();
+const configuredProjectId = (runtimeConfig.projectId || import.meta.env.VITE_API_PROJECT_ID)?.trim();
+const configuredAuthToken = (runtimeConfig.authToken || import.meta.env.VITE_API_AUTH_TOKEN)?.trim();
 
 export const API_BASE_URL = configuredBaseUrl || "http://127.0.0.1:8000";
 export const API_USER_ID = configuredUserId || "local-user";

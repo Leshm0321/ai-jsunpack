@@ -32,6 +32,8 @@ DEFAULT_CONTAINER_IMAGE = "node:20-bookworm-slim"
 PROFILE_ONLY_RUNNERS: tuple[SandboxRunnerKind, ...] = ("remote_browser_runner",)
 DEFAULT_GVISOR_RUNTIME_NAME = "runsc"
 DEPLOYMENT_PROFILE_ENV = "AI_JSUNPACK_DEPLOYMENT_PROFILE"
+SANDBOX_WORKSPACE_ROOT_ENV = "AI_JSUNPACK_SANDBOX_WORKSPACE_ROOT"
+SANDBOX_VOLUME_NAME_ENV = "AI_JSUNPACK_SANDBOX_VOLUME_NAME"
 
 
 def deployment_profile(value: object = None) -> str:
@@ -346,12 +348,24 @@ class SandboxResult:
 
 
 class LocalSandboxRunner:
-    def __init__(self, policy: SandboxPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: SandboxPolicy | None = None,
+        *,
+        workspace_root: Path | str | None = None,
+    ) -> None:
         self.policy = policy or SandboxPolicy()
+        configured_root = workspace_root if workspace_root is not None else os.getenv(SANDBOX_WORKSPACE_ROOT_ENV)
+        self.workspace_root = Path(configured_root).resolve() if configured_root else None
 
     @contextmanager
     def attempt_workspace(self) -> Iterator[Path]:
-        with tempfile.TemporaryDirectory(prefix=self.policy.temp_prefix) as temp_dir:
+        if self.workspace_root is not None:
+            self.workspace_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=self.policy.temp_prefix,
+            dir=str(self.workspace_root) if self.workspace_root is not None else None,
+        ) as temp_dir:
             yield Path(temp_dir)
 
     def run(self, command: SandboxCommand) -> SandboxResult:
@@ -544,11 +558,18 @@ class ContainerSandboxRunner(LocalSandboxRunner):
         *,
         image: str = DEFAULT_CONTAINER_IMAGE,
         runtime_command: Sequence[str] | None = None,
+        workspace_root: Path | str | None = None,
+        volume_name: str | None = None,
     ) -> None:
         self.image = image
         self.runtime_command = tuple(runtime_command) if runtime_command is not None else None
+        configured_volume = volume_name if volume_name is not None else os.getenv(SANDBOX_VOLUME_NAME_ENV)
+        self.volume_name = configured_volume.strip() if isinstance(configured_volume, str) else ""
         runtime = self._runtime_command()
-        super().__init__(self._container_policy(policy or SandboxPolicy(), runtime_command=runtime))
+        super().__init__(
+            self._container_policy(policy or SandboxPolicy(), runtime_command=runtime),
+            workspace_root=workspace_root,
+        )
 
     def run_in_workspace(
         self,
@@ -635,6 +656,18 @@ class ContainerSandboxRunner(LocalSandboxRunner):
             network_policy=self.policy.network_policy,
             resource_policy=self.policy.resource_policy,
         )
+
+    def _denied_reason(self, command: SandboxCommand, workspace: Path) -> str | None:
+        denied_reason = super()._denied_reason(command, workspace)
+        if denied_reason is not None or not self.volume_name:
+            return denied_reason
+        if self.workspace_root is None:
+            return f"{SANDBOX_WORKSPACE_ROOT_ENV} is required when {SANDBOX_VOLUME_NAME_ENV} is set."
+        try:
+            self._volume_subpath(workspace)
+        except ValueError as error:
+            return str(error)
+        return None
 
     def _container_policy(self, policy: SandboxPolicy, *, runtime_command: tuple[str, ...] | None) -> SandboxPolicy:
         resource_policy = policy.resource_policy
@@ -731,6 +764,11 @@ class ContainerSandboxRunner(LocalSandboxRunner):
             if resource_policy.cpu_time_limit_ms is not None
             else f"No CPU time limit is configured; {runtime_label} uses its default CPU boundary."
         )
+        filesystem_detail = (
+            f"The attempt workspace is mounted from Docker volume {self.volume_name!r} at /workspace using a per-attempt volume subpath."
+            if self.volume_name
+            else "The attempt workspace is bind-mounted at /workspace; no read-only root filesystem or stronger runtime isolation is configured."
+        )
         return (
             SandboxRuntimeCapability(name="network", status=network_status, detail=network_detail),
             SandboxRuntimeCapability(name="process", status=process_status, detail=process_detail),
@@ -739,7 +777,7 @@ class ContainerSandboxRunner(LocalSandboxRunner):
             SandboxRuntimeCapability(
                 name="filesystem",
                 status="best_effort",
-                detail="The attempt workspace is bind-mounted at /workspace; no read-only root filesystem or stronger runtime isolation is configured.",
+                detail=filesystem_detail,
             ),
         )
 
@@ -783,12 +821,34 @@ class ContainerSandboxRunner(LocalSandboxRunner):
         resolved_working_directory = working_directory.resolve()
         relative_workdir = resolved_working_directory.relative_to(resolved_workspace).as_posix()
         container_workdir = "/workspace" if relative_workdir == "." else f"/workspace/{relative_workdir}"
-        argv.extend(["-v", f"{resolved_workspace}:/workspace", "-w", container_workdir])
+        if self.volume_name:
+            volume_subpath = self._volume_subpath(resolved_workspace)
+            argv.extend(
+                [
+                    "--mount",
+                    f"type=volume,src={self.volume_name},dst=/workspace,volume-subpath={volume_subpath}",
+                    "-w",
+                    container_workdir,
+                ]
+            )
+        else:
+            argv.extend(["-v", f"{resolved_workspace}:/workspace", "-w", container_workdir])
         for name, value in self._container_environment(command).items():
             argv.extend(["-e", f"{name}={value}"])
         argv.append(self.image)
         argv.extend(command.argv)
         return argv
+
+    def _volume_subpath(self, workspace: Path) -> str:
+        if self.workspace_root is None:
+            raise ValueError(f"{SANDBOX_WORKSPACE_ROOT_ENV} is required when {SANDBOX_VOLUME_NAME_ENV} is set.")
+        try:
+            volume_subpath = workspace.resolve().relative_to(self.workspace_root).as_posix()
+        except ValueError as error:
+            raise ValueError("Sandbox workspace is outside the configured named-volume root.") from error
+        if not volume_subpath or volume_subpath == ".":
+            raise ValueError("Sandbox named-volume workspace must use a non-root subdirectory.")
+        return volume_subpath
 
     def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
         allowed_names = set(self.policy.allowed_environment)

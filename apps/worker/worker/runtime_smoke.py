@@ -54,6 +54,7 @@ from packages.sandbox import LocalSandboxRunner, deployment_profile, is_producti
 DEFAULT_VIEWPORT = {"name": "desktop", "width": 1365, "height": 768}
 REMOTE_BROWSER_RUNNER_URL_ENV = "AI_JSUNPACK_BROWSER_RUNNER_URL"
 REMOTE_BROWSER_RUNNER_TOKEN_ENV = "AI_JSUNPACK_BROWSER_RUNNER_TOKEN"
+REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV = "AI_JSUNPACK_BROWSER_RUNNER_TOKEN_FILE"
 REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_POLL_SECONDS"
 REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV = "AI_JSUNPACK_BROWSER_RUNNER_TIMEOUT_MS"
 
@@ -476,13 +477,17 @@ class RemoteBrowserRunnerAdapter:
     ) -> None:
         raw_base_url = base_url or os.getenv(REMOTE_BROWSER_RUNNER_URL_ENV) or ""
         self.base_url = self._validated_base_url(raw_base_url) if raw_base_url.strip() else ""
-        self.token = token if token is not None else os.getenv(REMOTE_BROWSER_RUNNER_TOKEN_ENV)
+        self.token_file: Path | None = None
+        self.token = token if token is not None else self._token_from_environment()
         self.poll_seconds = poll_seconds if poll_seconds is not None else self._float_env(REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV, 0.25)
         self.timeout_ms = timeout_ms if timeout_ms is not None else self._int_env(REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV, 60_000)
         if not self.base_url:
             raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} is not configured.", "policy_denied")
         if not self.token:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} is not configured.", "policy_denied")
+            raise RuntimeSmokeError(
+                f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} or {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is not configured.",
+                "policy_denied",
+            )
 
     def _validated_base_url(self, value: str) -> str:
         base_url = value.strip().rstrip("/")
@@ -562,11 +567,12 @@ class RemoteBrowserRunnerAdapter:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
+        token = self._authorization_token()
         request = Request(  # noqa: S310 - base_url is validated in __init__.
             f"{self.base_url}{path}",
             data=body,
             headers={
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
@@ -575,10 +581,11 @@ class RemoteBrowserRunnerAdapter:
         return self._json_request(request)
 
     def _get(self, path: str) -> dict[str, Any]:
+        token = self._authorization_token()
         request = Request(  # noqa: S310 - base_url is validated in __init__.
             f"{self.base_url}{path}",
             headers={
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
             },
             method="GET",
@@ -612,6 +619,37 @@ class RemoteBrowserRunnerAdapter:
             return max(0.05, float(os.getenv(name, str(default))))
         except ValueError:
             return default
+
+    def _token_from_environment(self) -> str | None:
+        token = os.getenv(REMOTE_BROWSER_RUNNER_TOKEN_ENV)
+        if token and token.strip():
+            return token.strip()
+        token_file = os.getenv(REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV)
+        if not token_file or not token_file.strip():
+            return None
+        self.token_file = Path(token_file.strip())
+        return self._read_token_file()
+
+    def _authorization_token(self) -> str:
+        if self.token_file is not None:
+            return self._read_token_file()
+        if not self.token:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} is not configured.", "policy_denied")
+        return self.token
+
+    def _read_token_file(self) -> str:
+        if self.token_file is None:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is not configured.", "policy_denied")
+        try:
+            value = self.token_file.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise RuntimeSmokeError(
+                f"Unable to read {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV}: {error}",
+                "policy_denied",
+            ) from error
+        if not value:
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is empty.", "policy_denied")
+        return value
 
 
 @dataclass(frozen=True)

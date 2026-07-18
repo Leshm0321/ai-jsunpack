@@ -1,0 +1,74 @@
+services:
+  db:
+    environment:
+      POSTGRES_DB: ai_jsunpack
+      POSTGRES_USER: ai_jsunpack
+      POSTGRES_PASSWORD: ai_jsunpack
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  artifact-store:
+    environment:
+      MINIO_ROOT_USER: ai-jsunpack
+      MINIO_ROOT_PASSWORD: replace-with-minio-secret
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  artifact-store-init:
+    environment:
+      MINIO_ROOT_USER: ai-jsunpack
+      MINIO_ROOT_PASSWORD: replace-with-minio-secret
+      AI_JSUNPACK_ARTIFACT_S3_BUCKET: ai-jsunpack-artifacts
+
+  auth-init:
+    image: ${AI_JSUNPACK_API_IMAGE:-ai-jsunpack/api:local}
+    command: ["python", "-m", "deploy.auth_init"]
+    environment:
+      AI_JSUNPACK_AUTH_SECRET: docker-local-development-secret
+      AI_JSUNPACK_AUTH_OUTPUT_DIR: /run/ai-jsunpack-auth
+      AI_JSUNPACK_WEB_TOKEN_TTL_SECONDS: 86400
+      AI_JSUNPACK_SERVICE_TOKEN_TTL_SECONDS: 86400
+    volumes:
+      - runtime-secrets:/run/ai-jsunpack-auth
+
+  api:
+    environment:
+      AI_JSUNPACK_AUTH_SECRET: docker-local-development-secret
+      AI_JSUNPACK_CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173
+      AI_JSUNPACK_DEPLOYMENT_PROFILE: development
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  browser-runner:
+    environment:
+      AI_JSUNPACK_AUTH_SECRET: docker-local-development-secret
+      AI_JSUNPACK_DEPLOYMENT_PROFILE: development
+    ports:
+      - "127.0.0.1:8001:8000"
+
+  worker:
+    environment:
+      AI_JSUNPACK_AUTH_SECRET: docker-local-development-secret
+      AI_JSUNPACK_BROWSER_RUNNER_TOKEN: ""
+      AI_JSUNPACK_BROWSER_RUNNER_TOKEN_FILE: /run/ai-jsunpack-auth/browser-runner-token
+      AI_JSUNPACK_DEPLOYMENT_PROFILE: development
+    depends_on:
+      auth-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime-secrets:/run/ai-jsunpack-auth:ro
+
+  web:
+    environment:
+      AI_JSUNPACK_WEB_AUTH_TOKEN: ""
+      AI_JSUNPACK_WEB_AUTH_TOKEN_FILE: /run/ai-jsunpack-auth/web-token
+      AI_JSUNPACK_WEB_USER_ID: docker-local-user
+      AI_JSUNPACK_WEB_PROJECT_ID: default
+    depends_on:
+      auth-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - runtime-secrets:/run/ai-jsunpack-auth:ro

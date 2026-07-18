@@ -63,21 +63,20 @@ graph LR
 构建并启动完整本地拓扑：
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner build
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner up -d
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml ps
 ```
 
 停止：
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml down
 ```
 
 先做静态 Compose 验证：
 
 ```powershell
-docker compose -f deploy/docker-compose.yml config --quiet
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml config --quiet
 ```
 
 Compose 默认从 `deploy/docker/` 构建本地镜像，也可使用不可变 tag 覆盖：
@@ -86,10 +85,23 @@ Compose 默认从 `deploy/docker/` 构建本地镜像，也可使用不可变 ta
 - `AI_JSUNPACK_WORKER_IMAGE`
 - `AI_JSUNPACK_BROWSER_RUNNER_IMAGE`
 - `AI_JSUNPACK_WEB_IMAGE`
+- `POSTGRES_IMAGE`
+- `MINIO_IMAGE`
+- `MINIO_MC_IMAGE`
 
 PostgreSQL、MinIO、API、Browser Runner 和 Web 有 healthcheck。`artifact-store-init` 创建 bucket；Worker 是长驻消费者，通过 heartbeat 和 deployment smoke 验证。
 
 ## 生产 Profile
+
+复制模板并填写未跟踪的生产环境文件，然后叠加生产覆盖：
+
+```powershell
+Copy-Item deploy/env/production.env.example deploy/env/production.env
+docker compose --env-file deploy/env/production.env -p ai-jsunpack `
+  -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+```
+
+生产覆盖默认只发布 Web `8080`，Web 将同源 `/api` 请求代理到内部 API。缺少数据库密码、HMAC secret、Web owner token 或 Browser Runner service token 时，Compose 插值会直接失败。Worker 通过宿主 Docker socket 和命名 sandbox volume 执行 build/typecheck；挂载 Docker socket 等同宿主 Docker 管理权限，只适用于可信单用户/内网环境。
 
 生产配置设置：
 
@@ -248,8 +260,8 @@ python -m deploy.release_archive `
 ## 故障与回滚
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 120
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml ps
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml logs --tail 120
 ```
 
 常见问题：

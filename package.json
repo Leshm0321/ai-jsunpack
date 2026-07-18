@@ -11,6 +11,7 @@
     "build": "tsc -b packages/shared packages/core apps/web",
     "check": "tsc -b packages/shared packages/core apps/web --pretty false",
     "test:core": "npm run build --workspace @ai-jsunpack/shared && npm run build --workspace @ai-jsunpack/core && node --test packages/shared/dist/*.test.js packages/core/dist/*.test.js",
+    "test:web-server": "node --test deploy/docker/web-server.test.mjs",
     "dev:web": "node scripts/dev.mjs web",
     "dev:web:raw": "npm run dev --workspace @ai-jsunpack/web",
     "dev:api": "node scripts/dev.mjs api",

@@ -17,6 +17,7 @@ COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
 COPY apps/browser_runner ./apps/browser_runner
 COPY packages ./packages
+COPY deploy/__init__.py deploy/auth_init.py ./deploy/
 
 EXPOSE 8000
 

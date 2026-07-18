@@ -1,6 +1,8 @@
 from .runner import (
     DEFAULT_CONTAINER_IMAGE,
     DEPLOYMENT_PROFILE_ENV,
+    SANDBOX_VOLUME_NAME_ENV,
+    SANDBOX_WORKSPACE_ROOT_ENV,
     ContainerSandboxRunner,
     FirecrackerSandboxRunner,
     GVisorSandboxRunner,
@@ -20,6 +22,8 @@ from .runner import (
 __all__ = [
     "DEFAULT_CONTAINER_IMAGE",
     "DEPLOYMENT_PROFILE_ENV",
+    "SANDBOX_VOLUME_NAME_ENV",
+    "SANDBOX_WORKSPACE_ROOT_ENV",
     "ContainerSandboxRunner",
     "FirecrackerSandboxRunner",
     "GVisorSandboxRunner",

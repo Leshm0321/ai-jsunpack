@@ -14,6 +14,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "deploy" / "docker-compose.yml"
+DEVELOPMENT_COMPOSE_FILE = ROOT / "deploy" / "docker-compose.dev.yml"
+DEFAULT_COMPOSE_FILES = (COMPOSE_FILE, DEVELOPMENT_COMPOSE_FILE)
 DEFAULT_OUTPUT = ROOT / "tmp" / "deployment-compose-smoke" / "compose-smoke.json"
 DEFAULT_ARTIFACT_ROOT = ROOT / "tmp" / "deployment-compose-smoke" / "artifacts"
 DEFAULT_DEPLOYMENT_SMOKE_OUTPUT = ROOT / "tmp" / "deployment-compose-smoke" / "deployment-smoke.json"
@@ -32,7 +34,7 @@ class ComposeSmokeConfig:
     artifact_store_secret_key: str = "replace-with-minio-secret"
     artifact_store_prefix: str = "compose-smoke"
     project_name: str = "ai-jsunpack-smoke"
-    compose_file: Path = COMPOSE_FILE
+    compose_files: tuple[Path, ...] = DEFAULT_COMPOSE_FILES
     profiles: tuple[str, ...] = ("worker", "browser-runner")
     health_timeout_seconds: int = 180
     soak_instances: int = 2
@@ -55,7 +57,7 @@ def parse_args(argv: list[str] | None = None) -> ComposeSmokeConfig:
     parser.add_argument("--artifact-store-secret-key", default="replace-with-minio-secret")
     parser.add_argument("--artifact-store-prefix", default="compose-smoke")
     parser.add_argument("--project-name", default="ai-jsunpack-smoke")
-    parser.add_argument("--compose-file", type=Path, default=COMPOSE_FILE)
+    parser.add_argument("--compose-file", dest="compose_files", action="append", type=Path, default=None)
     parser.add_argument("--profile", dest="profiles", action="append", default=None)
     parser.add_argument("--health-timeout-seconds", type=int, default=180)
     parser.add_argument("--soak-instances", type=int, default=2)
@@ -77,7 +79,7 @@ def parse_args(argv: list[str] | None = None) -> ComposeSmokeConfig:
         artifact_store_secret_key=args.artifact_store_secret_key,
         artifact_store_prefix=args.artifact_store_prefix,
         project_name=args.project_name,
-        compose_file=args.compose_file,
+        compose_files=tuple(args.compose_files) if args.compose_files else DEFAULT_COMPOSE_FILES,
         profiles=profiles,
         health_timeout_seconds=max(1, args.health_timeout_seconds),
         soak_instances=max(1, args.soak_instances),
@@ -108,7 +110,13 @@ def run_compose_smoke(config: ComposeSmokeConfig) -> dict[str, Any]:
 
     if config.dry_run:
         add_check(checks, "compose_command_plan", True, evidence={"commandCount": len(commands)})
-        add_check(checks, "compose_file_present", config.compose_file.exists(), evidence={"path": str(config.compose_file)})
+        compose_files_present = all(path.exists() for path in config.compose_files)
+        add_check(
+            checks,
+            "compose_file_present",
+            compose_files_present,
+            evidence={"paths": [str(path) for path in config.compose_files]},
+        )
         finalize_report(report, started)
         write_report(config.output_path, report)
         return report
@@ -158,7 +166,9 @@ def compose_command_plan(config: ComposeSmokeConfig) -> list[list[str]]:
 
 
 def compose_base_command(config: ComposeSmokeConfig) -> list[str]:
-    command = ["docker", "compose", "-p", config.project_name, "-f", str(config.compose_file)]
+    command = ["docker", "compose", "-p", config.project_name]
+    for compose_file in config.compose_files:
+        command.extend(["-f", str(compose_file)])
     for profile in config.profiles:
         command.extend(["--profile", profile])
     return command
@@ -356,7 +366,7 @@ def safe_config(config: ComposeSmokeConfig) -> dict[str, Any]:
         if isinstance(value, Path):
             payload[key] = str(value)
         elif isinstance(value, tuple):
-            payload[key] = list(value)
+            payload[key] = [str(item) if isinstance(item, Path) else item for item in value]
     payload["database_url"] = redact_database_url(config.database_url)
     payload["artifact_store_secret_key"] = "<redacted>"
     return payload

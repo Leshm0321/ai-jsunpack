@@ -8,7 +8,7 @@
 - `db` 和 `artifact-store` 是 API 与 Worker 共享的基础设施服务。
 - `web` 只在构建/运行边界接收 `VITE_API_*` 值。
 
-compose 文件既是部署契约，也是本地启动入口。它可以从本仓库构建本地服务镜像；当 CI 发布不可变 tag 后，也可以分别用 `AI_JSUNPACK_API_IMAGE`、`AI_JSUNPACK_WORKER_IMAGE`、`AI_JSUNPACK_BROWSER_RUNNER_IMAGE` 和 `AI_JSUNPACK_WEB_IMAGE` 覆盖镜像。
+compose 文件既是部署契约，也是本地启动入口。它可以从本仓库构建本地服务镜像；当 CI 发布不可变 tag 后，也可以用 `AI_JSUNPACK_*_IMAGE` 覆盖应用镜像，并用 `POSTGRES_IMAGE`、`MINIO_IMAGE`、`MINIO_MC_IMAGE` 固定基础设施镜像。
 
 ## 发布门禁
 
@@ -68,21 +68,34 @@ GitHub Actions 用户可以通过 `workflow_dispatch` 运行 `.github/workflows/
 - `browser-runner.Dockerfile` 启动 `uvicorn apps.browser_runner.app.main:app`，并安装 Playwright Chromium。
 - `web.Dockerfile` 构建 Vite workspace，并在 5173 端口提供静态 bundle。
 
-`deploy/docker-compose.yml` 包含 PostgreSQL、MinIO、API、Browser Runner 和 Web 的健康检查。一次性 `artifact-store-init` 服务会在 API、Worker 或 Browser Runner 启动前创建配置的 MinIO bucket。Worker 是长驻队列消费者，通过 ops heartbeat 和 deployment smoke 报告验证，而不是通过 HTTP health check 验证。
+`deploy/docker-compose.yml` 定义不向宿主发布端口的公共拓扑；`docker-compose.dev.yml` 和 `docker-compose.prod.yml` 分别叠加开发与生产策略。一次性 `artifact-store-init` 服务会创建 MinIO bucket，开发环境的 `auth-init` 会生成 24 小时 user/service token。Worker 是长驻队列消费者，通过 ops heartbeat 和 deployment smoke 报告验证，而不是通过 HTTP health check 验证。
 
 构建并启动完整本地拓扑：
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner build
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner up -d
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner ps
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml ps
 ```
 
 检查完成后停止：
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml down
 ```
+
+Web 使用 `http://127.0.0.1:5173`。浏览器请求同源 `/api`，由 Web 容器代理到 API；`runtime-config.js` 在容器启动时注入 API 地址和 token，不需要重新构建 Vite bundle。Web 与 Worker 都会重新读取 token 文件，因此后续 `docker compose ... up -d` 刷新开发 token 时无需重建镜像。
+
+生产部署先复制并填写未跟踪的环境文件：
+
+```powershell
+Copy-Item deploy/env/production.env.example deploy/env/production.env
+docker compose --env-file deploy/env/production.env -p ai-jsunpack `
+  -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+```
+
+生产覆盖默认只发布 Web `8080`。DB、MinIO、API 和 Browser Runner 仅在 Compose 网络内访问；缺少数据库密码、HMAC secret 或 Web/Worker token 时会在 Compose 配置阶段失败。
+
+> Worker 挂载 `/var/run/docker.sock`，等同于宿主 Docker 管理权限。本配置只面向已批准的单用户或可信内网部署，不是多租户强隔离边界。
 
 ## 验证
 
@@ -137,8 +150,8 @@ compose 演练默认构建镜像，除非传入 `--skip-build`；它会启动 wo
 回滚时先保留证据，再回到上一组镜像 tag：
 
 ```powershell
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner logs --tail 200 > tmp\deployment-compose-smoke\compose-logs.txt
-docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worker --profile browser-runner down
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml logs --tail 200 > tmp\deployment-compose-smoke\compose-logs.txt
+docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml down
 ```
 
 对于近生产演练，删除 volume 前保留 PostgreSQL volume/export、MinIO bucket export、`release-gate.json`、SBOM 文件、漏洞扫描输出和 compose smoke JSON 报告。回退 tag 后重新运行 `deploy.compose_smoke --skip-build`，并比较新的 `deploymentSmoke.archive_manifest.retainedEvidence.resultPackageSha256`、报告类型、Prometheus scrape 证据和 alert event history。
@@ -152,7 +165,7 @@ docker compose -p ai-jsunpack-smoke -f deploy/docker-compose.yml --profile worke
 | runnerKind | enforcement | 当前执行行为 | 审计含义 |
 | --- | --- | --- | --- |
 | `local` | `local_best_effort` | 在临时本地 workspace 中执行，使用命令 allowlist 和清理后的环境。 | 记录策略意图；不声明 OS/container 隔离。 |
-| `container` | `container_enforced` | 可用时通过 Docker 或 Podman 执行。 | 记录 Docker/Podman 的网络、进程、内存、CPU 和文件系统能力差异。 |
+| `container` | `container_enforced` | 通过 Docker/Podman 执行；Compose 使用命名 volume 与 `volume-subpath` 共享 attempt workspace。 | 记录 Docker/Podman 的网络、进程、内存、CPU 和文件系统能力差异。 |
 | `gvisor` | `runtime_isolated` | 配置容器 runtime 时，通过 Docker 或 Podman + `--runtime runsc` 执行 build/typecheck。 | 用于部署将容器执行路由到 gVisor/runsc，并希望证据体现该边界的场景。 |
 | `firecracker` | `runtime_isolated` | 配置 `AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND` 或 `buildValidation.firecrackerRunnerCommand` 时，通过部署方提供的 Firecracker launcher 执行；否则拒绝执行。 | 用于部署方拥有 Firecracker/KVM/jailer/rootfs 设置，以及跨 VM 边界 Artifact Store 交换的场景。 |
 | `remote_browser_runner` | `remote_isolated` | 配置 `AI_JSUNPACK_BROWSER_RUNNER_URL` 时，通过独立 Browser Runner 服务执行 runtime smoke/compare；不执行 Worker build/typecheck 命令。 | 用于将 Playwright/browser 工作委托给独立 Browser Runner 服务，并由该服务承担 auth、egress 和 artifact exchange 控制。 |

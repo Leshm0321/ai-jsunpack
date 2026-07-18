@@ -1,3 +1,5 @@
+FROM docker:29-cli AS docker-cli
+
 FROM node:20-bookworm-slim AS node-deps
 
 WORKDIR /app
@@ -26,8 +28,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
 COPY requirements.txt pyproject.toml package.json package-lock.json tsconfig.base.json ./
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN python3 -m pip install --no-cache-dir --break-system-packages --upgrade pip \
+    && python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY --from=node-deps /app/node_modules ./node_modules
 COPY --from=node-deps /app/packages/shared ./packages/shared
@@ -36,6 +41,7 @@ COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
 COPY apps/browser_runner ./apps/browser_runner
 COPY packages/audit ./packages/audit
+COPY packages/configuration ./packages/configuration
 COPY packages/deployment ./packages/deployment
 COPY packages/knowledge ./packages/knowledge
 COPY packages/memory ./packages/memory

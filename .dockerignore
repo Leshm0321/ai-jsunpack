@@ -26,3 +26,4 @@ uploads
 .env
 .env.*
 !.env.example
+deploy/env/production.env
