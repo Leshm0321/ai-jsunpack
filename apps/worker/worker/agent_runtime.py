@@ -65,27 +65,27 @@ class RuntimeContext:
 
 
 class CrewRuntimePlanner:
-    """Builds the CrewAI-centric multi-stage plan for a runtime pass."""
+    """为单轮运行构建以 CrewAI 为中心的多阶段计划。"""
 
     def build_specs(self) -> list[CrewAgentSpec]:
         return [
             CrewAgentSpec(
                 name="PlannerAgent",
                 stage="planner",
-                responsibility="Plan the agent graph, stage ordering, and evidence focus.",
+                responsibility="规划 Agent 图、阶段顺序和证据重点。",
                 role="Planner Agent",
-                goal="Plan a safe JavaScript reconstruction analysis pass from audited artifacts.",
-                backstory="You create schema-first plans for artifact-driven reverse analysis.",
+                goal="根据已审计的 Artifact 规划安全的 JavaScript 重建分析流程。",
+                backstory="你为 Artifact 驱动的逆向分析创建 schema-first plan。",
                 output_kind="agent_plan",
                 allow_parallel=False,
             ),
             CrewAgentSpec(
                 name="AnalysisAgent",
                 stage="analysis",
-                responsibility="Produce overall semantic and module-level analysis.",
+                responsibility="生成整体语义与模块级分析。",
                 role="Analysis Agent",
-                goal="Identify overall semantic structure, likely module split boundaries, and uncertainty.",
-                backstory="You reason only from provided evidence references and deterministic summaries.",
+                goal="识别整体语义结构、可能的模块拆分边界和不确定性。",
+                backstory="你只能依据提供的证据引用和确定性摘要进行推理。",
                 output_kind="inference_record",
                 allow_parallel=False,
                 dependencies=["PlannerAgent"],
@@ -93,10 +93,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="NamingAgent",
                 stage="specialists",
-                responsibility="Propose naming-oriented inferences only.",
+                responsibility="仅提出面向命名的推断。",
                 role="Naming Agent",
-                goal="Assess symbol naming quality and preserve uncertainty for reverse naming.",
-                backstory="You only produce naming-scoped evidence and never rewrite source directly.",
+                goal="评估符号命名质量，并保留逆向命名中的不确定性。",
+                backstory="你只生成命名范围内的证据，绝不直接重写源码。",
                 output_kind="inference_record",
                 allow_parallel=True,
                 dependencies=["AnalysisAgent"],
@@ -104,10 +104,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="TypeAgent",
                 stage="specialists",
-                responsibility="Propose type-boundary inferences only.",
+                responsibility="仅提出类型边界推断。",
                 role="Type Agent",
-                goal="Assess TypeScript boundary hints and type inference opportunities.",
-                backstory="You produce type-oriented evidence only and preserve conservative defaults.",
+                goal="评估 TypeScript 边界线索和类型推断机会。",
+                backstory="你只生成面向类型的证据，并保留保守默认值。",
                 output_kind="inference_record",
                 allow_parallel=True,
                 dependencies=["AnalysisAgent"],
@@ -115,10 +115,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="FrameworkAgent",
                 stage="specialists",
-                responsibility="Assess framework/runtime framework signals only.",
+                responsibility="仅评估框架和运行时框架信号。",
                 role="Framework Agent",
-                goal="Classify framework cues and component/runtime patterns from evidence.",
-                backstory="You reason only about framework cues from deterministic evidence.",
+                goal="根据证据对框架线索以及组件和运行时模式进行分类。",
+                backstory="你只能依据确定性证据推理框架线索。",
                 output_kind="inference_record",
                 allow_parallel=True,
                 dependencies=["AnalysisAgent"],
@@ -126,10 +126,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="DeadCodeAgent",
                 stage="specialists",
-                responsibility="Assess dead-code and retention decisions only.",
+                responsibility="仅评估死代码与保留决策。",
                 role="Dead Code Agent",
-                goal="Identify conservative dead-code hypotheses and preserve rollback options.",
-                backstory="You only emit dead-code-scoped hypotheses with explicit uncertainty.",
+                goal="识别保守的死代码假设，并保留回滚选项。",
+                backstory="你只输出死代码范围内的假设，并明确标注不确定性。",
                 output_kind="inference_record",
                 allow_parallel=True,
                 dependencies=["AnalysisAgent"],
@@ -137,10 +137,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="RuntimeAgent",
                 stage="specialists",
-                responsibility="Assess runtime/browser behavior diagnosis only.",
+                responsibility="仅评估运行时和浏览器行为诊断。",
                 role="Runtime Agent",
-                goal="Summarize runtime/browser execution risks and diagnosis from evidence.",
-                backstory="You preserve uncertainty and route runtime decisions through deterministic gates.",
+                goal="根据证据总结运行时和浏览器执行风险与诊断。",
+                backstory="你要保留不确定性，并让运行时决策经过确定性门禁。",
                 output_kind="runtime_diagnosis",
                 allow_parallel=True,
                 dependencies=["AnalysisAgent"],
@@ -148,10 +148,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="RepairAgent",
                 stage="synthesis",
-                responsibility="Emit structured repair drafts only.",
+                responsibility="仅输出结构化修复草案。",
                 role="Repair Agent",
-                goal="Propose only structured, deterministic-safe repair instructions.",
-                backstory="You never directly mutate source and only output constrained repair actions.",
+                goal="仅提出结构化且满足确定性安全要求的修复指令。",
+                backstory="你绝不直接修改源码，只输出受约束的修复动作。",
                 output_kind="repair_instruction",
                 allow_parallel=True,
                 dependencies=["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
@@ -159,10 +159,10 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="ReportAgent",
                 stage="synthesis",
-                responsibility="Emit report sections only.",
+                responsibility="仅输出报告章节。",
                 role="Report Agent",
-                goal="Summarize cross-agent findings into report sections for packaging and audit.",
-                backstory="You produce structured report sections and preserve audit traceability.",
+                goal="将跨 Agent 发现总结为用于打包和审计的报告章节。",
+                backstory="你生成结构化报告章节，并保留审计可追溯性。",
                 output_kind="report_section",
                 allow_parallel=True,
                 dependencies=["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
@@ -170,15 +170,14 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="ReviewAgent",
                 stage="review",
-                responsibility="Review conflicts, consensus, and final runtime verdict only.",
+                responsibility="仅审查冲突、共识和最终运行时结论。",
                 role="Review Agent",
                 goal=(
-                    "Review cross-agent findings, detect conflicts, issue a final verdict, and explicitly list only "
-                    "the provided low-risk repair instruction IDs that are approved for deterministic application."
+                    "审查跨 Agent 发现、检测冲突、给出最终结论，并且只明确列出已获准进行确定性应用的"
+                    "现有低风险修复指令 ID。"
                 ),
                 backstory=(
-                    "You reject unsupported conclusions, never invent repair instruction IDs, and preserve "
-                    "uncertainty in audit records."
+                    "你要拒绝缺乏依据的结论，绝不编造修复指令 ID，并在审计记录中保留不确定性。"
                 ),
                 output_kind="review_run",
                 allow_parallel=False,
@@ -199,17 +198,17 @@ class CrewRuntimePlanner:
         stage_indexes = {stage: index for index, stage in enumerate(stage_order)}
         by_name = {spec.name: spec for spec in specs}
         if len(by_name) != len(specs):
-            raise AgentRuntimeError("Agent execution plan contains duplicate agent names.")
+            raise AgentRuntimeError("Agent 执行计划包含重复的 Agent 名称。")
         for spec in specs:
             if spec.stage not in stage_indexes:
-                raise AgentRuntimeError(f"Agent {spec.name} uses unsupported stage {spec.stage!r}.")
+                raise AgentRuntimeError(f"Agent {spec.name} 使用了不受支持的阶段 {spec.stage!r}。")
             for dependency in spec.dependencies:
                 dependency_spec = by_name.get(dependency)
                 if dependency_spec is None:
-                    raise AgentRuntimeError(f"Agent {spec.name} depends on missing agent {dependency}.")
+                    raise AgentRuntimeError(f"Agent {spec.name} 依赖不存在的 Agent {dependency}。")
                 if stage_indexes[dependency_spec.stage] >= stage_indexes[spec.stage]:
                     raise AgentRuntimeError(
-                        f"Agent {spec.name} dependency {dependency} must belong to an earlier stage."
+                        f"Agent {spec.name} 的依赖 {dependency} 必须属于更早的阶段。"
                     )
 
         visiting: set[str] = set()
@@ -217,7 +216,7 @@ class CrewRuntimePlanner:
 
         def visit(name: str) -> None:
             if name in visiting:
-                raise AgentRuntimeError(f"Agent execution plan contains a dependency cycle at {name}.")
+                raise AgentRuntimeError(f"Agent 执行计划在 {name} 处存在依赖循环。")
             if name in visited:
                 return
             visiting.add(name)
@@ -231,7 +230,7 @@ class CrewRuntimePlanner:
 
 
 class CrewConflictDetector:
-    """Creates structured conflict summaries for cross-agent review."""
+    """为跨 Agent 审查创建结构化冲突摘要。"""
 
     def detect(self, stage: CrewStageExecution) -> list[CrewConflictRecord]:
         if stage.stage != "specialists":
@@ -271,7 +270,7 @@ class CrewConflictDetector:
                         key=f"conflict:{inference_type}:{target}",
                         severity="warning",
                         agents=agents,
-                        summary=f"Agents proposed different {inference_type} values for target {target!r}.",
+                        summary=f"多个 Agent 为目标 {target!r} 提出了不同的 {inference_type} 值。",
                         evidence_refs=evidence_refs,
                     )
                 )
@@ -281,7 +280,7 @@ class CrewConflictDetector:
                         key=f"overlap:{inference_type}:{target}",
                         severity="info",
                         agents=agents,
-                        summary=f"Agents produced overlapping {inference_type} evidence for target {target!r}.",
+                        summary=f"多个 Agent 为目标 {target!r} 生成了重叠的 {inference_type} 证据。",
                         evidence_refs=evidence_refs,
                     )
                 )
@@ -294,8 +293,8 @@ class CrewConflictDetector:
                         severity="info",
                         agents=agents,
                         summary=(
-                            f"Multiple agents produced {inference_type} evidence without a common target; "
-                            "ReviewAgent should consolidate the overlap."
+                            f"多个 Agent 在没有共同目标的情况下生成了 {inference_type} 证据；"
+                            "ReviewAgent 应整合这些重叠内容。"
                         ),
                         evidence_refs=sorted({ref for record in grouped for ref in record["evidenceRefs"]}),
                     )
@@ -320,8 +319,7 @@ class CrewConflictDetector:
                         severity="warning",
                         agents=sorted({record["agent"] for record in combined}),
                         summary=(
-                            f"Dead-code evidence proposes removing target {target!r} while another specialist "
-                            "produces retained semantic evidence for it."
+                            f"死代码证据建议移除目标 {target!r}，但另一个 specialist Agent 为其生成了应保留的语义证据。"
                         ),
                         evidence_refs=sorted({ref for record in combined for ref in record["evidenceRefs"]}),
                     )
@@ -333,7 +331,7 @@ class CrewConflictDetector:
                     key="stage:status-divergence",
                     severity="warning",
                     agents=[execution.spec.name for execution in stage.agent_executions],
-                    summary="Parallel specialist stage mixed failed and non-failed executions.",
+                    summary="并行专家阶段同时出现了失败和未失败的执行。",
                 )
             )
         return conflicts
@@ -346,7 +344,7 @@ class CrewConflictDetector:
 
 
 class CrewExecutionManager:
-    """Runs CrewAI agents stage by stage while keeping runtime orchestration local."""
+    """逐阶段运行 CrewAI Agent，同时将 runtime 编排保留在本地。"""
 
     def __init__(
         self,
@@ -543,7 +541,7 @@ class CrewExecutionManager:
                 duration_ms=0.0,
                 input_artifact_ids=self._input_artifact_ids(context),
                 evidence_refs=context.evidence_refs,
-                message=f"{spec.name} skipped because dependency {first.spec.name} did not complete successfully.",
+                message=f"{spec.name} 已跳过，因为依赖 {first.spec.name} 未成功完成。",
                 model_provider=context.policy.model_provider,
                 model_name=context.policy.model_name,
                 model_base_url_configured=context.policy.base_url_configured,
@@ -597,8 +595,8 @@ class CrewExecutionManager:
         budget_audit: dict[str, Any],
     ) -> CrewAgentExecution:
         message = (
-            f"{spec.name} was not invoked because required context exceeded agents.contextBudget "
-            f"({budget_audit['estimatedTokensAfter']} > {budget_audit['budgetTokens']} estimated tokens)."
+            f"未调用 {spec.name}，因为所需上下文超过 agents.contextBudget "
+            f"（预估 token 数 {budget_audit['estimatedTokensAfter']} > {budget_audit['budgetTokens']}）。"
         )
         review = (
             AgentReviewDraft(
@@ -753,7 +751,7 @@ class CrewExecutionManager:
             trimmed["knowledgeHits"] = retained_hits
 
         if self._estimate_prompt_tokens(trimmed) > budget and trimmed.get("memory"):
-            trimmed["memory"] = "[omitted by context budget]"
+            trimmed["memory"] = "[因上下文预算限制而省略]"
             omissions["memory"] = 1
 
         completed_agents = trimmed.get("completedAgents")
@@ -773,7 +771,7 @@ class CrewExecutionManager:
             for evidence_ref in evidence_refs:
                 if not isinstance(evidence_ref, dict) or not evidence_ref.get("excerpt"):
                     continue
-                evidence_ref["excerpt"] = "[omitted by context budget]"
+                evidence_ref["excerpt"] = "[因上下文预算限制而省略]"
                 omissions["evidenceExcerpts"] += 1
                 if self._estimate_prompt_tokens(trimmed) <= budget:
                     break
@@ -862,7 +860,7 @@ class CrewExecutionManager:
         )
         review = review_execution.review if review_execution is not None and review_execution.review is not None else AgentReviewDraft(
             status="best_effort",
-            decision="CrewAI runtime completed without an explicit ReviewAgent verdict.",
+            decision="CrewAI runtime 已完成，但 ReviewAgent 未给出明确结论。",
             failure_class=fallback_failure_class,  # type: ignore[arg-type]
         )
         known_repair_ids = {draft.id for draft in aggregated_repairs if draft.id}
@@ -872,7 +870,7 @@ class CrewExecutionManager:
                 review,
                 status="fail",
                 decision=(
-                    f"{review.decision} ReviewAgent referenced unknown repair instruction IDs: "
+                    f"{review.decision} ReviewAgent 引用了未知的修复指令 ID："
                     f"{', '.join(unknown_review_ids)}."
                 ),
                 failure_class="agent_failed",
@@ -959,18 +957,15 @@ class CrewExecutionManager:
                 target_stage="runtime_compare",
                 status="best_effort" if failure_class == "policy_denied" else "fail",
                 failure_class=fallback_failure_class,
-                diagnosis=(
-                    "RuntimeAgent preserved runtime uncertainty because CrewAI execution could not produce "
-                    "agent-specific runtime diagnosis output."
-                ),
+                diagnosis="由于 CrewAI 执行无法生成 Agent 专属的 runtime 诊断输出，RuntimeAgent 保留了 runtime 不确定性。",
                 recommended_actions=[
-                    "Inspect runtime_validation and runtime_comparison artifacts when available.",
-                    "Keep deterministic build/runtime gates as the authority for applied repairs.",
+                    "在可用时检查 runtime_validation 和 runtime_comparison artifact。",
+                    "继续以确定性构建和运行时门禁作为应用修复的权威依据。",
                 ],
                 confidence=0.35,
                 uncertainty_reasons=[
-                    "CrewAI execution did not yield a runtime-scoped diagnosis artifact.",
-                    "Deterministic review and repair stages remain authoritative.",
+                    "CrewAI 执行未生成 runtime 范围内的诊断 artifact。",
+                    "确定性审查与修复阶段仍是权威依据。",
                 ],
             )
         ]
@@ -979,19 +974,18 @@ class CrewExecutionManager:
         status = "best_effort" if failure_class == "policy_denied" else "fail"
         return [
             AgentReportSectionDraft(
-                title="Agent Runtime Summary",
+                title="Agent Runtime 摘要",
                 anchor="agent-runtime-summary",
                 summary=decision,
                 content=(
-                    "Planner, Analysis, Naming, Type, Framework, Dead-Code, Runtime, Repair, "
-                    "Report, and Review Agent surfaces were orchestrated through the CrewAI runtime. "
-                    "This fallback summary preserves audit continuity when no dedicated report section was produced."
+                    "Planner、Analysis、Naming、Type、Framework、Dead Code、Runtime、Repair、Report 和 Review Agent 均由 CrewAI "
+                    "运行时编排。当未生成专用报告章节时，此回退摘要会保持审计连续性。"
                 ),
                 status=status,  # type: ignore[arg-type]
                 confidence=0.35,
                 uncertainty_reasons=[
-                    "CrewAI execution did not yield a dedicated report-section artifact.",
-                    "Deterministic packaging still received structured runtime summary evidence.",
+                    "CrewAI 执行未生成专用的报告章节 artifact。",
+                    "确定性打包流程仍收到了结构化运行时摘要证据。",
                 ],
             )
         ]
@@ -1008,8 +1002,8 @@ class CrewExecutionManager:
                 target_stage="runtime_compare",
                 failure_class=fallback_failure_class,
                 decision=(
-                    "Repair Agent recorded no free-form source mutation. "
-                    f"{decision} Deterministic build/runtime repair loops remain responsible for applied changes."
+                    "Repair Agent 未记录任何自由形式的源码修改。"
+                    f"{decision} 已应用的改动仍由确定性构建和运行时修复循环负责。"
                 ),
                 status=status,
                 risk_level="low",
@@ -1109,10 +1103,10 @@ class CrewExecutionManager:
     ) -> list[str]:
         notes: list[str] = []
         if stage_name == "specialists":
-            execution_mode = "in parallel" if worker_count > 1 else "serially"
-            notes.append(f"Specialist crews executed {execution_mode} in isolated runtime contexts.")
+            execution_mode = "并行" if worker_count > 1 else "串行"
+            notes.append(f"specialist Agent 组在隔离的 runtime 上下文中{execution_mode}执行。")
         if conflicts:
-            notes.append("Conflict summary persisted for ReviewAgent consumption.")
+            notes.append("冲突摘要已持久化，供 ReviewAgent 使用。")
         return notes
 
     def _message(
@@ -1123,9 +1117,9 @@ class CrewExecutionManager:
         parallel_count: int,
     ) -> str:
         return (
-            "CrewAI runtime executed staged multi-agent analysis "
-            f"across {len(stages)} stage(s), including {parallel_count} parallel group(s). "
-            f"Final review status: {review.status}."
+            "CrewAI runtime 已执行分阶段多 Agent 分析，"
+            f"共 {len(stages)} 个阶段，其中包含 {parallel_count} 个并行组。"
+            f"最终审查状态：{review.status}。"
         )
 
 
@@ -1169,7 +1163,7 @@ class AgentRuntime:
                 started_at=started_at,
             )
         except Exception as error:
-            raise AgentRuntimeError(f"Agent runtime failed: {error}") from error
+            raise AgentRuntimeError(f"Agent runtime 失败：{error}") from error
 
         return AgentRunSummary(
             plan_artifact=outputs.plan_artifact,

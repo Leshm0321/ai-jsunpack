@@ -63,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         response = run_launcher(args, prepared, started_at=started_at)
     except LauncherError as error:
         response = failure_response(str(error), error.failure_class)
-    except Exception as error:  # pragma: no cover - last-ditch production guard
-        response = failure_response(f"Firecracker launcher failed unexpectedly: {error}", "unknown")
+    except Exception as error:  # pragma: no cover - 生产环境的最后一道保护
+        response = failure_response(f"Firecracker 启动器意外失败：{error}", "unknown")
 
     print(json.dumps(response, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
@@ -73,29 +73,28 @@ def main(argv: list[str] | None = None) -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Production Firecracker launcher template for ai-jsunpack. It validates the Worker protocol, "
-            "prepares a microVM exchange directory, and delegates actual KVM/jailer execution to a deployment "
-            "wrapper command."
+            "ai-jsunpack 的生产级 Firecracker 启动器模板。它会验证 Worker 协议、准备 microVM 交换目录，"
+            "并将实际的 KVM/jailer 执行委托给部署包装命令。"
         )
     )
-    parser.add_argument("--kernel", required=True, help="Path to the prepared guest kernel image.")
-    parser.add_argument("--rootfs", required=True, help="Path to the prepared guest rootfs image.")
-    parser.add_argument("--jailer", default="firecracker-jailer", help="Firecracker jailer binary path.")
-    parser.add_argument("--firecracker", default="firecracker", help="Firecracker binary path.")
-    parser.add_argument("--socket-dir", default="/run/ai-jsunpack/firecracker", help="Host directory for API sockets.")
-    parser.add_argument("--tap-device", default="", help="Optional tap device used only when networkPolicy is allow.")
+    parser.add_argument("--kernel", required=True, help="已准备好的访客机内核镜像路径。")
+    parser.add_argument("--rootfs", required=True, help="已准备好的访客机 rootfs 镜像路径。")
+    parser.add_argument("--jailer", default="firecracker-jailer", help="Firecracker jailer 二进制文件路径。")
+    parser.add_argument("--firecracker", default="firecracker", help="Firecracker 二进制文件路径。")
+    parser.add_argument("--socket-dir", default="/run/ai-jsunpack/firecracker", help="API 套接字的主机目录。")
+    parser.add_argument("--tap-device", default="", help="可选的 tap 设备，仅在 networkPolicy 为 allow 时使用。")
     parser.add_argument(
         "--wrapper-command",
         nargs="+",
         help=(
-            "Deployment command that starts the microVM and executes the guest command. It receives a JSON "
-            "control document on stdin and must return the standard launcher JSON response on stdout."
+            "用于启动 microVM 并执行访客机命令的部署命令。该命令从标准输入接收 JSON 控制文档，"
+            "并且必须在标准输出返回标准启动器 JSON 响应。"
         ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate and echo the protocol without starting a microVM. For deployment smoke tests only.",
+        help="在不启动 microVM 的情况下验证并回显协议，仅用于部署冒烟测试。",
     )
     return parser
 
@@ -104,17 +103,17 @@ def parse_request(raw_stdin: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw_stdin)
     except json.JSONDecodeError as error:
-        raise LauncherError(f"Invalid launcher request JSON: {error}", "invalid_input") from error
+        raise LauncherError(f"启动器请求 JSON 无效：{error}", "invalid_input") from error
     if not isinstance(payload, dict):
-        raise LauncherError("Launcher request must be a JSON object.", "invalid_input")
+        raise LauncherError("启动器请求必须是 JSON 对象。", "invalid_input")
     return payload
 
 
 def prepare_request(payload: dict[str, Any]) -> PreparedRequest:
     if payload.get("version") != 1:
-        raise LauncherError("Unsupported launcher request version.", "invalid_input")
+        raise LauncherError("不支持该启动器请求版本。", "invalid_input")
     if payload.get("runnerKind") != "firecracker":
-        raise LauncherError("Launcher request runnerKind must be firecracker.", "invalid_input")
+        raise LauncherError("启动器请求的 runnerKind 必须为 firecracker。", "invalid_input")
 
     workspace = _safe_existing_directory(payload.get("workspace"), field_name="workspace")
     working_directory_relative = _relative_working_directory(payload.get("workingDirectory"))
@@ -122,24 +121,24 @@ def prepare_request(payload: dict[str, Any]) -> PreparedRequest:
     try:
         working_directory.relative_to(workspace.resolve())
     except ValueError as error:
-        raise LauncherError("workingDirectory escaped the workspace.", "sandbox_denied") from error
+        raise LauncherError("workingDirectory 超出了 workspace。", "sandbox_denied") from error
     if not working_directory.is_dir():
-        raise LauncherError("workingDirectory must exist under workspace.", "invalid_input")
+        raise LauncherError("workingDirectory 必须存在于 workspace 下。", "invalid_input")
 
     command = payload.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
-        raise LauncherError("command must be a non-empty string array.", "invalid_input")
+        raise LauncherError("command 必须是非空字符串数组。", "invalid_input")
 
     environment = payload.get("environment") or {}
     if not isinstance(environment, dict) or not all(
         isinstance(name, str) and isinstance(value, str) for name, value in environment.items()
     ):
-        raise LauncherError("environment must be an object with string keys and values.", "invalid_input")
+        raise LauncherError("environment 必须是键和值均为字符串的对象。", "invalid_input")
 
     stdin_bytes = _stdin_bytes(payload.get("stdinBase64"))
     resource_policy = payload.get("resourcePolicy") or {}
     if not isinstance(resource_policy, dict):
-        raise LauncherError("resourcePolicy must be a JSON object.", "invalid_input")
+        raise LauncherError("resourcePolicy 必须是 JSON 对象。", "invalid_input")
 
     return PreparedRequest(
         workspace=workspace,
@@ -188,7 +187,7 @@ def run_launcher(args: argparse.Namespace, request: PreparedRequest, *, started_
 
         if not args.wrapper_command:
             raise LauncherError(
-                "No --wrapper-command was provided; configure the deployment-specific Firecracker/jailer wrapper.",
+                "未提供 --wrapper-command；请配置部署专用的 Firecracker/jailer 包装命令。",
                 "sandbox_denied",
             )
 
@@ -199,12 +198,12 @@ def ensure_runtime_inputs(args: argparse.Namespace) -> None:
     for label, path_value in (("kernel", args.kernel), ("rootfs", args.rootfs)):
         path = Path(path_value)
         if not path.is_file():
-            raise LauncherError(f"Firecracker {label} image does not exist: {path}", "sandbox_denied")
+            raise LauncherError(f"Firecracker {label} 镜像不存在：{path}", "sandbox_denied")
     Path(args.socket_dir).mkdir(parents=True, exist_ok=True)
     if shutil.which(args.jailer) is None and not Path(args.jailer).exists():
-        raise LauncherError(f"Firecracker jailer binary is unavailable: {args.jailer}", "sandbox_denied")
+        raise LauncherError(f"Firecracker jailer 二进制文件不可用：{args.jailer}", "sandbox_denied")
     if shutil.which(args.firecracker) is None and not Path(args.firecracker).exists():
-        raise LauncherError(f"Firecracker binary is unavailable: {args.firecracker}", "sandbox_denied")
+        raise LauncherError(f"Firecracker 二进制文件不可用：{args.firecracker}", "sandbox_denied")
 
 
 def control_document(args: argparse.Namespace, request: PreparedRequest, exchange_path: Path) -> dict[str, Any]:
@@ -252,7 +251,7 @@ def run_wrapper(
             shell=False,
         )
     except OSError as error:
-        raise LauncherError(f"Firecracker wrapper could not be started: {error}", "sandbox_denied") from error
+        raise LauncherError(f"无法启动 Firecracker 包装命令：{error}", "sandbox_denied") from error
 
     timed_out = False
     try:
@@ -292,7 +291,7 @@ def run_wrapper(
         timed_out=False,
         output_truncated=output_truncated,
         failure_class=failure_class,
-        denied_reason=None if failure_class != "sandbox_denied" else "Firecracker wrapper denied execution.",
+        denied_reason=None if failure_class != "sandbox_denied" else "Firecracker 包装命令拒绝执行。",
     )
 
 
@@ -311,7 +310,7 @@ def normalize_wrapper_response(payload: dict[str, Any], wrapper_stderr: str, wra
         failure_class = failure_class_for_exit(exit_code, "unknown")
     stderr = str(payload.get("stderr", ""))
     if wrapper_stderr:
-        stderr = f"{stderr}\n[wrapper stderr]\n{wrapper_stderr}".strip()
+        stderr = f"{stderr}\n[包装命令标准错误]\n{wrapper_stderr}".strip()
     return success_response(
         stdout=str(payload.get("stdout", "")),
         stderr=stderr,
@@ -391,10 +390,10 @@ def optional_int(value: object) -> int | None:
 
 def _safe_existing_directory(value: object, *, field_name: str) -> Path:
     if not isinstance(value, str) or not value.strip():
-        raise LauncherError(f"{field_name} must be a non-empty path.", "invalid_input")
+        raise LauncherError(f"{field_name} 必须是非空路径。", "invalid_input")
     path = Path(value).resolve()
     if not path.is_dir():
-        raise LauncherError(f"{field_name} must be an existing directory.", "invalid_input")
+        raise LauncherError(f"{field_name} 必须是现有目录。", "invalid_input")
     return path
 
 
@@ -402,10 +401,10 @@ def _relative_working_directory(value: object) -> str:
     if value is None:
         return "."
     if not isinstance(value, str) or not value.strip():
-        raise LauncherError("workingDirectory must be a relative path string.", "invalid_input")
+        raise LauncherError("workingDirectory 必须是相对路径字符串。", "invalid_input")
     candidate = Path(value)
     if candidate.is_absolute() or ".." in candidate.parts:
-        raise LauncherError("workingDirectory must stay inside workspace.", "sandbox_denied")
+        raise LauncherError("workingDirectory 必须位于 workspace 内。", "sandbox_denied")
     return "." if value == "." else value.replace("\\", "/")
 
 
@@ -413,11 +412,11 @@ def _stdin_bytes(value: object) -> bytes | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise LauncherError("stdinBase64 must be a base64 string or null.", "invalid_input")
+        raise LauncherError("stdinBase64 必须是 base64 字符串或 null。", "invalid_input")
     try:
         return base64.b64decode(value.encode("ascii"), validate=True)
     except Exception as error:
-        raise LauncherError("stdinBase64 is not valid base64.", "invalid_input") from error
+        raise LauncherError("stdinBase64 不是有效的 base64。", "invalid_input") from error
 
 
 def _positive_int(value: object, *, default: int) -> int:
@@ -431,7 +430,7 @@ def _positive_int(value: object, *, default: int) -> int:
 def _network_policy(value: object) -> str:
     if value in {"deny", "allow"}:
         return str(value)
-    raise LauncherError("networkPolicy must be deny or allow.", "invalid_input")
+    raise LauncherError("networkPolicy 必须为 deny 或 allow。", "invalid_input")
 
 
 if __name__ == "__main__":

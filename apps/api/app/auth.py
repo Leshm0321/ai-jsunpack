@@ -68,10 +68,10 @@ def require_access(authorization: str | None = Header(default=None)) -> AccessCo
 
 def verify_authorization_header(authorization: str | None) -> AccessContext:
     if authorization is None or not authorization.strip():
-        raise AuthError("Missing bearer token")
+        raise AuthError("缺少 Bearer token")
     scheme, separator, token = authorization.strip().partition(" ")
     if scheme.lower() != "bearer" or not separator or not token.strip():
-        raise AuthError("Invalid authorization scheme")
+        raise AuthError("授权方案无效")
     return verify_auth_token(token.strip())
 
 
@@ -79,7 +79,7 @@ def verify_auth_token(token: str, *, secret: str | None = None, now: int | None 
     configured_secret = secret if secret is not None else auth_secret()
     parts = token.split(".")
     if len(parts) != 3 or not all(parts):
-        raise AuthError("Invalid bearer token format")
+        raise AuthError("Bearer token 格式无效")
 
     header_b64, payload_b64, signature_b64 = parts
     signing_input = f"{header_b64}.{payload_b64}"
@@ -87,22 +87,22 @@ def verify_auth_token(token: str, *, secret: str | None = None, now: int | None 
         hmac.new(configured_secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
     )
     if not hmac.compare_digest(signature_b64, expected_signature):
-        raise AuthError("Invalid bearer token signature")
+        raise AuthError("Bearer token 签名无效")
 
     header = _decode_json_object(header_b64, "token header")
     payload = _decode_json_object(payload_b64, "token payload")
     if header.get("alg") != TOKEN_ALGORITHM or header.get("typ") != TOKEN_TYPE:
-        raise AuthError("Unsupported bearer token header")
+        raise AuthError("不支持该 Bearer token header")
 
     subject = _required_string(payload, "sub")
     kind = payload.get("kind")
     if kind not in ("user", "service"):
-        raise AuthError("Invalid bearer token kind")
+        raise AuthError("Bearer token type 无效")
     expires_at = payload.get("exp")
     if not isinstance(expires_at, int):
-        raise AuthError("Invalid bearer token expiration")
+        raise AuthError("Bearer token expiration 无效")
     if (now if now is not None else int(time.time())) >= expires_at:
-        raise AuthError("Expired bearer token")
+        raise AuthError("Bearer token 已过期")
 
     return AccessContext(
         subject=subject,
@@ -144,19 +144,19 @@ def create_auth_token(
 def auth_secret() -> str:
     secret = os.getenv(AUTH_SECRET_ENV)
     if not secret:
-        raise AuthConfigurationError(f"{AUTH_SECRET_ENV} is not configured")
+        raise AuthConfigurationError(f"未配置环境变量 {AUTH_SECRET_ENV}")
     return secret
 
 
 def _project_roles(value: Any) -> dict[str, ProjectRole]:
     if not isinstance(value, dict):
-        raise AuthError("Invalid project membership claims")
+        raise AuthError("项目成员关系声明无效")
     projects: dict[str, ProjectRole] = {}
     for project_id, role in value.items():
         if not isinstance(project_id, str) or not project_id.strip():
-            raise AuthError("Invalid project membership project id")
+            raise AuthError("项目成员关系中的项目 ID 无效")
         if role not in ROLE_RANK:
-            raise AuthError("Invalid project membership role")
+            raise AuthError("项目成员关系中的角色无效")
         projects[project_id] = role
     return projects
 
@@ -165,14 +165,14 @@ def _service_roles(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list) or not all(isinstance(role, str) and role for role in value):
-        raise AuthError("Invalid service role claims")
+        raise AuthError("服务角色声明无效")
     return tuple(value)
 
 
 def _required_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise AuthError(f"Invalid bearer token {key}")
+        raise AuthError(f"Bearer token 字段 {key} 无效")
     return value
 
 
@@ -190,7 +190,7 @@ def _decode_json_object(value: str, label: str) -> dict[str, Any]:
         decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
         parsed = json.loads(decoded)
     except Exception as error:
-        raise AuthError(f"Invalid {label}") from error
+        raise AuthError(f"{label}无效") from error
     if not isinstance(parsed, dict):
-        raise AuthError(f"Invalid {label}")
+        raise AuthError(f"{label}无效")
     return parsed

@@ -244,7 +244,7 @@ class BuildValidationRunner:
                 attempt=0,
                 command=self.build_command,
                 parent_artifact_ids=source_project_parents,
-                limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                limitation="没有可用的 generated_project 目录；运行真实沙箱验证前需要 deterministic writer 输出。",
             )
             typecheck = self._persist_best_effort(
                 job_id=job_id,
@@ -254,7 +254,7 @@ class BuildValidationRunner:
                 attempt=0,
                 command=self.typecheck_command,
                 parent_artifact_ids=[*source_project_parents, *build.artifact_ids],
-                limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                limitation="没有可用的 generated_project 目录；运行真实沙箱验证前需要 deterministic writer 输出。",
             )
             return BuildValidationResult(build=build, typecheck=typecheck)
 
@@ -280,7 +280,7 @@ class BuildValidationRunner:
                         attempt=attempt,
                         command=self.build_command,
                         parent_artifact_ids=current_parent_ids,
-                        limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                        limitation="没有可用的 generated_project 目录；运行真实沙箱验证前需要 deterministic writer 输出。",
                     )
                     typecheck = self._persist_best_effort(
                         job_id=job_id,
@@ -290,7 +290,7 @@ class BuildValidationRunner:
                         attempt=attempt,
                         command=self.typecheck_command,
                         parent_artifact_ids=[*current_parent_ids, *build.artifact_ids],
-                        limitation="No generated_project directory is available; deterministic writer output is required before real sandbox validation can run.",
+                        limitation="没有可用的 generated_project 目录；运行真实沙箱验证前需要 deterministic writer 输出。",
                     )
                     return BuildValidationResult(build=build, typecheck=typecheck, install_logs=install_logs)
                 shutil.copytree(current_project_path, project_root, dirs_exist_ok=True)
@@ -381,7 +381,7 @@ class BuildValidationRunner:
                 ]
 
         if last_build is None or last_typecheck is None:
-            raise BuildValidationError("Build validation did not produce build and typecheck review results.")
+            raise BuildValidationError("构建验证未生成构建和类型检查审查结果。")
         return BuildValidationResult(
             build=last_build,
             typecheck=last_typecheck,
@@ -413,8 +413,8 @@ class BuildValidationRunner:
         )
         if not config.install_dependencies:
             decision = (
-                "Dependency installation skipped because buildValidation.installDependencies is not enabled; "
-                "install is disabled by policy."
+                "已跳过依赖安装，因为未启用 buildValidation.installDependencies；"
+                "策略禁止安装。"
             )
             payload = self._log_payload(
                 job_id=job_id,
@@ -436,7 +436,7 @@ class BuildValidationRunner:
                 output_truncated=False,
                 working_directory=None,
                 limitations=[
-                    "The generated project declares dependencies, but dependency installation is disabled by policy."
+                    "生成工程声明了依赖，但策略禁止安装依赖。"
                 ],
                 repair_instruction_ids=[],
             )
@@ -528,7 +528,7 @@ class BuildValidationRunner:
                 plan=command_plan,
                 status="best_effort",
                 failure_class=command_plan.failure_class,
-                limitations=[command_plan.missing_reason or "No validation command is available."],
+                limitations=[command_plan.missing_reason or "没有可用的验证命令。"],
             )
 
         result = self.sandbox_runner.run_in_workspace(
@@ -698,9 +698,9 @@ class BuildValidationRunner:
         failure_class = failed_observations[0].failure_class
         if actions:
             self._apply_repair_actions(project_root=project_root, actions=actions)
-            decision = "Applied low-risk deterministic package script repair for generated project validation."
+            decision = "已为生成工程验证应用低风险确定性 package script 修复。"
         else:
-            decision = "No low-risk deterministic repair was available for the failed validation evidence."
+            decision = "没有可用于失败验证证据的低风险确定性修复。"
 
         repair_instruction = RepairInstruction(
             id=f"repair_{uuid4().hex[:12]}",
@@ -768,7 +768,7 @@ class BuildValidationRunner:
                     action="add_package_script",
                     path="package.json:scripts.build",
                     value="node scripts/build.mjs",
-                    reason="A generated build shim exists and package.json does not define scripts.build.",
+                    reason="已存在生成的构建垫片，但 package.json 未定义 scripts.build。",
                 )
             )
         if (
@@ -783,7 +783,7 @@ class BuildValidationRunner:
                     action="add_package_script",
                     path="package.json:scripts.typecheck",
                     value="node scripts/typecheck.mjs",
-                    reason="A generated typecheck shim exists and package.json does not define scripts.typecheck or scripts.check.",
+                    reason="已存在生成的类型检查垫片，但 package.json 未定义 scripts.typecheck 或 scripts.check。",
                 )
             )
         if (
@@ -799,8 +799,8 @@ class BuildValidationRunner:
                     path="package.json:scripts.build",
                     value="node scripts/build.mjs",
                     reason=(
-                        "scripts.build failed during validation while a generated build shim exists; "
-                        "replace the generated-project script with the deterministic shim for retry."
+                        "验证期间 scripts.build 失败，但已存在生成的构建垫片；"
+                        "请用确定性垫片替换生成工程中的脚本后重试。"
                     ),
                 )
             )
@@ -817,8 +817,8 @@ class BuildValidationRunner:
                     path="package.json:scripts.typecheck",
                     value="node scripts/typecheck.mjs",
                     reason=(
-                        "scripts.typecheck failed during validation while a generated typecheck shim exists; "
-                        "replace the generated-project script with the deterministic shim for retry."
+                        "验证期间 scripts.typecheck 失败，但已存在生成的类型检查垫片；"
+                        "请用确定性垫片替换生成工程中的脚本后重试。"
                     ),
                 )
             )
@@ -860,7 +860,7 @@ class BuildValidationRunner:
             "build",
             "missing",
             "build_error",
-            "No scripts.build entry or scripts/build.mjs fallback exists in the generated project.",
+            "生成工程中不存在 scripts.build 条目或 scripts/build.mjs 回退。",
         )
 
     def _typecheck_command_plan(self, project_root: Path) -> CommandPlan:
@@ -886,7 +886,7 @@ class BuildValidationRunner:
             "typecheck",
             "missing",
             "type_error",
-            "No scripts.typecheck, scripts.check, or scripts/typecheck.mjs fallback exists in the generated project.",
+            "生成工程中不存在 scripts.typecheck、scripts.check 或 scripts/typecheck.mjs 回退。",
         )
 
     def _config(self, *, job_id: str, store) -> BuildValidationConfig:
@@ -1102,22 +1102,22 @@ class BuildValidationRunner:
 
     def _decision_for_observation(self, observation: StageObservation) -> str:
         if observation.status == "pass":
-            return f"Sandbox {observation.review_type} validation passed on attempt {observation.attempt}."
+            return f"沙箱 {observation.review_type} 验证在第 {observation.attempt} 次尝试时通过。"
         if observation.status == "best_effort":
-            detail = observation.limitations[0] if observation.limitations else "validation command was unavailable"
-            return f"Sandbox {observation.review_type} validation recorded as best-effort: {detail}"
+            detail = observation.limitations[0] if observation.limitations else "验证命令不可用"
+            return f"Sandbox {observation.review_type} 验证记录为尽力而为：{detail}"
         result = observation.result
         if result is None:
-            detail = observation.plan.missing_reason or "validation command was unavailable"
-            return f"Sandbox {observation.review_type} validation failed with {observation.failure_class}: {detail}"
-        detail = result.denied_reason or result.stderr or result.stdout or "sandbox command failed"
-        return f"Sandbox {observation.review_type} validation failed with {result.failure_class}: {detail}"
+            detail = observation.plan.missing_reason or "验证命令不可用"
+            return f"Sandbox {observation.review_type} 验证失败，失败类型为 {observation.failure_class}：{detail}"
+        detail = result.denied_reason or result.stderr or result.stdout or "sandbox 命令失败"
+        return f"Sandbox {observation.review_type} 验证失败，失败类型为 {result.failure_class}：{detail}"
 
     def _decision_for_result(self, *, phase: BuildPhase, status: RunStatus, result: SandboxResult) -> str:
         if status == "pass":
-            return f"Sandbox {phase} phase passed."
-        detail = result.denied_reason or result.stderr or result.stdout or "sandbox command failed"
-        return f"Sandbox {phase} phase failed with {result.failure_class}: {detail}"
+            return f"Sandbox {phase} 阶段已通过。"
+        detail = result.denied_reason or result.stderr or result.stdout or "sandbox 命令失败"
+        return f"Sandbox {phase} 阶段失败，失败类型为 {result.failure_class}：{detail}"
 
     def _repair_evidence_refs(
         self,
@@ -1129,7 +1129,7 @@ class BuildValidationRunner:
         return [
             EvidenceRef(
                 artifact_id=artifact_id,
-                label="Build validation failure evidence",
+                label="构建验证失败证据",
                 locator="artifact:generated_project",
                 excerpt=excerpt,
             )
@@ -1470,13 +1470,13 @@ class BuildValidationRunner:
             evidence_refs=[
                 EvidenceRef(
                     artifact_id=build_artifact.id,
-                    label=f"Structured sandbox {review_type} artifact",
+                    label=f"structured Sandbox {review_type} Artifact",
                     locator="artifact:build_artifact",
                     excerpt=decision[:240],
                 ),
                 EvidenceRef(
                     artifact_id=log_artifact.id,
-                    label=f"Sandbox {review_type} log",
+                    label=f"沙箱 {review_type} 日志",
                     locator="artifact:build_log",
                     excerpt=decision[:240],
                 )

@@ -19,7 +19,7 @@ from .utils import list_value, mapping, string_list
 
 
 class StaticKnowledgeRetriever:
-    """Deterministic knowledge retrieval for core, current-job, and historical evidence."""
+    """面向 Core、当前任务和历史证据执行确定性知识检索。"""
 
     def retrieve(
         self,
@@ -53,9 +53,9 @@ class StaticKnowledgeRetriever:
                 KnowledgeHit(
                     id="knowledge_minimal_input",
                     category="input_limitation",
-                    label="Limited build evidence",
+                    label="构建证据有限",
                     locator="knowledge:input_limitation/minimal",
-                    excerpt="Missing entry, source map, export, runtime, or validation evidence should lower Agent confidence.",
+                    excerpt="缺少入口、source map、导出、runtime 或验证证据时，应降低 Agent 置信度。",
                     confidence=0.55,
                     source_kinds=["input_inventory", "ast_index"],
                 )
@@ -92,9 +92,9 @@ class StaticKnowledgeRetriever:
                 for hit in hits
             ],
             "limitations": [
-                "Retriever emits deterministic local knowledge hints from Core, current-job, and same-project historical artifacts.",
-                "Current-job validation and repair artifacts are used only when they already exist before Agent planning.",
-                "Historical repair cases are limited to same-project evidence and remain evidence references only.",
-                "Knowledge hits are evidence references and do not override current input artifacts.",
+                "检索器根据 Core、当前 Job 和同 project 历史 Artifact 生成确定性的本地知识线索。",
+                "只有在 Agent planning 前已经存在时，才会使用当前 Job 的 validation 和 repair Artifact。",
+                "历史修复案例仅限同项目证据，并且只作为证据引用。",
+                "知识命中属于 evidence ref，不会覆盖当前 input Artifact。",
             ],
         }

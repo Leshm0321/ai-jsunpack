@@ -17,13 +17,14 @@ class SharedContractAlignmentTest(unittest.TestCase):
         npm = shutil.which("npm")
         node = shutil.which("node")
         if npm is None or node is None:
-            raise unittest.SkipTest("npm and node are required for cross-language contract checks")
+            raise unittest.SkipTest("跨语言契约检查需要 npm 和 node")
 
         subprocess.run(
             [npm, "run", "build", "--workspace", "@ai-jsunpack/shared"],
             cwd=ROOT,
             check=True,
             capture_output=True,
+            encoding="utf-8",
             text=True,
         )
         script = """
@@ -44,6 +45,7 @@ class SharedContractAlignmentTest(unittest.TestCase):
             cwd=ROOT,
             check=True,
             capture_output=True,
+            encoding="utf-8",
             text=True,
         )
         cls.contract = json.loads(result.stdout)

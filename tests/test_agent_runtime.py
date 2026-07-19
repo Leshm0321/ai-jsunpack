@@ -46,6 +46,13 @@ from packages.knowledge import StaticKnowledgeRetriever
 
 
 class AgentRuntimePolicyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_environment = os.environ.copy()
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._original_environment)
+
     def _request(self, *, cloud_mode: str, config: dict | None = None) -> AgentRuntimeRequest:
         return AgentRuntimeRequest(
             job_id="job_policy",
@@ -146,9 +153,9 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
     def test_cloud_policy_rejects_private_and_credentialed_endpoints(self):
         for base_url, expected in (
-            ("https://127.0.0.1:11434/v1", "private"),
-            ("https://user:secret@agent.example.test/v1", "credentials"),
-            ("file:///tmp/model", "http or https"),
+            ("https://127.0.0.1:11434/v1", "私有"),
+            ("https://user:secret@agent.example.test/v1", "凭据"),
+            ("file:///tmp/model", "http 或 https"),
         ):
             with self.subTest(base_url=base_url), patch.dict(
                 os.environ,
@@ -182,7 +189,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             )
 
         self.assertFalse(policy.allowed)
-        self.assertIn("must use https", policy.denial_reason or "")
+        self.assertIn("必须使用 https", policy.denial_reason or "")
 
     def test_invalid_timeout_and_temperature_fall_back_to_safe_defaults(self):
         with patch.dict(
@@ -283,9 +290,9 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         crewai_entry = next(entry for entry in entries if entry.tool_name == "crewai.agent_pass")
 
         self.assertEqual(crewai_entry.category, "model")
-        self.assertIn("stateful", crewai_entry.description)
-        self.assertNotIn("not parallel-safe", crewai_entry.description)
-        self.assertIn("isolated child process", crewai_entry.description)
+        self.assertIn("有状态", crewai_entry.description)
+        self.assertNotIn("不支持安全并行", crewai_entry.description)
+        self.assertIn("隔离的子进程", crewai_entry.description)
         self.assertIn("model_call", crewai_entry.description)
         self.assertIn("isolated_crewai_storage", crewai_entry.description)
         self.assertIn("child_process", crewai_entry.description)
@@ -411,7 +418,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             messages = server.requests[0]["body"]["messages"]
             self.assertEqual(messages[0]["role"], "system")
             self.assertIn("JSON Schema", messages[0]["content"])
-            self.assertIn('type exactly equal to one of: "naming"', messages[0]["content"])
+            self.assertIn('type 必须严格等于以下值之一："naming"', messages[0]["content"])
             self.assertEqual(messages[1], {"role": "user", "content": "hello"})
             self.assertEqual(result.inferences[0].type, "naming")
         finally:
@@ -455,7 +462,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             timeout_seconds=0.1,
         )
 
-        with self.assertRaisesRegex(OpenAICompatibleLLMError, "request failed|timed out"):
+        with self.assertRaisesRegex(OpenAICompatibleLLMError, "请求失败|超时"):
             llm.call("hello")
 
     def test_backend_failure_cache_is_agent_scoped_and_expires(self):
@@ -506,9 +513,9 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             output_kind="inference_record",
             allow_parallel=False,
         )
-        with self.assertRaisesRegex(Exception, "missing agent"):
+        with self.assertRaisesRegex(Exception, "依赖不存在的 Agent"):
             planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["Missing"]})])
-        with self.assertRaisesRegex(Exception, "earlier stage"):
+        with self.assertRaisesRegex(Exception, "更早的阶段"):
             planner.build_stage_order([base, CrewAgentSpec(**{**base.__dict__, "name": "Other", "dependencies": ["AnalysisAgent"]})])
 
     def test_role_contract_rejects_cross_role_fields_and_rebinds_agent_identity(self):
@@ -527,7 +534,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         )
 
         self.assertEqual(validated.inferences[0].agent_name, "NamingAgent")
-        with self.assertRaisesRegex(Exception, "outside this role contract"):
+        with self.assertRaisesRegex(Exception, "超出此角色契约范围"):
             validate_crew_output_for_agent(
                 "NamingAgent",
                 {"inferences": [{"type": "framework", "confidence": 0.8}]},
@@ -859,7 +866,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(trimmed["dependencyOutputs"], prompt["dependencyOutputs"])
         self.assertEqual(trimmed["evidenceRefs"][0]["locator"], "file:assets/app.js")
         self.assertNotIn("historical_repair_case", json.dumps(trimmed))
-        self.assertEqual(trimmed["memory"], "[omitted by context budget]")
+        self.assertEqual(trimmed["memory"], "[因上下文预算限制而省略]")
         self.assertGreater(audit["omissions"]["evidenceExcerpts"], 0)
         self.assertEqual(audit["estimateMethod"], "ceil_utf8_bytes_div_4")
 
@@ -983,7 +990,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             all(worker_count == 1 for worker_count in aggregate.call_args.kwargs["stage_worker_counts"].values())
         )
         specialist_stage = next(stage for stage in stages if stage.stage == "specialists")
-        self.assertTrue(any("serially" in note for note in specialist_stage.notes))
+        self.assertTrue(any("串行" in note for note in specialist_stage.notes))
         stage_plan = manager._stage_plan(
             stages,
             stage_worker_counts=aggregate.call_args.kwargs["stage_worker_counts"],
@@ -1041,7 +1048,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(draft.tool_failure_class, "resource_limit")
         self.assertEqual(draft.runtime_diagnoses[0].failure_class, "resource_limit")
         self.assertEqual(draft.repair_instructions[0].failure_class, "resource_limit")
-        self.assertIn("including 0 parallel group(s)", draft.message)
+        self.assertIn("包含 0 个并行组", draft.message)
 
         failed_review_without_failure_class = replace(review, failure_class="none")
         failed_execution_without_failure_class = replace(
@@ -1837,7 +1844,7 @@ class AgentRuntimePolicyTest(unittest.TestCase):
                 self.assertEqual(feedback["lowRiskRepairInstructions"][0]["artifactId"], low_risk_repair.id)
                 self.assertEqual(feedback["lowRiskRepairInstructions"][0]["actionCount"], 1)
                 self.assertEqual(feedback["auditOnlyRepairInstructions"][0]["artifactId"], high_risk_repair.id)
-                self.assertIn("Agent Review/Fix feedback was read", plan_payload["limitations"][0])
+                self.assertIn("Agent Review/Fix 反馈已作为确定性 writer 输入读取", plan_payload["limitations"][0])
             finally:
                 store.close()
 

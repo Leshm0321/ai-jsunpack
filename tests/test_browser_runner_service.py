@@ -227,7 +227,7 @@ class BrowserRunnerServiceTest(unittest.TestCase):
                     self.assertEqual(summary.status, "best_effort")
                     self.assertIsNotNone(summary.result)
                     self.assertEqual(adapter.requests, [])
-                    self.assertIn("Unsafe source archive member path", summary.result.page_errors[0])
+                    self.assertIn("源归档成员路径不安全", summary.result.page_errors[0])
                     self.assertEqual(summary.attempt, 1)
                     queue.close()
 
@@ -433,7 +433,7 @@ class BrowserRunnerServiceTest(unittest.TestCase):
             if payload["status"] in {"pass", "fail", "best_effort"}:
                 return payload
             time.sleep(0.02)
-        self.fail("Browser run did not complete")
+        self.fail("浏览器运行未完成")
 
     def _request(self, job_id: str) -> BrowserRunRequest:
         return BrowserRunRequest(
@@ -453,7 +453,7 @@ class BrowserRunnerServiceTest(unittest.TestCase):
             if summary and summary.status in {"pass", "fail", "best_effort"}:
                 return summary
             time.sleep(0.02)
-        self.fail("Browser run did not complete")
+        self.fail("浏览器运行未完成")
 
     def _source_archive(self, *, member_path: str = "index.html", entry_path: str = "index.html"):
         import io

@@ -37,8 +37,8 @@ class ReleaseReadinessConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> ReleaseReadinessConfig:
-    parser = argparse.ArgumentParser(description="Check local readiness for a real production release archive run.")
-    parser.add_argument("--repository", default="", help="GitHub repository in owner/name form. Defaults to git remote.")
+    parser = argparse.ArgumentParser(description="检查本地环境是否已准备好执行真实的生产发布归档。")
+    parser.add_argument("--repository", default="", help="owner/name 格式的 GitHub 仓库；默认从 git remote 获取。")
     parser.add_argument("--secret-environment", default="production")
     parser.add_argument("--workflow-path", type=Path, default=DEFAULT_WORKFLOW)
     parser.add_argument("--output", dest="output_path", type=Path, default=DEFAULT_OUTPUT)
@@ -100,7 +100,7 @@ def run_release_readiness(
             checks,
             "release_gate_workflow_visible",
             False,
-            evidence={"reason": "requires github_repository_known and github_cli_authenticated"},
+            evidence={"reason": "需要 github_repository_known 和 github_cli_authenticated"},
         )
         blockers.append("release_gate_workflow_visible")
 
@@ -111,7 +111,7 @@ def run_release_readiness(
             blockers.append("docker_daemon_available")
     else:
         add_check(checks, "docker_daemon_available", True, evidence={"skipped": True, "reason": "--skip-docker"})
-        warnings.append("docker_daemon_available skipped by configuration")
+        warnings.append("配置要求跳过 docker_daemon_available")
 
     report: dict[str, Any] = {
         "kind": "production_release_readiness_report",
@@ -208,17 +208,17 @@ def next_actions(blockers: list[str]) -> list[str]:
     actions = []
     blocker_set = set(blockers)
     if "github_repository_known" in blocker_set:
-        actions.append("Configure git remote origin or pass --repository <owner/repo>.")
+        actions.append("配置 git remote origin，或传入 --repository <owner/repo>。")
     if "github_cli_authenticated" in blocker_set:
-        actions.append("Authenticate GitHub CLI or provide GH_TOKEN before triggering the real workflow.")
+        actions.append("触发真实工作流前，请完成 GitHub CLI 身份验证或提供 GH_TOKEN。")
     if "docker_daemon_available" in blocker_set:
-        actions.append("Start Docker daemon on the release runner so image build/push can run.")
+        actions.append("在 release runner 上启动 Docker daemon，以便执行 image build/push。")
     if "release_gate_workflow_visible" in blocker_set:
-        actions.append("Confirm .github/workflows/release-gate.yml is available in the target GitHub repository.")
+        actions.append("确认目标 GitHub 仓库中存在 .github/workflows/release-gate.yml。")
     if "workflow_file_present" in blocker_set:
-        actions.append("Restore .github/workflows/release-gate.yml before release.")
+        actions.append("发布前恢复 .github/workflows/release-gate.yml。")
     if not actions:
-        actions.append("Trigger release-gate workflow with secret_environment=production and push_images=true.")
+        actions.append("使用 secret_environment=production 和 push_images=true 触发 release-gate workflow。")
     return actions
 
 

@@ -46,7 +46,7 @@ class ComposeSmokeConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> ComposeSmokeConfig:
-    parser = argparse.ArgumentParser(description="Run a docker compose deployment smoke rehearsal.")
+    parser = argparse.ArgumentParser(description="运行 docker compose 部署冒烟演练。")
     parser.add_argument("--output", dest="output_path", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
     parser.add_argument("--deployment-smoke-output", type=Path, default=DEFAULT_DEPLOYMENT_SMOKE_OUTPUT)
@@ -217,7 +217,7 @@ def run_compose(
         },
     )
     if check and not passed:
-        raise RuntimeError(f"{check_name} failed with exit code {result.returncode}")
+        raise RuntimeError(f"{check_name} 失败，退出码为 {result.returncode}")
     return result
 
 
@@ -236,7 +236,7 @@ def wait_for_services(config: ComposeSmokeConfig, checks: list[dict[str, Any]]) 
             return latest
         time.sleep(2)
     add_check(checks, "compose_services_healthy", False, evidence=latest)
-    raise TimeoutError("Timed out waiting for compose services to become healthy.")
+    raise TimeoutError("等待 compose 服务进入健康状态时超时。")
 
 
 def compose_ps(config: ComposeSmokeConfig) -> dict[str, Any]:

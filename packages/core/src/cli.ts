@@ -47,7 +47,7 @@ function parseArgs(args: string[]): CliOptions {
 
 function usage(): string {
   return [
-    "Usage:",
+    "用法：",
     "  node packages/core/dist/cli.js analyze <inputPath> --job-id <jobId>",
     "  node packages/core/dist/cli.js reconstruct <inputPath> --job-id <jobId> --output-dir <dir> [--agent-feedback-file <json>]"
   ].join("\n");
@@ -159,7 +159,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : "Unknown core CLI error";
+  const message = error instanceof Error ? error.message : "未知的 Core CLI 错误";
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
 });

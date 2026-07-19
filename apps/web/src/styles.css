@@ -2474,7 +2474,7 @@ button.graph-node:focus-visible {
   font-size: 11px;
 }
 
-/* Modern technical workbench theme */
+/* 现代技术工作台主题 */
 :root {
   color-scheme: dark;
   color: #e5eefb;
@@ -3065,7 +3065,7 @@ button:focus-visible,
   }
 }
 
-/* Routed application shell */
+/* 路由应用外壳 */
 .application-frame {
   height: 100dvh;
   min-height: 640px;
@@ -3577,7 +3577,7 @@ button:focus-visible,
   background: #ffffff;
 }
 
-/* Settings center */
+/* 设置中心 */
 .settings-page-heading {
   align-items: center;
 }
@@ -3999,7 +3999,7 @@ button:focus-visible,
   }
 }
 
-/* Apple-inspired light product system: final theme authority */
+/* 苹果风格浅色产品系统：最终主题定义 */
 :root {
   color-scheme: light;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -4079,7 +4079,7 @@ pre,
   background-image: none;
 }
 
-/* One header language across marketing, workbench, and settings. */
+/* 营销页、工作台和设置页使用统一的页头视觉语言。 */
 .topbar,
 .site-header,
 .application-topbar {
@@ -4168,7 +4168,7 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
-/* Marketing surfaces */
+/* 营销界面 */
 .site-main {
   width: min(100%, 1344px);
   max-width: none;
@@ -4260,7 +4260,7 @@ textarea:focus-visible {
   color: var(--muted);
 }
 
-/* Shared product controls and surfaces */
+/* 共享产品控件与界面 */
 .primary-action {
   color: #ffffff;
   border-color: #0071e3;
@@ -4452,7 +4452,7 @@ textarea:focus-visible {
   border-bottom-color: rgba(0, 0, 0, 0.08);
 }
 
-/* Routed shell */
+/* 路由外壳 */
 .application-frame {
   height: 100dvh;
 }
@@ -4542,7 +4542,7 @@ textarea:focus-visible {
   background: #ffffff;
 }
 
-/* Semantic state colors stay restrained and readable on light surfaces. */
+/* 语义状态色在浅色界面中保持克制且清晰可读。 */
 .pipeline-status,
 .status-token-pass,
 .runtime-pass,
@@ -4583,7 +4583,7 @@ textarea:focus-visible {
   background: #edf8ef;
 }
 
-/* Technical canvases intentionally remain dark for source inspection. */
+/* 技术画布特意保持深色，便于检查源码。 */
 .visual-terminal,
 .browser-frame,
 .code-preview,
@@ -4647,7 +4647,7 @@ textarea:focus-visible {
   fill: rgba(100, 181, 246, 0.82);
 }
 
-/* Responsive contracts: 1024, 768, and 375 are first-class viewports. */
+/* 响应式约定：1024、768 和 375 是一级视口。 */
 @media (max-width: 1199px) {
   .site-main {
     padding-right: 24px;

@@ -52,12 +52,12 @@ export function sanitizeAuditFilters(value: Record<string, unknown>): AuditFilte
   };
 }
 
-export function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[] {
+export function buildAuditRecords(evidence: JobEvidence, t: (key: string) => string): NormalizedAuditRecord[] {
   return [
     ...evidence.inferenceRecords.map((record) => ({
       artifactIds: [...record.inputArtifactIds, ...record.outputArtifactIds],
       category: "inference" as const,
-      detail: `confidence ${formatPercent(record.confidence)} / ${record.validationStatus}`,
+      detail: `${t("workbench.agents.confidence")} ${formatPercent(record.confidence)} / ${record.validationStatus}`,
       evidenceRefs: record.evidenceRefs,
       failureClass: "none",
       id: record.id,
@@ -75,7 +75,7 @@ export function buildAuditRecords(evidence: JobEvidence): NormalizedAuditRecord[
       failureClass: run.failureClass,
       id: run.id,
       label: run.reviewType,
-      secondary: `attempt ${run.attempt}`,
+      secondary: `${t("graph.detail.attempt")} ${run.attempt}`,
       status: run.status
     })),
     ...evidence.toolCalls.map((call) => ({
@@ -101,25 +101,25 @@ export function auditFilterLabel(filters: AuditFilterState, t: (key: string) => 
   return parts.join(" / ");
 }
 
-export function groupAuditRecordsByRisk(records: NormalizedAuditRecord[]): AuditRiskGroup[] {
+export function groupAuditRecordsByRisk(records: NormalizedAuditRecord[], t: (key: string) => string): AuditRiskGroup[] {
   const groups: AuditRiskGroup[] = [
     {
-      detail: "non-none failure classes or failing decisions",
+      detail: t("audit.group.blockingDetail"),
       id: "blocking",
       records: [],
-      title: "Blocking risk"
+      title: t("audit.group.blocking")
     },
     {
-      detail: "best-effort, retry, unverified, or needs-review records",
+      detail: t("audit.group.reviewDetail"),
       id: "review",
       records: [],
-      title: "Needs review"
+      title: t("audit.group.review")
     },
     {
-      detail: "accepted or passing records",
+      detail: t("audit.group.passingDetail"),
       id: "passing",
       records: [],
-      title: "Passing evidence"
+      title: t("audit.group.passing")
     }
   ];
   const groupsById = new Map(groups.map((group) => [group.id, group]));

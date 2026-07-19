@@ -435,9 +435,9 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
     const inventory = await buildInputInventory(rootDir);
     if (sourceKind === "single_script") {
       inventory.isSingleBundle = inventory.scripts.length === 1;
-      inventory.warnings.unshift("Input single_script file was wrapped in a verified temporary static host page.");
+      inventory.warnings.unshift("输入的 single_script 文件已封装到经过验证的临时静态宿主页中。");
     } else if (sourceKind && sourceKind !== "directory") {
-      inventory.warnings.unshift(`Input ${sourceKind} archive was extracted into a verified temporary workspace.`);
+      inventory.warnings.unshift(`输入的 ${sourceKind} 归档已解压到经过验证的临时 workspace。`);
     }
     const sourceMapAnalysis = await analyzeSourceMaps(rootDir, inventory);
     if (sourceMapAnalysis.warnings.length > 0) {
@@ -482,7 +482,7 @@ export async function normalizeInputPackage(inputPath: string): Promise<Normaliz
   }
 
   if (!stat.isFile()) {
-    throw new Error(`Input path must be a directory, supported archive, or JavaScript file: ${inputPath}`);
+    throw new Error(`输入路径必须是目录、受支持的归档或 JavaScript 文件：${inputPath}`);
   }
 
   const sourceKind = archiveKindForPath(sourcePath);
@@ -490,7 +490,7 @@ export async function normalizeInputPackage(inputPath: string): Promise<Normaliz
     if (isSupportedSingleScriptPath(sourcePath)) {
       return normalizeSingleScriptInput(sourcePath);
     }
-    throw new Error(`Unsupported input file type. Expected a directory, .js, .mjs, .cjs, .zip, .tar, .tar.gz, or .tgz: ${inputPath}`);
+    throw new Error(`不支持的输入文件类型。预期为目录、.js、.mjs、.cjs、.zip、.tar、.tar.gz 或 .tgz：${inputPath}`);
   }
 
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-input-"));
@@ -590,10 +590,10 @@ export async function buildInputInventory(rootDir: string): Promise<InputInvento
   const warnings: string[] = [];
 
   if (entries.length === 0) {
-    warnings.push("No HTML entry found; a minimal host page will be required for browser validation.");
+    warnings.push("未找到 HTML 入口；浏览器验证需要一个最小宿主页。");
   }
   if (scripts.length === 0) {
-    warnings.push("No JavaScript bundle found.");
+    warnings.push("未找到 JavaScript bundle。");
   }
   if (missingReferences.length > 0) {
     warnings.push(formatMissingHtmlReferenceWarning(missingReferences));
@@ -669,7 +669,7 @@ export async function buildAstIndexForFile(filePath: string, rootDir = path.dirn
       }
     });
   } catch (error) {
-    warnings.push(error instanceof Error ? error.message : "Unknown Babel parse error.");
+    warnings.push(error instanceof Error ? error.message : "未知的 Babel 解析错误。");
   }
 
   return {
@@ -779,7 +779,7 @@ async function analyzeDependencyPlaceholders(
         resolvedPath: null,
         reason: "unsafe_relative_dependency",
         status: "unsupported",
-        limitation: "The dependency resolves outside the normalized input root or uses an unsafe path and was not written."
+        limitation: "依赖解析到了规范化输入根目录之外，或使用了不安全路径，因此未写入。"
       });
       continue;
     }
@@ -793,7 +793,7 @@ async function analyzeDependencyPlaceholders(
         resolvedPath: null,
         reason: "unsafe_relative_dependency",
         status: "unsupported",
-        limitation: "The dependency path could not be normalized safely and was not written."
+        limitation: "无法安全规范化依赖路径，因此未写入。"
       });
       continue;
     }
@@ -816,7 +816,7 @@ async function analyzeDependencyPlaceholders(
         resolvedPath: safeResolvedPath,
         reason: "dependency_path_conflict",
         status: "unsupported",
-        limitation: "The dependency path exists but is not a regular file, so no placeholder was written."
+        limitation: "依赖路径存在但不是常规文件，因此未写入占位模块。"
       });
       continue;
     }
@@ -825,7 +825,7 @@ async function analyzeDependencyPlaceholders(
       resolvedPath: safeResolvedPath,
       reason: "missing_static_relative_dependency",
       status: "generated",
-      limitation: "Load-only continuity is provided; the dependency's semantic behavior is unavailable and generated exports throw when called."
+      limitation: "仅提供加载连续性；依赖的语义行为不可用，生成的导出在调用时会抛出异常。"
     });
   }
 
@@ -1019,10 +1019,10 @@ export function buildGraphAnalysis(
   }
 
   if (inventory.entries.length === 0 && inventory.scripts.length > 0) {
-    warnings.push("No HTML entry was available; chunk graph uses scripts as candidate roots.");
+    warnings.push("没有可用的 HTML 入口；chunk graph 将脚本作为候选根节点。");
   }
   if (sourceMapAnalysis.bundleCount === 0) {
-    warnings.push("No source maps were available; module candidates are limited to imports and AST symbols.");
+    warnings.push("没有可用的 source map；模块候选仅限导入和 AST 符号。");
   }
 
   return {
@@ -1035,7 +1035,7 @@ export function buildGraphAnalysis(
     resourceGraph: {
       nodes: [...resourceNodes.values()].sort(compareGraphNode),
       edges: [...resourceEdges.values()].sort(compareGraphEdge),
-      warnings: inventory.assets.length === 0 && inventory.styles.length === 0 ? ["No referenced styles or assets were found."] : []
+      warnings: inventory.assets.length === 0 && inventory.styles.length === 0 ? ["未找到引用的样式或资源。"] : []
     },
     moduleCandidateGraph: {
       nodes: [...moduleNodes.values()].sort(compareGraphNode),
@@ -1076,7 +1076,7 @@ async function buildModuleRecoveryAnalysis(
         confidence: 0.95,
         riskLevel: "low",
         sourcePath: recoveredSource.candidatePath,
-        detail: `Recovered module candidate from sourcesContent in ${bundleAnalysis.sourceMapPath}.`,
+        detail: `已从 ${bundleAnalysis.sourceMapPath} 的 sourcesContent 中恢复模块候选。`,
         evidenceRefs: [`source_map:${bundleAnalysis.sourceMapPath}`, `script:${bundleAnalysis.bundlePath}`]
       });
       generatedModules.push({
@@ -1098,7 +1098,7 @@ async function buildModuleRecoveryAnalysis(
     try {
       source = await fs.readFile(scriptPath, "utf8");
     } catch (error) {
-      warnings.push(`Failed to read script ${astIndex.filePath} for module recovery: ${error instanceof Error ? error.message : "Unknown error"}`);
+      warnings.push(`为恢复模块读取脚本 ${astIndex.filePath} 失败：${error instanceof Error ? error.message : "未知错误"}`);
       continue;
     }
 
@@ -1111,7 +1111,7 @@ async function buildModuleRecoveryAnalysis(
         tokens: true
       });
     } catch (error) {
-      warnings.push(`Failed to parse script ${astIndex.filePath} for module recovery: ${error instanceof Error ? error.message : "Unknown Babel parse error"}`);
+      warnings.push(`为恢复模块解析脚本 ${astIndex.filePath} 失败：${error instanceof Error ? error.message : "未知的 Babel 解析错误"}`);
       continue;
     }
 
@@ -1135,10 +1135,10 @@ async function buildModuleRecoveryAnalysis(
   }
 
   if (runtimeWrappers.length === 0 && astIndexes.length > 0) {
-    warnings.push("No explicit bundle runtime wrapper was detected; recovery is limited to source maps, ESM syntax, and script metadata.");
+    warnings.push("未检测到明确的 bundle runtime wrapper；恢复范围仅限 source map、ESM 语法和脚本元数据。");
   }
   if (moduleBoundaries.length === 0 && astIndexes.length > 0) {
-    warnings.push("No module boundary candidates were detected; generated modules are metadata-only.");
+    warnings.push("未检测到模块边界候选；生成模块仅包含元数据。");
   }
 
   return {
@@ -1192,7 +1192,7 @@ function collectRuntimeWrapperCandidates(
       loc: formatNodeLoc(firstStatement),
       sourceRange: formatSourceRange(firstStatement),
       astPath: "Program.body[0]",
-      detail: "Top-level call expression marks a bundle bootstrap or IIFE wrapper candidate.",
+      detail: "顶层调用表达式标记了 bundle bootstrap 或 IIFE wrapper 候选。",
       evidenceRefs: [`script:${filePath}`]
     });
   }
@@ -1207,18 +1207,18 @@ function collectRuntimeWrapperCandidates(
       loc: formatNodeLoc(ast.program.body[0]),
       sourceRange: formatSourceRange(ast.program.body[0]),
       astPath: "Program.body[0]",
-      detail: "Single top-level function marks a deferred wrapper candidate.",
+      detail: "单个顶层函数标记了 deferred wrapper 候选。",
       evidenceRefs: [`script:${filePath}`]
     });
   }
   if (source.includes("typeof exports") && source.includes("define.amd")) {
-    candidates.push(markerRuntimeWrapper(filePath, "umd", "umd_factory_wrapper", source, "CommonJS/AMD/global branches indicate a UMD factory wrapper."));
+    candidates.push(markerRuntimeWrapper(filePath, "umd", "umd_factory_wrapper", source, "CommonJS/AMD/全局分支表明存在 UMD factory wrapper。"));
   }
   if (source.includes("__webpack_require__")) {
-    candidates.push(markerRuntimeWrapper(filePath, "webpack", "webpack_bootstrap", source, "Webpack runtime marker __webpack_require__ indicates a bootstrap wrapper."));
+    candidates.push(markerRuntimeWrapper(filePath, "webpack", "webpack_bootstrap", source, "Webpack runtime 标记 __webpack_require__ 表明存在 bootstrap wrapper。"));
   }
   if (source.includes("System.register")) {
-    candidates.push(markerRuntimeWrapper(filePath, "systemjs", "system_register_wrapper", source, "System.register call indicates a SystemJS module wrapper."));
+    candidates.push(markerRuntimeWrapper(filePath, "systemjs", "system_register_wrapper", source, "System.register 调用表明存在 SystemJS module wrapper。"));
   }
   return dedupeById(candidates);
 }
@@ -1267,7 +1267,7 @@ function collectRuntimeModuleBoundaryCandidates(
           loc: formatNodeLoc(property),
           sourceRange: formatSourceRange(property),
           astPath: formatAstPath(path),
-          detail: `Function-valued module table property ${moduleId} marks a bundled module boundary candidate.`,
+          detail: `函数值模块表属性 ${moduleId} 标记了 bundle 模块边界候选。`,
           evidenceRefs: [`script:${filePath}`, `runtime:${primaryRuntime}`]
         });
       }
@@ -1295,19 +1295,19 @@ function collectRuntimeModuleBoundaryCandidates(
           loc: formatNodeLoc(element),
           sourceRange: formatSourceRange(element),
           astPath: formatAstPath(path),
-          detail: `Function-valued module table array element ${index} marks a bundled module boundary candidate.`,
+          detail: `函数值模块表数组元素 ${index} 标记了 bundle 模块边界候选。`,
           evidenceRefs: [`script:${filePath}`, `runtime:${primaryRuntime}`]
         });
       });
     },
     ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
-      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, `Static import ${path.node.source.value} marks this script as an ESM module candidate.`));
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, `静态导入 ${path.node.source.value} 将此脚本标记为 ESM 模块候选。`));
     },
     ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
-      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "Named export marks this script as an ESM module candidate."));
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "命名导出将此脚本标记为 ESM 模块候选。"));
     },
     ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
-      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "Default export marks this script as an ESM module candidate."));
+      candidates.push(staticModuleBoundary(filePath, primaryRuntime, path, "默认导出将此脚本标记为 ESM 模块候选。"));
     },
     CallExpression(path: NodePath<t.CallExpression>) {
       if (t.isMemberExpression(path.node.callee) && memberExpressionName(path.node.callee) === "System.register") {
@@ -1322,7 +1322,7 @@ function collectRuntimeModuleBoundaryCandidates(
           loc: formatNodeLoc(path.node),
           sourceRange: formatSourceRange(path.node),
           astPath: formatAstPath(path),
-          detail: "System.register call marks a SystemJS module boundary candidate.",
+          detail: "System.register 调用标记了 SystemJS 模块边界候选。",
           evidenceRefs: [`script:${filePath}`, "runtime:systemjs"]
         });
       }
@@ -1338,7 +1338,7 @@ function collectRuntimeModuleBoundaryCandidates(
       runtimeKind: primaryRuntime,
       confidence: 0.5,
       riskLevel: "medium",
-      detail: "Single JavaScript bundle without an HTML entry is preserved as one best-effort module boundary.",
+      detail: "没有 HTML 入口的单个 JavaScript bundle 将作为一个尽力保留的模块边界。",
       evidenceRefs: [`script:${filePath}`]
     });
   }
@@ -1361,7 +1361,7 @@ function collectImportExportCandidates(
         candidates.push(importExportCandidate(filePath, "static_import", path, {
           source: path.node.source.value,
           runtimeKind: primaryRuntime,
-          detail: `Side-effect static import from ${path.node.source.value}.`
+          detail: `来自 ${path.node.source.value} 的副作用静态导入。`
         }));
         return;
       }
@@ -1370,7 +1370,7 @@ function collectImportExportCandidates(
           source: path.node.source.value,
           importedName: importSpecifierName(specifier),
           runtimeKind: primaryRuntime,
-          detail: `Static import candidate from ${path.node.source.value}.`
+          detail: `来自 ${path.node.source.value} 的静态导入候选。`
         }));
       }
     },
@@ -1381,7 +1381,7 @@ function collectImportExportCandidates(
           source: path.node.source?.value,
           exportedName: declarationExportName(path.node.declaration),
           runtimeKind: primaryRuntime,
-          detail: "Named export declaration candidate."
+          detail: "命名导出声明候选。"
         }));
         return;
       }
@@ -1390,7 +1390,7 @@ function collectImportExportCandidates(
           source: path.node.source?.value,
           exportedName: exportSpecifierName(specifier),
           runtimeKind: primaryRuntime,
-          detail: path.node.source?.value ? `Re-export candidate from ${path.node.source.value}.` : "Named export specifier candidate."
+          detail: path.node.source?.value ? `来自 ${path.node.source.value} 的再导出候选。` : "命名导出说明符候选。"
         }));
       }
     },
@@ -1398,7 +1398,7 @@ function collectImportExportCandidates(
       candidates.push(importExportCandidate(filePath, "default_export", path, {
         exportedName: "default",
         runtimeKind: primaryRuntime,
-        detail: "Default export candidate."
+        detail: "默认导出候选。"
       }));
     },
     CallExpression(path: NodePath<t.CallExpression>) {
@@ -1406,21 +1406,21 @@ function collectImportExportCandidates(
         candidates.push(importExportCandidate(filePath, "dynamic_import", path, {
           source: path.node.arguments[0].value,
           runtimeKind: primaryRuntime,
-          detail: `Dynamic import candidate from ${path.node.arguments[0].value}.`
+          detail: `来自 ${path.node.arguments[0].value} 的动态导入候选。`
         }));
       }
       if (t.isIdentifier(path.node.callee, { name: "require" }) && t.isStringLiteral(path.node.arguments[0])) {
         candidates.push(importExportCandidate(filePath, "runtime_dependency", path, {
           source: path.node.arguments[0].value,
           runtimeKind: "commonjs",
-          detail: `CommonJS require dependency candidate from ${path.node.arguments[0].value}.`
+          detail: `来自 ${path.node.arguments[0].value} 的 CommonJS require 依赖候选。`
         }));
       }
       if (t.isIdentifier(path.node.callee, { name: "__webpack_require__" }) && path.node.arguments.length > 0) {
         candidates.push(importExportCandidate(filePath, "runtime_dependency", path, {
           source: codeForNode(path.node.arguments[0] as t.Node),
           runtimeKind: "webpack",
-          detail: "Webpack runtime dependency candidate."
+          detail: "Webpack runtime 依赖候选。"
         }));
       }
     },
@@ -1429,7 +1429,7 @@ function collectImportExportCandidates(
         candidates.push(importExportCandidate(filePath, "commonjs_export", path, {
           exportedName: commonJsExportName(path.node.left),
           runtimeKind: "commonjs",
-          detail: "CommonJS export assignment candidate."
+          detail: "CommonJS 导出赋值候选。"
         }));
       }
     }
@@ -1476,7 +1476,7 @@ function transformScriptSource(
       tokens: true
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "Unknown Babel parse error.";
+    const detail = error instanceof Error ? error.message : "未知的 Babel 解析错误。";
     transformLog.push({ filePath, kind: "parse", status: "skipped", detail });
     return {
       record: {
@@ -1508,7 +1508,7 @@ function transformScriptSource(
           kind: "sequence_expression_expand",
           status: "skipped",
           originalLoc: formatNodeLoc(path.node),
-          detail: "Sequence expression includes await/yield or too few expressions."
+          detail: "序列表达式包含 await/yield，或表达式数量过少。"
         });
         return;
       }
@@ -1979,7 +1979,7 @@ function compareGraphEdge(left: GraphEdgeRecord, right: GraphEdgeRecord): number
 function getTraverse(): (ast: unknown, visitors: TraverseOptions) => void {
   const traverse = (traverseModule as unknown as { default?: (ast: unknown, visitors: TraverseOptions) => void })?.default ?? (traverseModule as unknown as (ast: unknown, visitors: TraverseOptions) => void);
   if (typeof traverse !== "function") {
-    throw new Error("Babel traverse runtime is unavailable.");
+    throw new Error("Babel traverse runtime 不可用。");
   }
   return traverse;
 }
@@ -2038,7 +2038,7 @@ function markProgramWrappers(
       riskLevel: "low",
       reversible: true,
       evidenceRefs: [`script:${filePath}`],
-      detail: "Marked call-expression wrapper for later reconstruction."
+      detail: "已标记调用表达式包装器，供后续重建。"
     });
   }
   if (body.length === 1 && body[0].type === "FunctionDeclaration") {
@@ -2053,7 +2053,7 @@ function markProgramWrappers(
       riskLevel: "medium",
       reversible: true,
       evidenceRefs: [`script:${filePath}`],
-      detail: "Marked single-function wrapper for later reconstruction."
+      detail: "已标记单函数包装器，供后续重建。"
     });
   }
 }
@@ -2406,19 +2406,19 @@ export function planReconstruction(
 ): ReconstructionPlan {
   const limitations = [
     ...analysis.inventory.warnings,
-    "Generated project is a deterministic static host shell; semantic module recovery remains evidence-bound future work.",
-    "Build and typecheck scripts are offline validation shims until dependency installation policy is implemented."
+    "生成项目是确定性的静态宿主外壳；模块语义恢复仍是受证据约束的后续工作。",
+    "在依赖安装策略实现之前，构建和类型检查脚本仅作为离线验证垫片。"
   ];
   const generatedDependencyPlaceholders = analysis.dependencyPlaceholders.filter((record) => record.status === "generated");
   const unsupportedDependencyPlaceholders = analysis.dependencyPlaceholders.filter((record) => record.status === "unsupported");
   if (generatedDependencyPlaceholders.length > 0) {
     limitations.push(
-      `${generatedDependencyPlaceholders.length} missing static relative ESM dependency reference(s) use explicit load-only placeholders; semantic behavior remains unavailable and placeholder exports throw when called.`
+      `${generatedDependencyPlaceholders.length} 个缺失的静态相对 ESM 依赖引用使用显式的仅加载占位模块；语义行为仍不可用，占位导出在调用时会抛出异常。`
     );
   }
   if (unsupportedDependencyPlaceholders.length > 0) {
     limitations.push(
-      `${unsupportedDependencyPlaceholders.length} missing static relative ESM dependency reference(s) could not be safely placeholdered and remain report-only.`
+      `${unsupportedDependencyPlaceholders.length} 个缺失的静态相对 ESM 依赖引用无法安全生成占位模块，仅保留在报告中。`
     );
   }
 
@@ -2714,24 +2714,24 @@ const MIRROR_ALLOWED_EXTENSIONS = new Set([
 
 export function validateAgentFeedbackInput(payload: unknown): AgentFeedbackInput {
   if (!isJsonObject(payload) || payload.kind !== "agent_feedback" || payload.protocolVersion !== 1) {
-    throw new Error("Agent feedback must be an object with kind=agent_feedback and protocolVersion=1.");
+    throw new Error("Agent feedback 必须是 kind=agent_feedback 且 protocolVersion=1 的对象。");
   }
   if (!Array.isArray(payload.sourceReviewArtifactIds) || !payload.sourceReviewArtifactIds.every(isNonEmptyString)) {
-    throw new Error("Agent feedback sourceReviewArtifactIds must be a string array.");
+    throw new Error("Agent feedback 的 sourceReviewArtifactIds 必须是字符串数组。");
   }
   if (!Array.isArray(payload.approvedActions) || !Array.isArray(payload.rejectedActions)) {
-    throw new Error("Agent feedback approvedActions and rejectedActions must be arrays.");
+    throw new Error("Agent feedback 的 approvedActions 和 rejectedActions 必须是数组。");
   }
 
   const rejectedActions = payload.rejectedActions.map(validateFeedbackRejection);
   const approvedActions: AgentFeedbackAction[] = [];
   for (const item of payload.approvedActions) {
     if (!isJsonObject(item)) {
-      throw new Error("Each approved agent feedback action must be an object.");
+      throw new Error("每个已批准的 Agent feedback 操作都必须是对象。");
     }
     for (const field of ["sourceArtifactId", "action", "path", "value", "reason"] as const) {
       if (!isNonEmptyString(item[field])) {
-        throw new Error(`Approved agent feedback action field ${field} must be a non-empty string.`);
+        throw new Error(`已批准 Agent feedback 操作的字段 ${field} 必须是非空字符串。`);
       }
     }
     const sourceArtifactId = item.sourceArtifactId as string;
@@ -2740,7 +2740,7 @@ export function validateAgentFeedbackInput(payload: unknown): AgentFeedbackInput
     const actionValue = item.value as string;
     const actionReason = item.reason as string;
     if (item.repairInstructionId !== undefined && !isNonEmptyString(item.repairInstructionId)) {
-      throw new Error("Approved agent feedback repairInstructionId must be a non-empty string when present.");
+      throw new Error("已批准 Agent feedback 中的 repairInstructionId 在提供时必须是非空字符串。");
     }
     if (!SUPPORTED_AGENT_FEEDBACK_ACTIONS.has(actionName as AgentFeedbackActionName)) {
       rejectedActions.push({
@@ -2748,7 +2748,7 @@ export function validateAgentFeedbackInput(payload: unknown): AgentFeedbackInput
         repairInstructionId: typeof item.repairInstructionId === "string" ? item.repairInstructionId : undefined,
         action: actionName,
         path: actionPath,
-        reason: `Unsupported agent feedback action: ${actionName}.`
+        reason: `不支持的 Agent feedback 操作：${actionName}。`
       });
       continue;
     }
@@ -2784,30 +2784,30 @@ async function applyAgentFeedback(
   for (let index = 0; index < feedback.approvedActions.length; index += 1) {
     const action = feedback.approvedActions[index];
     if (conflicts.has(index)) {
-      rejectedActions.push(rejectedFeedbackAction(action, "Conflicting approved actions target the same generated-project field."));
+      rejectedActions.push(rejectedFeedbackAction(action, "冲突的已批准操作指向同一个生成项目字段。"));
       continue;
     }
     const identity = `${action.action}\u0000${action.path}\u0000${action.value}`;
     if (seen.has(identity)) {
-      rejectedActions.push(rejectedFeedbackAction(action, "Duplicate approved action was not applied twice."));
+      rejectedActions.push(rejectedFeedbackAction(action, "重复的已批准操作不会重复应用。"));
       continue;
     }
     seen.add(identity);
 
     if (action.action === "mirror_original_static_entry") {
       if (action.path !== "projectRoot" || action.value !== "public/original") {
-        rejectedActions.push(rejectedFeedbackAction(action, "Static-entry mirroring requires projectRoot <- public/original."));
+        rejectedActions.push(rejectedFeedbackAction(action, "静态入口镜像要求 projectRoot <- public/original。"));
         continue;
       }
       const mirrorResult = await mirrorOriginalStaticEntry(projectRoot, staticMirrorCandidates(plan));
       if (mirrorResult.copied < 1) {
-        rejectedActions.push(rejectedFeedbackAction(action, "No safe original static files were available to mirror."));
+        rejectedActions.push(rejectedFeedbackAction(action, "没有可安全镜像的原始静态文件。"));
         continue;
       }
       appliedActions.push({
         ...action,
         changed: true,
-        detail: `Mirrored ${mirrorResult.copied} safe static file(s); skipped ${mirrorResult.skipped}.`
+        detail: `已镜像 ${mirrorResult.copied} 个安全静态文件；跳过 ${mirrorResult.skipped} 个。`
       });
       continue;
     }
@@ -2815,23 +2815,23 @@ async function applyAgentFeedback(
     const scriptName = packageScriptName(action.path);
     if (!scriptName || SAFE_PACKAGE_SCRIPTS[scriptName] !== action.value) {
       rejectedActions.push(
-        rejectedFeedbackAction(action, "Package-script actions require a supported script name and its matching deterministic shim value.")
+        rejectedFeedbackAction(action, "包脚本操作需要受支持的脚本名称及其匹配的确定性垫片值。")
       );
       continue;
     }
     const packagePath = path.join(projectRoot, "package.json");
     const packagePayload = JSON.parse(await fs.readFile(packagePath, "utf8")) as unknown;
     if (!isJsonObject(packagePayload)) {
-      throw new Error("Generated package.json is not a JSON object.");
+      throw new Error("生成的 package.json 不是 JSON 对象。");
     }
     const scripts = isJsonObject(packagePayload.scripts) ? { ...packagePayload.scripts } : {};
     const existing = scripts[scriptName];
     if (action.action === "add_package_script" && existing !== undefined) {
-      rejectedActions.push(rejectedFeedbackAction(action, `Package script ${scriptName} already exists.`));
+      rejectedActions.push(rejectedFeedbackAction(action, `包脚本 ${scriptName} 已存在。`));
       continue;
     }
     if (action.action === "replace_package_script" && typeof existing !== "string") {
-      rejectedActions.push(rejectedFeedbackAction(action, `Package script ${scriptName} does not exist.`));
+      rejectedActions.push(rejectedFeedbackAction(action, `包脚本 ${scriptName} 不存在。`));
       continue;
     }
     scripts[scriptName] = action.value;
@@ -2840,7 +2840,7 @@ async function applyAgentFeedback(
     appliedActions.push({
       ...action,
       changed: existing !== action.value,
-      detail: `${action.action === "add_package_script" ? "Added" : "Replaced"} package script ${scriptName}.`
+      detail: `${action.action === "add_package_script" ? "已添加" : "已替换"}包脚本 ${scriptName}。`
     });
   }
 
@@ -2929,13 +2929,13 @@ async function mirrorOriginalStaticEntry(
 
 function validateFeedbackRejection(value: unknown): AgentFeedbackRejection {
   if (!isJsonObject(value) || !isNonEmptyString(value.reason)) {
-    throw new Error("Each rejected agent feedback action must contain a non-empty reason.");
+    throw new Error("每个被拒绝的 Agent feedback 操作都必须包含非空原因。");
   }
   const result: AgentFeedbackRejection = { reason: value.reason };
   for (const field of ["sourceArtifactId", "repairInstructionId", "action", "path"] as const) {
     if (value[field] !== undefined) {
       if (!isNonEmptyString(value[field])) {
-        throw new Error(`Rejected agent feedback field ${field} must be a non-empty string when present.`);
+        throw new Error(`被拒绝 Agent feedback 的字段 ${field} 在提供时必须是非空字符串。`);
       }
       result[field] = value[field];
     }
@@ -2973,7 +2973,7 @@ async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Pr
     try {
       mapPayload = JSON.parse(await fs.readFile(sourceMapAbsolutePath, "utf8")) as unknown;
     } catch (error) {
-      warnings.push(`Failed to parse source map ${sourceMapPath}: ${error instanceof Error ? error.message : "Unknown error"}`);
+      warnings.push(`解析 source map ${sourceMapPath} 失败：${error instanceof Error ? error.message : "未知错误"}`);
       continue;
     }
 
@@ -3013,10 +3013,10 @@ async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Pr
 
       const bundleWarnings: string[] = [];
       if (sourceCandidatesForBundle.length === 0) {
-        bundleWarnings.push(`Source map ${sourceMapPath} did not yield any source candidates.`);
+        bundleWarnings.push(`Source map ${sourceMapPath} 未产生任何源候选。`);
       }
       if (missingSourcesContent.length > 0) {
-        bundleWarnings.push(`Source map ${sourceMapPath} is missing sourcesContent for ${missingSourcesContent.length} source${missingSourcesContent.length === 1 ? "" : "s"}.`);
+        bundleWarnings.push(`Source map ${sourceMapPath} 缺少 ${missingSourcesContent.length} 个源的 sourcesContent。`);
       }
 
       bundleAnalyses.push({
@@ -3034,7 +3034,7 @@ async function analyzeSourceMaps(rootDir: string, inventory: InputInventory): Pr
 
       warnings.push(...bundleWarnings.map((warning) => `${sourceMapPath}: ${warning}`));
     } catch (error) {
-      warnings.push(`Failed to analyze source map ${sourceMapPath}: ${error instanceof Error ? error.message : "Unknown error"}`);
+      warnings.push(`分析 source map ${sourceMapPath} 失败：${error instanceof Error ? error.message : "未知错误"}`);
     }
   }
 
@@ -3253,12 +3253,12 @@ function dependencyPlaceholderSource(
     semanticBehaviorAvailable: false
   };
   const lines = [
-    "// Generated by AI JS Unpack because a required static relative ESM dependency was absent.",
+    "// 由 AI JS Unpack 生成，因为缺少必需的静态相对 ESM 依赖。",
     `const __missingDependencyMetadata = ${JSON.stringify(metadata, null, 2)};`,
-    "globalThis.console?.warn?.(\"[AI JS Unpack] Missing dependency placeholder loaded.\", __missingDependencyMetadata);",
+    "globalThis.console?.warn?.(\"[AI JS Unpack] 已加载缺失依赖占位模块。\", __missingDependencyMetadata);",
     "class MissingDependencyPlaceholderError extends Error {",
     "  constructor(exportName) {",
-    "    super(`Missing dependency placeholder export ${exportName} from ${__missingDependencyMetadata.resolvedPath} was called; semantic behavior is unavailable.`);",
+    "    super(`调用了来自 ${__missingDependencyMetadata.resolvedPath} 的缺失依赖占位导出 ${exportName}；语义行为不可用。`);",
     "    this.name = \"MissingDependencyPlaceholderError\";",
     "    this.code = \"AI_JSUNPACK_MISSING_DEPENDENCY\";",
     "    this.dependencyPath = __missingDependencyMetadata.resolvedPath;",
@@ -3291,9 +3291,9 @@ function dependencyPlaceholderExportName(name: string): string {
 }
 
 function recoveredModuleSource(generatedModule: GeneratedModuleRecord, recoveredSource: SourceMapRecoveredSource): string {
-  return `// Recovered from source map sourcesContent.
-// Source: ${recoveredSource.source}
-// Hash: ${recoveredSource.contentHash}
+  return `// 已从 source map 的 sourcesContent 恢复。
+// 来源：${recoveredSource.source}
+// 哈希：${recoveredSource.contentHash}
 
 ${recoveredSource.content.trimEnd()}
 
@@ -3329,7 +3329,7 @@ export function generatedModuleCount(): number {
 function safeGeneratedProjectRelativePath(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
   if (!normalized.startsWith("src/") || normalized.includes("\0") || normalized.split("/").some((part) => part === "..")) {
-    throw new Error(`Unsafe generated project file path: ${filePath}`);
+    throw new Error(`不安全的生成项目文件路径：${filePath}`);
   }
   return normalized;
 }
@@ -3658,8 +3658,8 @@ function parseHtmlAttributes(source: string): Record<string, string> {
 
 function formatMissingHtmlReferenceWarning(missingReferences: string[]): string {
   const preview = missingReferences.slice(0, 5).join("; ");
-  const extra = missingReferences.length > 5 ? `; and ${missingReferences.length - 5} more` : "";
-  return `HTML references ${missingReferences.length} missing file${missingReferences.length === 1 ? "" : "s"}: ${preview}${extra}.`;
+  const extra = missingReferences.length > 5 ? `；另有 ${missingReferences.length - 5} 个` : "";
+  return `HTML 引用了 ${missingReferences.length} 个缺失文件：${preview}${extra}。`;
 }
 
 function normalizeInventoryFileKind(file: InputFileRecord, referenceKind?: HtmlReferenceKind): InputFileRecord {
@@ -3718,7 +3718,7 @@ function isSupportedSingleScriptPath(filePath: string): boolean {
 function safeSingleScriptFilename(filePath: string): string {
   const filename = path.basename(filePath);
   if (safeArchiveRelativePath(filename) !== filename || !isSupportedSingleScriptPath(filename)) {
-    throw new Error(`Unsafe single JavaScript input filename: ${filename}`);
+    throw new Error(`不安全的单 JavaScript 输入文件名：${filename}`);
   }
   return filename;
 }
@@ -3726,11 +3726,11 @@ function safeSingleScriptFilename(filePath: string): string {
 function singleScriptHostHtml(scriptName: string, scriptSource: string): string {
   const scriptType = singleScriptUsesModuleSyntax(scriptName, scriptSource) ? ' type="module"' : "";
   return `<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI JS Unpack Single Script Host</title>
+    <title>AI JS Unpack 单脚本宿主页</title>
   </head>
   <body>
     <script${scriptType} src="./${escapeHtmlAttribute(scriptName)}"></script>
@@ -3774,20 +3774,20 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
   const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16);
 
   if (entryCount === 0xffff || centralDirectorySize === 0xffffffff || centralDirectoryOffset === 0xffffffff) {
-    throw new Error("Unsupported zip64 archive.");
+    throw new Error("不支持 zip64 归档。");
   }
   if (entryCount > ARCHIVE_MAX_ENTRIES) {
-    throw new Error(`Archive resource limit exceeded: zip contains ${entryCount} entries (maximum ${ARCHIVE_MAX_ENTRIES}).`);
+    throw new Error(`归档资源限制已超出：zip 包含 ${entryCount} 个条目（最多 ${ARCHIVE_MAX_ENTRIES} 个）。`);
   }
   if (centralDirectoryOffset + centralDirectorySize > archive.length) {
-    throw new Error("Invalid zip archive: central directory is outside the archive.");
+    throw new Error("无效的 zip 归档：中央目录位于归档之外。");
   }
 
   let cursor = centralDirectoryOffset;
   let totalUncompressedBytes = 0;
   for (let index = 0; index < entryCount; index += 1) {
     if (cursor + 46 > archive.length || archive.readUInt32LE(cursor) !== 0x02014b50) {
-      throw new Error("Invalid zip archive: central directory entry is malformed.");
+      throw new Error("无效的 zip 归档：中央目录条目格式错误。");
     }
 
     const generalPurposeFlag = archive.readUInt16LE(cursor + 8);
@@ -3801,18 +3801,18 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
     const localHeaderOffset = archive.readUInt32LE(cursor + 42);
     const centralEntryEnd = cursor + 46 + fileNameLength + extraFieldLength + fileCommentLength;
     if (centralEntryEnd > centralDirectoryOffset + centralDirectorySize || centralEntryEnd > archive.length) {
-      throw new Error("Invalid zip archive: central directory entry is truncated.");
+      throw new Error("无效的 zip 归档：中央目录条目被截断。");
     }
     const fileName = archive.subarray(cursor + 46, cursor + 46 + fileNameLength).toString("utf8");
     cursor = centralEntryEnd;
 
     const unixMode = externalAttributes >>> 16;
     if ((unixMode & 0o170000) === 0o120000) {
-      throw new Error(`Unsupported zip archive entry type: symlink ${fileName}`);
+      throw new Error(`不支持的 zip 归档条目类型：符号链接 ${fileName}`);
     }
 
     if ((generalPurposeFlag & 0x01) !== 0) {
-      throw new Error(`Unsupported encrypted zip archive entry: ${fileName}`);
+      throw new Error(`不支持加密的 zip 归档条目：${fileName}`);
     }
 
     const safeRelative = safeArchiveRelativePath(fileName);
@@ -3830,14 +3830,14 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
     totalUncompressedBytes += uncompressedSize;
 
     if (localHeaderOffset + 30 > archive.length || archive.readUInt32LE(localHeaderOffset) !== 0x04034b50) {
-      throw new Error(`Invalid zip archive: local file header is malformed for ${fileName}`);
+      throw new Error(`无效的 zip 归档：${fileName} 的本地文件头格式错误`);
     }
     const localNameLength = archive.readUInt16LE(localHeaderOffset + 26);
     const localExtraLength = archive.readUInt16LE(localHeaderOffset + 28);
     const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > archive.length) {
-      throw new Error(`Invalid zip archive: compressed data is truncated for ${fileName}`);
+      throw new Error(`无效的 zip 归档：${fileName} 的压缩数据被截断`);
     }
 
     const compressed = archive.subarray(dataStart, dataEnd);
@@ -3847,11 +3847,11 @@ async function extractZipArchive(archive: Buffer, rootDir: string): Promise<void
     } else if (compressionMethod === 8) {
       content = inflateRawSync(compressed);
     } else {
-      throw new Error(`Unsupported zip compression method ${compressionMethod} for ${fileName}`);
+      throw new Error(`${fileName} 使用了不支持的 zip 压缩方法 ${compressionMethod}`);
     }
 
     if (content.byteLength !== uncompressedSize) {
-      throw new Error(`Invalid zip archive: size mismatch for ${fileName}`);
+      throw new Error(`无效的 zip 归档：${fileName} 的大小不匹配`);
     }
 
     await writeExtractedFile(rootDir, safeRelative, content);
@@ -3867,7 +3867,7 @@ function findZipEndOfCentralDirectory(archive: Buffer): number {
       return offset;
     }
   }
-  throw new Error("Invalid zip archive: end of central directory not found.");
+  throw new Error("无效的 zip 归档：未找到中央目录结束记录。");
 }
 
 async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void> {
@@ -3892,19 +3892,19 @@ async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void
     const typeFlag = header.subarray(156, 157).toString("ascii");
     entryCount += 1;
     if (entryCount > ARCHIVE_MAX_ENTRIES) {
-      throw new Error(`Archive resource limit exceeded: tar contains more than ${ARCHIVE_MAX_ENTRIES} entries.`);
+      throw new Error(`归档资源限制已超出：tar 包含超过 ${ARCHIVE_MAX_ENTRIES} 个条目。`);
     }
     if (size > ARCHIVE_MAX_FILE_BYTES) {
-      throw new Error(`Archive resource limit exceeded: ${name} is ${size} bytes (maximum ${ARCHIVE_MAX_FILE_BYTES}).`);
+      throw new Error(`归档资源限制已超出：${name} 为 ${size} 字节（最多 ${ARCHIVE_MAX_FILE_BYTES} 字节）。`);
     }
     if (totalUncompressedBytes + size > ARCHIVE_MAX_TOTAL_BYTES) {
-      throw new Error(`Archive resource limit exceeded: extracted data exceeds ${ARCHIVE_MAX_TOTAL_BYTES} bytes.`);
+      throw new Error(`归档资源限制已超出：解压数据超过 ${ARCHIVE_MAX_TOTAL_BYTES} 字节。`);
     }
     totalUncompressedBytes += size;
     const dataStart = cursor;
     const dataEnd = dataStart + size;
     if (dataEnd > archive.length) {
-      throw new Error(`Invalid tar archive: entry data is truncated for ${name}`);
+      throw new Error(`无效的 tar 归档：${name} 的条目数据被截断`);
     }
     const content = archive.subarray(dataStart, dataEnd);
     cursor += Math.ceil(size / 512) * 512;
@@ -3928,7 +3928,7 @@ async function extractTarArchive(archive: Buffer, rootDir: string): Promise<void
       continue;
     }
     if (typeFlag === "1" || typeFlag === "2") {
-      throw new Error(`Unsupported tar archive entry type: link ${name}`);
+      throw new Error(`不支持的 tar 归档条目类型：链接 ${name}`);
     }
   }
 }
@@ -3941,21 +3941,21 @@ function assertArchiveEntryWithinLimits(options: {
 }): void {
   if (options.uncompressedSize > ARCHIVE_MAX_FILE_BYTES) {
     throw new Error(
-      `Archive resource limit exceeded: ${options.fileName} is ${options.uncompressedSize} bytes (maximum ${ARCHIVE_MAX_FILE_BYTES}).`
+      `归档资源限制已超出：${options.fileName} 为 ${options.uncompressedSize} 字节（最多 ${ARCHIVE_MAX_FILE_BYTES} 字节）。`
     );
   }
   if (options.totalUncompressedBytes + options.uncompressedSize > ARCHIVE_MAX_TOTAL_BYTES) {
-    throw new Error(`Archive resource limit exceeded: extracted data exceeds ${ARCHIVE_MAX_TOTAL_BYTES} bytes.`);
+    throw new Error(`归档资源限制已超出：解压数据超过 ${ARCHIVE_MAX_TOTAL_BYTES} 字节。`);
   }
   if (options.uncompressedSize > 0 && options.compressedSize === 0) {
-    throw new Error(`Archive resource limit exceeded: ${options.fileName} has an invalid compression ratio.`);
+    throw new Error(`归档资源限制已超出：${options.fileName} 的压缩比无效。`);
   }
   if (
     options.compressedSize > 0 &&
     options.uncompressedSize / options.compressedSize > ARCHIVE_MAX_COMPRESSION_RATIO
   ) {
     throw new Error(
-      `Archive resource limit exceeded: ${options.fileName} compression ratio exceeds ${ARCHIVE_MAX_COMPRESSION_RATIO}:1.`
+      `归档资源限制已超出：${options.fileName} 的压缩比超过 ${ARCHIVE_MAX_COMPRESSION_RATIO}:1。`
     );
   }
 }
@@ -3972,7 +3972,7 @@ function parseTarOctal(value: Buffer): number {
     return 0;
   }
   if (!/^[0-7]+$/.test(text)) {
-    throw new Error(`Invalid tar archive: entry size is not octal (${text}).`);
+    throw new Error(`无效的 tar 归档：条目大小不是八进制数（${text}）。`);
   }
   return Number.parseInt(text, 8);
 }
@@ -4017,7 +4017,7 @@ async function writeExtractedFile(rootDir: string, safeRelative: string, content
 function assertSafeOutputDir(outputDir: string): string {
   const resolved = path.resolve(outputDir);
   if (resolved === path.parse(resolved).root) {
-    throw new Error("Refusing to write generated project to a filesystem root.");
+    throw new Error("拒绝将生成项目写入文件系统根目录。");
   }
   return resolved;
 }
@@ -4026,13 +4026,13 @@ function safeRelativePath(filePath: string): string {
   try {
     return safeArchiveRelativePath(filePath);
   } catch {
-    throw new Error(`Unsafe input file path in inventory: ${filePath}`);
+    throw new Error(`inventory 中存在不安全的输入文件路径：${filePath}`);
   }
 }
 
 function safeArchiveRelativePath(filePath: string): string {
   if (!filePath || filePath.includes("\0")) {
-    throw new Error(`Unsafe archive entry path: ${filePath}`);
+    throw new Error(`不安全的归档条目路径：${filePath}`);
   }
   const normalizedSeparators = filePath.replace(/\\/g, "/");
   if (
@@ -4042,12 +4042,12 @@ function safeArchiveRelativePath(filePath: string): string {
     path.isAbsolute(filePath) ||
     path.win32.isAbsolute(filePath)
   ) {
-    throw new Error(`Unsafe archive entry path: ${filePath}`);
+    throw new Error(`不安全的归档条目路径：${filePath}`);
   }
 
   const parts = normalizedSeparators.split("/").filter((part) => part.length > 0 && part !== ".");
   if (parts.length === 0 || parts.some((part) => part === "..")) {
-    throw new Error(`Unsafe archive entry path: ${filePath}`);
+    throw new Error(`不安全的归档条目路径：${filePath}`);
   }
   return parts.join("/");
 }
@@ -4056,7 +4056,7 @@ function resolveInsideRoot(rootDir: string, safeRelative: string): string {
   const root = path.resolve(rootDir);
   const target = path.resolve(root, ...safeRelative.split("/"));
   if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
-    throw new Error(`Unsafe archive entry resolved outside extraction root: ${safeRelative}`);
+    throw new Error(`不安全的归档条目解析到了解压根目录之外：${safeRelative}`);
   }
   return target;
 }
@@ -4090,7 +4090,7 @@ export const reconstructionEntrySummary = {
 } as const;
 
 export function describeReconstructionEntry(): string {
-  return \`${manifest.entrypoint}: \${reconstructionEntrySummary.generatedModules} generated module records\`;
+  return \`${manifest.entrypoint}：\${reconstructionEntrySummary.generatedModules} 个生成模块记录\`;
 }
 `;
 }
@@ -4105,12 +4105,12 @@ function runtimeShimSource(): string {
 export const browserGlobalShims: BrowserGlobalShim[] = [
   {
     name: "window",
-    reason: "Generated modules may reference browser globals preserved from the original bundle.",
+    reason: "生成模块可能引用从原始 bundle 保留的浏览器全局对象。",
     riskLevel: "low"
   },
   {
     name: "document",
-    reason: "Static host validation needs a typed placeholder for DOM-oriented recovered code.",
+    reason: "静态宿主验证需要为面向 DOM 的恢复代码提供类型化占位对象。",
     riskLevel: "low"
   }
 ];
@@ -4186,14 +4186,14 @@ export interface ReconstructionManifest {
 }
 
 function indexHtmlSource(plan: ReconstructionPlan, manifest: GeneratedProjectManifest): string {
-  const runtime = plan.detectedRuntime.length > 0 ? plan.detectedRuntime.join(", ") : "unknown";
-  const entry = plan.entryHtml ?? "generated host page";
+  const runtime = plan.detectedRuntime.length > 0 ? plan.detectedRuntime.join(", ") : "未知";
+  const entry = plan.entryHtml ?? "生成的宿主页";
   return `<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI JS Unpack Generated Project</title>
+    <title>AI JS Unpack 生成项目</title>
     <style>
       :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       body { margin: 0; padding: 32px; background: #f7f7f4; color: #1b1d1f; }
@@ -4207,17 +4207,17 @@ function indexHtmlSource(plan: ReconstructionPlan, manifest: GeneratedProjectMan
   </head>
   <body>
     <main>
-      <h1>Generated reconstruction shell</h1>
-      <p>This static project preserves input evidence and exposes a buildable audit surface for sandbox validation.</p>
+      <h1>生成的重建外壳</h1>
+      <p>此静态项目保留输入证据，并提供可构建的审计界面用于 sandbox 验证。</p>
       <section>
         <dl>
-          <dt>Original entry</dt>
+          <dt>原始入口</dt>
           <dd>${escapeHtml(entry)}</dd>
-          <dt>Detected runtime</dt>
+          <dt>检测到的 runtime</dt>
           <dd>${escapeHtml(runtime)}</dd>
-          <dt>Copied source files</dt>
+          <dt>已复制源文件</dt>
           <dd>${manifest.copiedSourceFiles.length}</dd>
-          <dt>Generated modules</dt>
+          <dt>生成模块</dt>
           <dd>${manifest.generatedModuleFiles.length}</dd>
           <dt>Manifest</dt>
           <dd>src/reconstruction-manifest.json</dd>
@@ -4250,7 +4250,7 @@ await writeFile(
   path.join(dist, "build-manifest.json"),
   JSON.stringify({ status: "pass", sourceFiles: manifest.copiedSourceFiles.length }, null, 2) + "\\n"
 );
-console.log("Generated project build copied static artifacts to dist.");
+console.log("生成项目构建已将静态产物复制到 dist。");
 `;
 }
 
@@ -4263,7 +4263,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(await readFile(path.join(root, "src", "reconstruction-manifest.json"), "utf8"));
 const mainSource = await readFile(path.join(root, "src", "main.ts"), "utf8");
 if (manifest.kind !== "generated_project") {
-  throw new Error("Generated project manifest kind is invalid.");
+  throw new Error("生成项目 Manifest 的 kind 无效。");
 }
 if (
   !Array.isArray(manifest.copiedSourceFiles) ||
@@ -4275,14 +4275,14 @@ if (
   !Array.isArray(manifest.runtimeShimFiles) ||
   !Array.isArray(manifest.analysisFiles)
 ) {
-  throw new Error("Generated project manifest file lists are invalid.");
+  throw new Error("生成项目 Manifest 的文件列表无效。");
 }
 if (!mainSource.includes("reconstructionManifest")) {
-  throw new Error("Generated TypeScript entry contract is missing.");
+  throw new Error("缺少生成的 TypeScript 入口契约。");
 }
 for (const filePath of manifest.copiedSourceFiles) {
   if (path.isAbsolute(filePath) || filePath.includes("..")) {
-    throw new Error(\`Unsafe copied source file path: \${filePath}\`);
+    throw new Error(\`不安全的已复制源文件路径：\${filePath}\`);
   }
   await access(path.join(root, filePath));
 }
@@ -4295,11 +4295,11 @@ for (const filePath of [
   ...manifest.analysisFiles
 ]) {
   if (path.isAbsolute(filePath) || filePath.includes("..")) {
-    throw new Error(\`Unsafe generated evidence file path: \${filePath}\`);
+    throw new Error(\`不安全的生成证据文件路径：\${filePath}\`);
   }
   await access(path.join(root, filePath));
 }
-console.log("Generated project type contract and copied source manifest validated.");
+console.log("生成项目的类型契约和已复制源文件 Manifest 验证通过。");
 `;
 }
 

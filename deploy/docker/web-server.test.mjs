@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { createWebServer, runtimeConfigFromEnvironment } from "./web-server.mjs";
 
-test("runtime config reads a token file without exposing the signing secret", async () => {
+test("运行时配置读取 token 文件且不暴露签名密钥", async () => {
   const root = await mkdtemp(join(tmpdir(), "ai-jsunpack-web-server-"));
   const tokenFile = join(root, "token");
   await writeFile(tokenFile, "file-token\n", "utf8");
@@ -32,7 +32,7 @@ test("runtime config reads a token file without exposing the signing secret", as
   }
 });
 
-test("web server proxies /api and serves runtime config", async () => {
+test("Web 服务代理 /api 并提供运行时配置", async () => {
   const root = await mkdtemp(join(tmpdir(), "ai-jsunpack-web-server-"));
   await writeFile(join(root, "index.html"), "<h1>fixture</h1>", "utf8");
   const upstream = createServer((request, response) => {

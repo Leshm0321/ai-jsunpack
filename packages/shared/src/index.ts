@@ -2546,7 +2546,7 @@ export const EXAMPLE_BROWSER_RUNNER_QUEUE_HEALTH = {
     {
       code: "queue_backlog",
       severity: "warning",
-      message: "Browser Runner queued run count exceeds local worker concurrency.",
+      message: "Browser Runner 排队运行数超过本地 Worker 并发数。",
       field: "queuedCount",
       value: 2,
       threshold: 1
@@ -2631,7 +2631,7 @@ export const EXAMPLE_OPS_ALERT_RULE = {
   metricPath: "metrics.browserRunner.queuedCount",
   operator: "gte",
   threshold: 2,
-  message: "Browser Runner queue backlog exceeded the configured threshold.",
+  message: "Browser Runner 队列积压超过配置的阈值。",
   serviceRole: "browser-runner",
   enabled: true,
   source: "default"

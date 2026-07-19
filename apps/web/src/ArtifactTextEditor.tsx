@@ -82,7 +82,7 @@ export default function ArtifactTextEditor({ ariaLabel, language, text }: Artifa
         loading={
           <div className="preview-message">
             <FileText size={18} aria-hidden="true" />
-            Loading editor
+            正在加载编辑器
           </div>
         }
         options={options}

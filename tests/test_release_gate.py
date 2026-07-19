@@ -126,6 +126,8 @@ class ReleaseGateTest(unittest.TestCase):
     def test_github_actions_workflow_invokes_release_gate_and_uploads_evidence(self):
         workflow = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
 
+        self.assertIn("name: Release Gate", workflow)
+        self.assertIn("name: 运行发布门禁", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("packages: write", workflow)
         self.assertIn("secret_environment:", workflow)

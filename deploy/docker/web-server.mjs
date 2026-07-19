@@ -40,7 +40,7 @@ export function createWebServer({ root = resolve("dist"), environment = process.
         response.end(body);
       } catch (error) {
         response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end(`Runtime configuration unavailable: ${error.message}`);
+        response.end(`运行时配置不可用：${error.message}`);
       }
       return;
     }
@@ -87,10 +87,10 @@ function cleanValue(value) {
 function validatedUpstream(value) {
   const upstream = new URL(value);
   if (!new Set(["http:", "https:"]).has(upstream.protocol) || !upstream.hostname) {
-    throw new Error("AI_JSUNPACK_WEB_API_UPSTREAM must be an HTTP(S) URL with a hostname");
+    throw new Error("AI_JSUNPACK_WEB_API_UPSTREAM 必须是包含主机名的 HTTP(S) URL");
   }
   if (upstream.username || upstream.password || upstream.pathname !== "/" || upstream.search || upstream.hash) {
-    throw new Error("AI_JSUNPACK_WEB_API_UPSTREAM must not contain credentials, path, query, or fragment");
+    throw new Error("AI_JSUNPACK_WEB_API_UPSTREAM 不得包含凭据、路径、查询参数或片段");
   }
   return upstream;
 }
@@ -118,7 +118,7 @@ function proxyApiRequest(clientRequest, clientResponse, requestUrl, upstream) {
     if (!clientResponse.headersSent) {
       clientResponse.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     }
-    clientResponse.end(`API upstream unavailable: ${error.message}`);
+    clientResponse.end(`API 上游不可用：${error.message}`);
   });
   clientRequest.pipe(proxyRequest);
 }
@@ -133,7 +133,7 @@ function serveStatic(response, pathname, root) {
   const filePath = safePath(pathname, root);
   if (filePath === null || !existsSync(filePath)) {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-    response.end("Not found");
+    response.end("未找到");
     return;
   }
   response.writeHead(200, {

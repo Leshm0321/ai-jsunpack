@@ -44,7 +44,7 @@ class PackagingRunnerTest(unittest.TestCase):
                                         "reason": "missing_static_relative_dependency",
                                         "status": "generated",
                                         "limitation": (
-                                            "Load-only continuity is provided; semantic behavior is unavailable and generated exports throw."
+                                            "仅提供加载连续性；无法提供语义行为，调用生成的导出时会抛出异常。"
                                         ),
                                     }
                                 ]
@@ -67,12 +67,12 @@ class PackagingRunnerTest(unittest.TestCase):
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
 
-                self.assertIn("## Dependency Placeholder Summary", report)
+                self.assertIn("## 依赖占位摘要", report)
                 self.assertIn("agentApi.js", report)
                 self.assertIn("aiTextApi.js", report)
                 self.assertIn("generateText", report)
                 self.assertIn("AI_JSUNPACK_MISSING_DEPENDENCY", report)
-                self.assertIn("Dependency Placeholder Summary", html_report)
+                self.assertIn("依赖占位摘要", html_report)
                 self.assertIn("dependency-placeholder-summary", sections)
                 self.assertEqual(sections["dependency-placeholder-summary"]["details"][0]["status"], "generated")
                 self.assertEqual(
@@ -154,7 +154,7 @@ class PackagingRunnerTest(unittest.TestCase):
                     ops_events = json.loads(archive.read("ops-alert-events.json").decode("utf-8"))
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
 
-                self.assertIn("## Ops Alert Summary", report)
+                self.assertIn("## 运维告警摘要", report)
                 self.assertIn("sandbox_runner_degraded", report)
                 self.assertIn("ops-alert-summary", sections)
                 self.assertEqual(sections["ops-alert-summary"]["details"][0]["status"], "fail")
@@ -234,14 +234,14 @@ class PackagingRunnerTest(unittest.TestCase):
                         "attempt": 0,
                         "status": "best_effort",
                         "failureClass": "unknown",
-                        "decision": "Runtime evidence remains inconclusive without current runtime comparison evidence.",
+                        "decision": "缺少当前运行时对比证据，运行时证据仍无法确认。",
                     },
                     {
                         "reviewType": "runtime_compare",
                         "attempt": 1,
                         "status": "pass",
                         "failureClass": "none",
-                        "decision": "Runtime compare passed.",
+                        "decision": "运行时对比已通过。",
                     },
                 ],
             }
@@ -269,14 +269,14 @@ class PackagingRunnerTest(unittest.TestCase):
                         "attempt": 0,
                         "status": "best_effort",
                         "failureClass": "unknown",
-                        "decision": "Source semantics remain ambiguous after analysis.",
+                        "decision": "分析后源代码语义仍不明确。",
                     },
                     {
                         "reviewType": "runtime_compare",
                         "attempt": 1,
                         "status": "pass",
                         "failureClass": "none",
-                        "decision": "Runtime compare passed.",
+                        "decision": "运行时对比已通过。",
                     },
                 ],
             }
@@ -492,7 +492,7 @@ class PackagingRunnerTest(unittest.TestCase):
                                 }
                             ],
                             "nextSteps": [
-                                "Runtime compare retry budget was exhausted; inspect the last scenario/viewport diff."
+                                "运行时对比重试预算已耗尽；请检查最后一个场景/视口差异。"
                             ],
                             "buildTypecheck": {
                                 "maxAttempt": 0,
@@ -731,7 +731,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertFalse(attachments[runtime_screenshot.id]["included"])
                 self.assertEqual(
                     attachments[build_log.id]["reason"],
-                    "Artifact kind is outside configured includeKinds.",
+                    "Artifact kind 不在已配置的 includeKinds 范围内。",
                 )
                 self.assertIn("audit-report.md", package_contents)
                 self.assertIn("evidence-index.json", package_contents)
@@ -758,7 +758,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 build_section = report_sections["build-and-typecheck"]
                 self.assertTrue(build_section["details"])
                 build_detail = build_section["details"][0]
-                self.assertEqual(build_detail["label"], "Build validation")
+                self.assertEqual(build_detail["label"], "构建验证")
                 self.assertEqual(build_detail["status"], "fail")
                 self.assertEqual(build_detail["details"]["artifactId"], build_artifact.id)
                 self.assertEqual(build_detail["details"]["reviewType"], "build")
@@ -771,7 +771,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 review_section = report_sections["review-evidence"]
                 self.assertTrue(review_section["details"])
                 review_detail = review_section["details"][0]
-                self.assertEqual(review_detail["label"], "Review run")
+                self.assertEqual(review_detail["label"], "审查运行")
                 self.assertEqual(review_detail["status"], "fail")
                 self.assertEqual(review_detail["details"]["reviewType"], "runtime_compare")
                 self.assertEqual(review_detail["details"]["evidenceRefCount"], 1)
@@ -785,13 +785,13 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertTrue(runtime_compare_section["details"])
                 matrix_detail = runtime_compare_section["details"][0]
                 runtime_compare_detail = runtime_compare_section["details"][1]
-                self.assertEqual(matrix_detail["label"], "Runtime compare matrix summary")
+                self.assertEqual(matrix_detail["label"], "运行时对比矩阵摘要")
                 self.assertEqual(matrix_detail["status"], "fail")
                 self.assertEqual(matrix_detail["details"]["matrix"]["selectedRunCount"], 1)
                 self.assertTrue(matrix_detail["details"]["retryBudget"]["budgetExhausted"])
                 self.assertEqual(matrix_detail["details"]["retryBudget"]["attemptsUsed"], 3)
                 self.assertIn(f"artifact://{retry_summary_trace.id}", matrix_detail["details"]["evidenceLinks"])
-                self.assertEqual(runtime_compare_detail["label"], "Runtime compare scope")
+                self.assertEqual(runtime_compare_detail["label"], "运行时对比范围")
                 self.assertEqual(runtime_compare_detail["status"], "fail")
                 self.assertIn("default-load", runtime_compare_detail["value"])
                 self.assertEqual(runtime_compare_detail["details"]["comparisonScope"]["scenarioName"], "default-load")
@@ -801,12 +801,12 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(runtime_compare_detail["details"]["attemptHistory"][0]["attempt"], 2)
                 self.assertIn(f"artifact://{runtime_comparison.id}", runtime_compare_detail["details"]["evidenceLinks"])
                 self.assertTrue(
-                    any(item["label"] == "Runtime compare matrix summary" for item in risk_section["details"])
+                    any(item["label"] == "运行时对比矩阵摘要" for item in risk_section["details"])
                 )
                 review_fix_section = report_sections["review-fix-convergence"]
                 self.assertIn(f"artifact://{convergence_summary_trace.id}", review_fix_section["evidenceLinks"])
                 review_fix_detail = review_fix_section["details"][0]
-                self.assertEqual(review_fix_detail["label"], "Review/Fix convergence summary")
+                self.assertEqual(review_fix_detail["label"], "Review/Fix 收敛摘要")
                 self.assertEqual(review_fix_detail["status"], "best_effort")
                 self.assertEqual(review_fix_detail["details"]["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertEqual(review_fix_detail["details"]["runtimeCompare"]["attemptsUsed"], 3)
@@ -815,18 +815,18 @@ class PackagingRunnerTest(unittest.TestCase):
                     review_fix_detail["details"]["activeFailureActionMap"][0]["automaticActions"],
                     ["mirror_original_static_entry"],
                 )
-                self.assertIn("Runtime compare retry budget was exhausted", review_fix_detail["details"]["nextSteps"][0])
+                self.assertIn("运行时对比重试预算已耗尽", review_fix_detail["details"]["nextSteps"][0])
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix policy" for item in review_fix_section["details"])
+                    any(item["label"] == "Review/Fix 策略" for item in review_fix_section["details"])
                 )
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix failure action map" for item in review_fix_section["details"])
+                    any(item["label"] == "Review/Fix 失败动作映射" for item in review_fix_section["details"])
                 )
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix next step" for item in review_fix_section["details"])
+                    any(item["label"] == "Review/Fix 后续步骤" for item in review_fix_section["details"])
                 )
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix convergence summary" for item in risk_section["details"])
+                    any(item["label"] == "Review/Fix 收敛摘要" for item in risk_section["details"])
                 )
 
                 with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
@@ -841,14 +841,14 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn("review-fix-summary.json", names)
                 self.assertEqual(packaged_summary["finalOutcome"], "budget_exhausted_best_effort")
                 self.assertTrue(packaged_summary["policy"]["allowLowRiskRepairs"])
-                self.assertIn("Runtime compare retry budget was exhausted", packaged_summary["nextSteps"][0])
+                self.assertIn("运行时对比重试预算已耗尽", packaged_summary["nextSteps"][0])
                 self.assertNotIn(f"evidence/build_log/{build_log.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_screenshot/{runtime_screenshot.id}.png", names)
                 report_text = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
-                self.assertIn("## Policy Summary", report_text)
-                self.assertIn("Cloud context allowed", report_text)
-                self.assertIn("Failure/action mapping", report_text)
-                self.assertIn("Runtime compare retry budget was exhausted", report_text)
+                self.assertIn("## 策略摘要", report_text)
+                self.assertIn("是否允许云端上下文", report_text)
+                self.assertIn("失败/动作映射", report_text)
+                self.assertIn("运行时对比重试预算已耗尽", report_text)
             finally:
                 store.close()
 
@@ -914,15 +914,15 @@ class PackagingRunnerTest(unittest.TestCase):
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
 
-                self.assertIn("Browser Runner Boundary", report)
-                self.assertIn("Browser Runner Operations", report)
+                self.assertIn("Browser Runner 执行边界", report)
+                self.assertIn("Browser Runner 运行情况", report)
                 self.assertIn("browser_run_test", report)
                 self.assertIn("postgresql", report)
-                self.assertIn("runningCount", report)
-                self.assertIn("terminalCount", report)
-                self.assertIn("totalCount", report)
-                self.assertIn("oldestQueuedAgeMs", report)
-                self.assertIn("expiredRunningCount", report)
+                self.assertIn("运行中数量", report)
+                self.assertIn("已结束数量", report)
+                self.assertIn("总数", report)
+                self.assertIn("最早排队时长（毫秒）", report)
+                self.assertIn("已过期运行数", report)
                 self.assertIn("queue_backlog", report)
                 self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["runnerKind"], "remote_browser_runner")
                 self.assertEqual(audit_payload["runtimeTraces"][0]["executionBoundary"]["queueLength"], 3)
@@ -1012,13 +1012,13 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(evidence_index["omittedCount"], 3)
                 self.assertEqual(
                     attachments[trace.id]["reason"],
-                    "Artifact sensitivityClass is outside configured includeSensitivityClasses.",
+                    "Artifact 的 sensitivityClass 不在已配置的 includeSensitivityClasses 范围内。",
                 )
                 self.assertEqual(
                     attachments[screenshot.id]["reason"],
-                    "Artifact retentionClass is outside configured includeRetentionClasses.",
+                    "Artifact 的 retentionClass 不在已配置的 includeRetentionClasses 范围内。",
                 )
-                self.assertEqual(attachments[build_log.id]["reason"], "Artifact exceeds configured maxBytesPerArtifact.")
+                self.assertEqual(attachments[build_log.id]["reason"], "Artifact 大小超过已配置的 maxBytesPerArtifact。")
                 self.assertTrue(attachments[scenario.id]["included"])
                 self.assertEqual(attachments[scenario.id]["sensitivityClass"], "derived")
                 self.assertEqual(attachments[scenario.id]["retentionClass"], "archive")
@@ -1064,7 +1064,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(model_policy["modelContextScope"], "sanitized_cloud_or_local")
                 self.assertEqual(model_policy["contextHandling"], "deterministic_context_redaction")
                 self.assertTrue(model_policy["cloudContextAllowed"])
-                self.assertIn("deterministic source excerpt", model_policy["limitation"])
+                self.assertIn("源代码摘录", model_policy["limitation"])
             finally:
                 store.close()
 
@@ -1145,7 +1145,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
 
                 self.assertTrue(evidence_index["attachments"][0]["included"])
-                runtime_scope_detail = next(item for item in runtime_details if item["label"] == "Runtime compare scope")
+                runtime_scope_detail = next(item for item in runtime_details if item["label"] == "运行时对比范围")
                 self.assertEqual(runtime_scope_detail["details"]["comparisonArtifactId"], runtime_comparison.id)
                 self.assertEqual(runtime_scope_detail["details"]["domDifferences"][0]["path"], "title")
                 with zipfile.ZipFile(self._bytes_zip_path(root, package_bytes)) as archive:

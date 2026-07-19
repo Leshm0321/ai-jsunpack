@@ -52,7 +52,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertTrue(all(payload["resourcePolicy"]["enforcement"] == "local_best_effort" for payload in build_payloads))
         self.assertTrue(
             all(
-                "production multi-tenant isolation" in payload["resourcePolicy"]["limitations"][1]
+                "生产多租户隔离" in payload["resourcePolicy"]["limitations"][1]
                 for payload in build_payloads
             )
         )
@@ -235,13 +235,13 @@ class BuildValidationRunnerTest(unittest.TestCase):
         install_log = next(payload for payload in log_payloads if payload["phase"] == "install")
         self.assertEqual(install_log["status"], "best_effort")
         self.assertEqual(install_log["failureClass"], "dependency_missing")
-        self.assertIn("disabled by policy", install_log["decision"])
+        self.assertIn("策略禁止安装", install_log["decision"])
         self.assertEqual(result.build.review_run.status, "pass")
         self.assertEqual(result.typecheck.review_run.status, "pass")
 
     def test_uses_npm_package_scripts_when_declared(self):
         if shutil.which("npm") is None or shutil.which("node") is None:
-            raise unittest.SkipTest("npm and node are required for package script validation")
+            raise unittest.SkipTest("package script 验证需要 npm 和 node")
 
         project_root = self.root / "generated"
         project_root.mkdir()
@@ -352,8 +352,8 @@ class BuildValidationRunnerTest(unittest.TestCase):
         self.assertEqual(build_artifact["resourcePolicy"]["runtimeName"], "runsc")
         self.assertEqual(build_artifact["resourcePolicy"]["runtimeVersion"], "2026.06-test")
         self.assertEqual(capabilities["network"], "unsupported")
-        self.assertIn("audit profile only", build_artifact["resourcePolicy"]["capabilities"][0]["detail"])
-        self.assertIn("gVisor container runtime command is not configured", build_log["stderr"])
+        self.assertIn("profile-only Sandbox Runner", build_artifact["resourcePolicy"]["capabilities"][0]["detail"])
+        self.assertIn("未配置 gVisor container runtime 命令", build_log["stderr"])
 
     def test_gvisor_runner_config_uses_runsc_adapter(self):
         fake_runtime = self.root / "fake_gvisor_runtime.py"
@@ -511,7 +511,7 @@ class BuildValidationRunnerTest(unittest.TestCase):
 
     def test_failed_package_script_is_replaced_with_generated_shim_for_retry(self):
         if shutil.which("npm") is None or shutil.which("node") is None:
-            raise unittest.SkipTest("npm and node are required for package script repair validation")
+            raise unittest.SkipTest("package script 修复验证需要 npm 和 node")
 
         job = self.store.create_job(
             CreateJobRequest(

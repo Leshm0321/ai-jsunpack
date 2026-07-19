@@ -37,7 +37,7 @@ class CoreBridge:
 
     def analyze_input_package(self, *, job_id: str, input_path: Path | str) -> CoreAnalysisResult:
         if not self.cli_path.exists():
-            raise CoreBridgeError(f"Core CLI is not built: {self.cli_path}")
+            raise CoreBridgeError(f"Core CLI 尚未构建：{self.cli_path}")
 
         command = [
             self.node_binary,
@@ -50,18 +50,18 @@ class CoreBridge:
         result = self._run_core_cli(command)
 
         if result.returncode != 0:
-            stderr = result.stderr.strip() or "Core CLI failed without stderr."
+            stderr = result.stderr.strip() or "Core CLI 失败，但没有 stderr。"
             raise CoreBridgeError(stderr)
 
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as error:
-            raise CoreBridgeError(f"Core CLI returned invalid JSON: {error}") from error
+            raise CoreBridgeError(f"Core CLI 返回了无效 JSON：{error}") from error
 
         inventory_payload = payload.get("inventoryArtifactPayload")
         ast_index_payload = payload.get("astIndexArtifactPayload")
         if not isinstance(inventory_payload, dict) or not isinstance(ast_index_payload, dict):
-            raise CoreBridgeError("Core CLI response is missing artifact payloads.")
+            raise CoreBridgeError("Core CLI 响应缺少 artifact payload。")
 
         return CoreAnalysisResult(
             inventory_artifact_payload=inventory_payload,
@@ -77,7 +77,7 @@ class CoreBridge:
         agent_feedback: dict[str, Any] | None = None,
     ) -> CoreReconstructionResult:
         if not self.cli_path.exists():
-            raise CoreBridgeError(f"Core CLI is not built: {self.cli_path}")
+            raise CoreBridgeError(f"Core CLI 尚未构建：{self.cli_path}")
 
         command = [
             self.node_binary,
@@ -101,13 +101,13 @@ class CoreBridge:
                 result = self._run_core_cli([*command, "--agent-feedback-file", str(feedback_path)])
 
         if result.returncode != 0:
-            stderr = result.stderr.strip() or "Core CLI reconstruct failed without stderr."
+            stderr = result.stderr.strip() or "Core CLI 重建失败，但没有 stderr。"
             raise CoreBridgeError(stderr)
 
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as error:
-            raise CoreBridgeError(f"Core CLI reconstruct returned invalid JSON: {error}") from error
+            raise CoreBridgeError(f"Core CLI 重建返回了无效 JSON：{error}") from error
 
         reconstruction_plan_payload = payload.get("reconstructionPlanPayload")
         generated_project_manifest_payload = payload.get("generatedProjectManifestPayload")
@@ -117,7 +117,7 @@ class CoreBridge:
             or not isinstance(generated_project_manifest_payload, dict)
             or not isinstance(generated_project_path, str)
         ):
-            raise CoreBridgeError("Core CLI reconstruct response is missing artifact payloads.")
+            raise CoreBridgeError("Core CLI 重建响应缺少 artifact payload。")
 
         return CoreReconstructionResult(
             reconstruction_plan_payload=reconstruction_plan_payload,
@@ -136,7 +136,7 @@ class CoreBridge:
                 errors="replace",
             )
         except OSError as error:
-            raise CoreBridgeError(f"Failed to launch Core CLI: {error}") from error
+            raise CoreBridgeError(f"启动 Core CLI 失败：{error}") from error
 
     def _default_cli_path(self) -> Path:
         return Path(__file__).resolve().parents[3] / "packages" / "core" / "dist" / "cli.js"

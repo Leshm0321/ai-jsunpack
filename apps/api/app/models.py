@@ -158,13 +158,13 @@ ProviderReadinessStatus = Literal["ready", "misconfigured", "unavailable"]
 class SettingsUpdateRequest(ContractModel):
     settings: dict[str, Any]
     expected_revision: int = Field(default=0, ge=0)
-    reason: str = Field(default="settings update", min_length=1, max_length=500)
+    reason: str = Field(default="更新设置", min_length=1, max_length=500)
 
 
 class SettingsRollbackRequest(ContractModel):
     revision: int = Field(ge=1)
     expected_revision: int = Field(ge=0)
-    reason: str = Field(default="settings rollback", min_length=1, max_length=500)
+    reason: str = Field(default="回滚设置", min_length=1, max_length=500)
 
 
 class SettingsRevision(ContractModel):
@@ -226,7 +226,7 @@ class CreateJobRequest(ContractModel):
 
 
 class CancelJobRequest(ContractModel):
-    reason: str = Field(default="user requested cancellation")
+    reason: str = Field(default="用户请求取消")
 
 
 class WorkerLease(ContractModel):
@@ -796,7 +796,7 @@ class RetentionCleanupRequest(ContractModel):
     categories: list[RetentionCategory] = Field(default_factory=list)
     retention_classes: list[RetentionClass] = Field(default_factory=list)
     delete_expired: bool = True
-    reason: str = "retention cleanup"
+    reason: str = "保留策略清理"
     now: str | None = None
 
 

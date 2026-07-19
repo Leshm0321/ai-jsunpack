@@ -4,29 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Immutable image version tag to publish.
+        description: 要发布的不可变镜像版本标签。
         required: true
         type: string
       previous_version:
-        description: Previous known-good image version for rollback evidence.
+        description: 用于回滚证据的上一已知良好镜像版本。
         required: false
         type: string
       repository_prefix:
-        description: Registry namespace under ghcr.io.
+        description: ghcr.io 下的注册表命名空间。
         required: false
         type: string
       secret_environment:
-        description: GitHub Environment that owns production release secrets.
+        description: 保存生产发布秘密的 GitHub Environment。
         required: false
         default: production
         type: string
       push_images:
-        description: Push images to GHCR after local release gate checks.
+        description: 本地发布门禁检查后将镜像推送到 GHCR。
         required: true
         default: false
         type: boolean
       sbom_tool:
-        description: SBOM tool command, or none for an approved exception.
+        description: SBOM 工具命令；如已批准例外，选择 none。
         required: true
         default: syft
         type: choice
@@ -34,7 +34,7 @@ on:
           - syft
           - none
       scan_tool:
-        description: Vulnerability scanner command, or none for an approved exception.
+        description: 漏洞扫描器命令；如已批准例外，选择 none。
         required: true
         default: trivy
         type: choice
@@ -63,22 +63,22 @@ jobs:
       SBOM_TOOL: ${{ inputs.sbom_tool }}
       SCAN_TOOL: ${{ inputs.scan_tool }}
     steps:
-      - name: Check out repository
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: Set up Node
+      - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
 
-      - name: Set up Python
+      - name: 配置 Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install project dependencies
+      - name: 安装项目依赖
         shell: bash
         run: |
           npm ci
@@ -86,7 +86,7 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements.txt
 
-      - name: Install release tools
+      - name: 安装发布工具
         shell: bash
         run: |
           set -euo pipefail
@@ -104,7 +104,7 @@ jobs:
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Run repository validation
+      - name: 运行仓库验证
         shell: bash
         run: |
           npm run check
@@ -113,7 +113,7 @@ jobs:
           .venv/bin/python -m compileall apps packages tests
           .venv/bin/python -m unittest discover -s tests
 
-      - name: Log in to GHCR
+      - name: 登录 GHCR
         if: ${{ inputs.push_images }}
         shell: bash
         env:
@@ -121,7 +121,7 @@ jobs:
         run: |
           echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
-      - name: Run release gate
+      - name: 运行发布门禁
         shell: bash
         run: |
           set -euo pipefail
@@ -152,7 +152,7 @@ jobs:
           fi
           .venv/bin/python "${args[@]}"
 
-      - name: Upload release gate report
+      - name: 上传发布门禁报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -160,7 +160,7 @@ jobs:
           path: tmp/release-gate/release-gate.json
           if-no-files-found: warn
 
-      - name: Upload SBOM evidence
+      - name: 上传 SBOM 证据
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -168,7 +168,7 @@ jobs:
           path: tmp/release-gate/sbom
           if-no-files-found: warn
 
-      - name: Upload vulnerability scan evidence
+      - name: 上传漏洞扫描证据
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -176,7 +176,7 @@ jobs:
           path: tmp/release-gate/scans
           if-no-files-found: warn
 
-      - name: Upload compose smoke evidence
+      - name: 上传 Compose 冒烟证据
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -184,7 +184,7 @@ jobs:
           path: tmp/release-gate/compose-smoke.json
           if-no-files-found: warn
 
-      - name: Upload deployment smoke evidence
+      - name: 上传部署冒烟证据
         if: always()
         uses: actions/upload-artifact@v4
         with:

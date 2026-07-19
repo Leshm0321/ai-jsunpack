@@ -34,12 +34,12 @@ export function AuditPanel({
   const [selectedSavedFilterId, setSelectedSavedFilterId] = useState("");
   const [filterName, setFilterName] = useState("");
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<string>>(() => new Set());
-  const auditRecords = useMemo(() => buildAuditRecords(evidence), [evidence]);
+  const auditRecords = useMemo(() => buildAuditRecords(evidence, t), [evidence, t]);
   const filteredRecords = useMemo(
     () => auditRecords.filter((record) => auditRecordMatches(record, filters)),
     [auditRecords, filters]
   );
-  const groupedRecords = useMemo(() => groupAuditRecordsByRisk(filteredRecords), [filteredRecords]);
+  const groupedRecords = useMemo(() => groupAuditRecordsByRisk(filteredRecords, t), [filteredRecords, t]);
   const selectedRecords = useMemo(
     () => auditRecords.filter((record) => selectedRecordIds.has(record.id)),
     [auditRecords, selectedRecordIds]

@@ -19,7 +19,7 @@ class DeploymentSmokeTest(unittest.TestCase):
         npm = shutil.which("npm")
         node = shutil.which("node")
         if npm is None or node is None:
-            raise unittest.SkipTest("npm and node are required for deployment smoke checks")
+            raise unittest.SkipTest("部署冒烟检查需要 npm 和 node")
 
         subprocess.run(
             [npm, "run", "build", "--workspace", "@ai-jsunpack/shared"],

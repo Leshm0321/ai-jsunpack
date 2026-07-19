@@ -3,26 +3,26 @@ import type { ArtifactPreviewSupport } from "./workbench-types";
 import { previewMaxBytes, textualArtifactKinds } from "./workbench-types";
 import { formatBytes } from "./workbench-format";
 
-export function artifactPreviewSupport(artifact: Artifact): ArtifactPreviewSupport {
+export function artifactPreviewSupport(artifact: Artifact, t: (key: string) => string): ArtifactPreviewSupport {
   if (artifact.kind === "generated_project") {
-    return { supported: false, reason: "Directory artifacts are available through the packaged result download." };
+    return { supported: false, reason: t("support.generatedProject") };
   }
   if (artifact.kind === "result_package") {
-    return { supported: false, reason: "Result packages are binary downloads and are not rendered inline." };
+    return { supported: false, reason: t("support.resultPackage") };
   }
   if (artifact.kind === "html_report") {
-    return { supported: false, reason: "HTML reports are download-only so report markup is not executed inside the workbench." };
+    return { supported: false, reason: t("support.htmlReport") };
   }
   if (artifact.kind === "runtime_screenshot") {
-    return { supported: false, reason: "Screenshots are image evidence. Use the download action to inspect the capture." };
+    return { supported: false, reason: t("support.runtimeScreenshot") };
   }
   if (artifact.size > previewMaxBytes) {
-    return { supported: false, reason: `Preview is limited to ${formatBytes(previewMaxBytes)} artifacts.` };
+    return { supported: false, reason: `${t("support.previewLimit")} ${formatBytes(previewMaxBytes)} ${t("support.previewLimitSuffix")}` };
   }
   if (textualArtifactKinds.has(artifact.kind) || isTextContentType(artifact.contentType)) {
     return { supported: true, reason: null };
   }
-  return { supported: false, reason: `${artifact.contentType} is not treated as browser-previewable text.` };
+  return { supported: false, reason: `${artifact.contentType} ${t("support.notPreviewable")}` };
 }
 
 export function canDownloadArtifact(artifact: Artifact): boolean {

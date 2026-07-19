@@ -54,11 +54,11 @@ export function downloadJsonFile(filename: string, payload: unknown): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown, t: (key: string) => string): string {
   if (error instanceof Error) {
     return error.message;
   }
-  return "Request failed.";
+  return t("download.error");
 }
 
 export function readStringArray(value: unknown): string[] {

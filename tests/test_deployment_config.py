@@ -82,7 +82,7 @@ class DeploymentConfigTest(unittest.TestCase):
                 },
             )
 
-        self.assertIn("expected 'api'", str(context.exception))
+        self.assertIn("预期为 'api'", str(context.exception))
 
     def test_worker_profile_accepts_execution_config(self):
         profile = validate_service_environment(

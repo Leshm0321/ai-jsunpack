@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-test("reconstruct applies validated Review-approved feedback before finalizing the project", async () => {
+test("reconstruct 在最终生成项目前应用已验证且经 Review 批准的反馈", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-agent-feedback-"));
   try {
     const input = path.join(root, "input");
@@ -110,7 +110,7 @@ test("reconstruct applies validated Review-approved feedback before finalizing t
   }
 });
 
-test("reconstruct rejects conflicting approved actions without changing their target", async () => {
+test("reconstruct 拒绝冲突的已批准操作且不更改其目标", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-agent-feedback-conflict-"));
   try {
     const input = path.join(root, "input");
@@ -163,13 +163,13 @@ test("reconstruct rejects conflicting approved actions without changing their ta
 
     assert.equal(packageJson.scripts.build, "node scripts/build.mjs");
     assert.equal(manifest.agentFeedback.appliedActions.length, 0);
-    assert.equal(manifest.agentFeedback.rejectedActions.filter((item) => item.reason.includes("Conflicting")).length, 2);
+    assert.equal(manifest.agentFeedback.rejectedActions.filter((item) => item.reason.includes("冲突")).length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("reconstruct fails closed for a malformed feedback file", async () => {
+test("reconstruct 对格式错误的反馈文件执行故障关闭", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-agent-feedback-invalid-"));
   try {
     const input = path.join(root, "input");
@@ -219,7 +219,7 @@ async function runCli(args: string[]): Promise<string> {
       if (code === 0) {
         resolve(stdout);
       } else {
-        reject(new Error(stderr || `Core CLI exited with ${code}`));
+        reject(new Error(stderr || `Core CLI 已退出，退出码 ${code}`));
       }
     });
   });

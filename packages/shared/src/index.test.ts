@@ -12,7 +12,7 @@ import {
   SHARED_JSON_SCHEMAS
 } from "./index.js";
 
-test("shared schemas reuse the canonical enum constants", () => {
+test("共享 schema 复用规范枚举常量", () => {
   assert.deepEqual(SHARED_JSON_SCHEMAS.job.properties?.status?.enum, JOB_STATUSES);
   assert.deepEqual(SHARED_JSON_SCHEMAS.job.properties?.cloudMode?.enum, CLOUD_MODES);
   assert.deepEqual(SHARED_JSON_SCHEMAS.job.properties?.failureClass?.enum, FAILURE_CLASSES);
@@ -25,27 +25,27 @@ test("shared schemas reuse the canonical enum constants", () => {
   );
 });
 
-test("shared examples cover each schema required field without extra keys", () => {
+test("共享示例覆盖每个 schema 的必填字段且不含额外键", () => {
   const examples = SHARED_CONTRACT_EXAMPLES as unknown as Record<string, Record<string, unknown>>;
 
   assert.deepEqual(Object.keys(examples).sort(), Object.keys(SHARED_JSON_SCHEMAS).sort());
 
   for (const [schemaName, schema] of Object.entries(SHARED_JSON_SCHEMAS)) {
     const example = examples[schemaName];
-    assert.ok(example, `${schemaName} example is exported`);
+    assert.ok(example, `${schemaName} 示例已导出`);
 
     for (const key of schema.required ?? []) {
-      assert.ok(key in example, `${schemaName} example includes required key ${key}`);
+      assert.ok(key in example, `${schemaName} 示例包含必填键 ${key}`);
     }
 
     const allowedKeys = new Set(Object.keys(schema.properties ?? {}));
     for (const key of Object.keys(example)) {
-      assert.ok(allowedKeys.has(key), `${schemaName} example key ${key} is declared in schema properties`);
+      assert.ok(allowedKeys.has(key), `${schemaName} 示例键 ${key} 已在 schema properties 中声明`);
     }
   }
 });
 
-test("job and artifact schemas expose the expected contract-required fields", () => {
+test("任务和产物 schema 暴露契约要求的预期字段", () => {
   assert.deepEqual(SHARED_JSON_SCHEMAS.job.required, [
     "id",
     "status",

@@ -148,7 +148,7 @@ class RemoteRunnerHandler(BaseHTTPRequestHandler):
                     "assertionFailures": [],
                     "domSummary": {"title": "remote", "nodeCount": 1},
                     "screenshotBase64": base64.b64encode(self.__class__.screenshot).decode("ascii"),
-                    "limitations": ["remote boundary"],
+                    "limitations": ["远程边界"],
                     "executionBoundary": {
                         "runnerKind": "remote_browser_runner",
                         "enforcement": "remote_isolated",
@@ -242,7 +242,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 trace = json.loads(store.read_artifact(job.id, result.trace_artifact.id))
                 self.assertEqual(trace["executionBoundary"]["runnerKind"], "remote_browser_runner")
                 self.assertEqual(trace["executionBoundary"]["remoteRunId"], "browser_run_test")
-                self.assertIn("remote boundary", trace["limitations"])
+                self.assertIn("远程边界", trace["limitations"])
             finally:
                 server.shutdown()
                 server.server_close()
@@ -334,7 +334,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
 
                 trace = json.loads(store.read_artifact(job.id, result.trace_artifact.id))
                 self.assertEqual(trace["failureClass"], "invalid_input")
-                self.assertTrue(any("No HTML entry" in limitation for limitation in trace["limitations"]))
+                self.assertTrue(any("未找到 HTML 入口" in limitation for limitation in trace["limitations"]))
             finally:
                 store.close()
 
@@ -607,7 +607,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(screenshot_diff["originalFormat"], "jpeg")
                 self.assertEqual(screenshot_diff["reconstructedFormat"], "jpeg")
                 self.assertEqual(screenshot_diff["changed"], True)
-                self.assertIn("PNG screenshots only", screenshot_diff["reason"])
+                self.assertIn("仅支持 PNG 截图", screenshot_diff["reason"])
             finally:
                 store.close()
 
@@ -719,7 +719,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual([run["scenarioName"] for run in matrix_trace["selectedRuns"]], ["load", "load"])
                 self.assertTrue(
                     all(
-                        any("matrix was pruned from 6 to 2" in limitation for limitation in payload["limitations"])
+                        any("运行时对比矩阵从 6 次运行裁剪为 2 次" in limitation for limitation in payload["limitations"])
                         for payload in comparison_payloads
                     )
                 )
@@ -770,7 +770,7 @@ class RuntimeSmokeRunnerTest(unittest.TestCase):
                 self.assertEqual(review_payload["failureClass"], "runtime_error")
                 self.assertEqual(review_payload["repairInstructionIds"], [gate_result.repair_artifact.id])
                 self.assertEqual(review_payload["evidenceRefs"][0]["artifactId"], compare_result.comparison_artifact.id)
-                self.assertIn("blocked automatic behavioral equivalence", review_payload["decision"])
+                self.assertIn("阻止自动判定行为等价", review_payload["decision"])
                 self.assertEqual(repair_payload["targetStage"], "runtime_compare")
                 self.assertEqual(repair_payload["status"], "planned")
                 self.assertEqual(repair_payload["actions"], [])

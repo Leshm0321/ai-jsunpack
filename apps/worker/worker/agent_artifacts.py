@@ -42,7 +42,7 @@ class PersistedAgentOutputs:
 
 
 class AgentArtifactWriter:
-    """Persists Agent Runtime artifacts with stable lineage and schema boundaries."""
+    """在稳定的血缘关系和 schema 边界内持久化 Agent Runtime artifact。"""
 
     def __init__(self, knowledge_retriever: StaticKnowledgeRetriever | None = None) -> None:
         self.knowledge_retriever = knowledge_retriever or StaticKnowledgeRetriever()

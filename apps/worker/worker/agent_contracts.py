@@ -336,7 +336,7 @@ class CrewRuntimeDiagnosisOutput(BaseModel):
     target_stage: str = Field(default="runtime_compare", alias="targetStage")
     status: str = "best_effort"
     failure_class: str = Field(default="none", alias="failureClass")
-    diagnosis: str = "Runtime evidence remains inconclusive."
+    diagnosis: str = "运行时证据仍不足以得出结论。"
     recommended_actions: list[str] = Field(default_factory=list, alias="recommendedActions")
     confidence: float = 0.35
     uncertainty_reasons: list[str] = Field(default_factory=list, alias="uncertaintyReasons")
@@ -353,10 +353,10 @@ class CrewReportSectionOutput(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     agent_name: str = Field(default="ReportAgent", alias="agentName")
-    title: str = "Agent Runtime Summary"
+    title: str = "Agent 运行时摘要"
     anchor: str = "agent-runtime-summary"
-    summary: str = "CrewAI runtime produced a report section."
-    content: str = "Structured report content."
+    summary: str = "CrewAI runtime 已生成报告章节。"
+    content: str = "结构化报告内容。"
     status: str = "best_effort"
     confidence: float = 0.35
     uncertainty_reasons: list[str] = Field(default_factory=list, alias="uncertaintyReasons")
@@ -377,7 +377,7 @@ class CrewRepairInstructionOutput(BaseModel):
 
     target_stage: RepairTargetStage = Field(default="runtime_compare", alias="targetStage")
     failure_class: FailureClass = Field(default="none", alias="failureClass")
-    decision: str = "No deterministic repair action proposed."
+    decision: str = "未提出确定性修复动作。"
     status: RepairInstructionStatus = "skipped"
     risk_level: RepairRiskLevel = Field(default="low", alias="riskLevel")
     actions: list[CrewRepairActionOutput] = Field(default_factory=list)
@@ -387,7 +387,7 @@ class CrewReviewOutput(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     status: str = "best_effort"
-    decision: str = "CrewAI runtime returned structured output."
+    decision: str = "CrewAI runtime 已返回结构化输出。"
     failure_class: str = Field(default="none", alias="failureClass")
     repair_instruction_ids: list[str] = Field(default_factory=list, alias="repairInstructionIds")
     limitations: list[str] = Field(default_factory=list)
@@ -441,7 +441,7 @@ class _CrewInferenceAgentOutput(_CrewRoleOutput):
         invalid = sorted({item.type for item in self.inferences if item.type not in self.allowed_inference_types})
         if invalid:
             allowed = ", ".join(sorted(self.allowed_inference_types))
-            raise ValueError(f"Inference types {invalid!r} are outside this role contract; allowed: {allowed}.")
+            raise ValueError(f"推断类型 {invalid!r} 超出此角色契约范围；允许的类型：{allowed}。")
         return self
 
 
@@ -496,22 +496,22 @@ CREW_ROLE_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
 
 
 def crew_output_model_for_agent(agent_name: str) -> type[BaseModel]:
-    """Return the strict role contract used for one CrewAI task output."""
+    """返回单个 CrewAI 任务输出所使用的严格角色契约。"""
 
     try:
         return CREW_ROLE_OUTPUT_MODELS[agent_name]
     except KeyError as error:
-        raise AgentRuntimeError(f"No structured output contract is registered for agent {agent_name!r}.") from error
+        raise AgentRuntimeError(f"Agent {agent_name!r} 未注册结构化输出契约。") from error
 
 
 def validate_crew_output_for_agent(
     agent_name: str,
     output: CrewStructuredAgentOutput | BaseModel | dict[str, Any],
 ) -> CrewStructuredAgentOutput:
-    """Validate a role-scoped payload and normalize it to the provider-compatible envelope.
+    """验证角色范围内的 payload，并将其规范化为 provider 兼容的 envelope。
 
-    Model-provided identity is never trusted: fields carrying ``agentName`` are
-    deterministically rebound to the executing agent before validation.
+    不信任模型提供的身份：验证前会将包含 ``agentName`` 的字段
+    确定性地重新绑定到当前执行的 Agent。
     """
 
     if isinstance(output, BaseModel):
@@ -545,7 +545,7 @@ class CrewAgentPassOutput(BaseModel):
     planned_agents: list[str] = Field(default_factory=list, alias="plannedAgents")
     inferences: list[CrewInferenceOutput] = Field(default_factory=list)
     review_status: str = Field(default="best_effort", alias="reviewStatus")
-    review_decision: str = Field(default="CrewAI runtime returned structured output.", alias="reviewDecision")
+    review_decision: str = Field(default="CrewAI runtime 已返回结构化输出。", alias="reviewDecision")
     limitations: list[str] = Field(default_factory=list)
 
 

@@ -55,13 +55,13 @@ class SmokeBrowserAdapter:
     def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
         request.screenshot_path.write_bytes(PNG_1X1)
         return BrowserSmokeCapture(
-            console_messages=[f"deployment smoke capture {request.target}:{request.attempt}"],
+            console_messages=[f"部署冒烟捕获 {request.target}:{request.attempt}"],
             responses=[f"200 {request.source_entry_path or request.entry_url}"],
             dom_summary={
                 "title": "deployment-smoke",
                 "nodeCount": 4,
                 "textLength": 20,
-                "textSample": "deployment smoke",
+                "textSample": "部署冒烟测试",
             },
         )
 
@@ -87,7 +87,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
         artifact_root = Path(config.artifact_root) if config.artifact_root else workspace / "artifacts"
         database_url = config.database_url or f"sqlite:///{(workspace / 'metadata.db').as_posix()}"
         if config.artifact_root is None:
-            limitations.append("Artifact files were written to a temporary workspace; use --artifact-root to retain them.")
+            limitations.append("Artifact 文件已写入临时工作区；如需保留，请使用 --artifact-root。")
         store = create_store(database_url=database_url, artifact_root=artifact_root)
         input_root = _write_fixture_input(workspace)
         original_store = api_main.store
@@ -108,7 +108,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                                 "metricPath": "worker.jobCount",
                                 "operator": "gte",
                                 "threshold": 1,
-                                "message": "Deployment smoke worker heartbeat crossed the test threshold.",
+                                "message": "部署冒烟测试中的 Worker 心跳超过了测试阈值。",
                                 "serviceRole": "worker",
                                 "enabled": True,
                             }
@@ -142,7 +142,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                     )
                     job_id = created.get("json", {}).get("job", {}).get("id")
                     if not isinstance(job_id, str):
-                        _add_check(checks, "job_id_available", False, error="Job creation did not return a job id.")
+                        _add_check(checks, "job_id_available", False, error="创建任务后未返回任务 ID。")
                         report = _final_report(config, checks, limitations, webhook_payloads, started, workspace)
                         _write_report(config, report)
                         return report
@@ -237,7 +237,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                                 "categories": ["logs", "screenshots"],
                                 "retentionClasses": [],
                                 "deleteExpired": False,
-                                "reason": "deployment smoke dry-run",
+                                "reason": "部署冒烟测试试运行",
                             },
                             headers=headers,
                         ),
@@ -253,7 +253,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                                 "categories": ["logs", "screenshots"],
                                 "retentionClasses": [],
                                 "deleteExpired": False,
-                                "reason": "deployment smoke cleanup",
+                                "reason": "部署冒烟测试清理",
                             },
                             headers=headers,
                         ),
@@ -277,7 +277,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
                             checks,
                             "retention_deleted_artifact_hidden",
                             False,
-                            error="Retention cleanup did not report a deleted artifact id.",
+                            error="保留策略清理未报告已删除的 Artifact ID。",
                         )
 
                     soak_result = run_browser_runner_soak(
@@ -360,7 +360,7 @@ def run_deployment_smoke(config: DeploymentSmokeConfig) -> dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> DeploymentSmokeConfig:
-    parser = argparse.ArgumentParser(description="Run a local production deployment smoke/soak acceptance check.")
+    parser = argparse.ArgumentParser(description="运行本地生产部署的 smoke/soak test 验收检查。")
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--artifact-root", default=None)
     parser.add_argument("--output", dest="output_path", default=None)
@@ -427,7 +427,7 @@ def _write_fixture_input(workspace: Path) -> Path:
     asset_root = input_root / "assets"
     asset_root.mkdir(parents=True, exist_ok=True)
     (input_root / "index.html").write_text(
-        '<!doctype html><title>Deployment Smoke</title><div id="app">Deployment Smoke</div>'
+        '<!doctype html><title>部署冒烟测试</title><div id="app">部署冒烟测试</div>'
         '<script type="module" src="/assets/app.js"></script>',
         encoding="utf-8",
     )

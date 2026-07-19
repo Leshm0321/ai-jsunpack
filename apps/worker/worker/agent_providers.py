@@ -94,7 +94,7 @@ class ModelPolicyResolver:
             model_provider=provider,
             model_name=model_name,
             sanitized_context=False,
-            denial_reason="cloud_allowed mode requires config.agentModel or AI_JSUNPACK_AGENT_MODEL.",
+            denial_reason="cloud_allowed 模式需要 config.agentModel 或 AI_JSUNPACK_AGENT_MODEL。",
             base_url=base_url,
             api_key=api_key,
             endpoint_is_cloud=True,
@@ -110,7 +110,7 @@ class ModelPolicyResolver:
             model_provider=provider,
             model_name=model_name,
             sanitized_context=False,
-            denial_reason="local_only mode requires config.localAgentModel or AI_JSUNPACK_LOCAL_AGENT_MODEL.",
+            denial_reason="local_only 模式需要 config.localAgentModel 或 AI_JSUNPACK_LOCAL_AGENT_MODEL。",
             base_url=base_url,
             api_key=api_key,
             endpoint_is_cloud=False,
@@ -134,8 +134,8 @@ class ModelPolicyResolver:
             model_name=model_name,
             sanitized_context=True,
             denial_reason=(
-                "desensitized mode requires config.agentModel, config.localAgentModel, "
-                "AI_JSUNPACK_AGENT_MODEL, or AI_JSUNPACK_LOCAL_AGENT_MODEL."
+                "desensitized 模式需要 config.agentModel、config.localAgentModel、"
+                "AI_JSUNPACK_AGENT_MODEL 或 AI_JSUNPACK_LOCAL_AGENT_MODEL。"
             ),
             base_url=cloud_base_url if use_cloud_endpoint else local_base_url,
             api_key=cloud_api_key if use_cloud_endpoint else local_api_key,
@@ -195,15 +195,15 @@ class ModelPolicyResolver:
             return None
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"}:
-            return "OpenAI-compatible endpoint must use http or https."
+            return "OpenAI-compatible endpoint 必须使用 http 或 https。"
         if not parsed.hostname:
-            return "OpenAI-compatible endpoint must include a hostname."
+            return "OpenAI-compatible endpoint 必须包含主机名。"
         if parsed.username or parsed.password:
-            return "OpenAI-compatible endpoint must not include credentials in the URL."
+            return "OpenAI-compatible endpoint URL 不得包含凭据。"
         if endpoint_is_cloud and is_production_profile() and parsed.scheme != "https":
-            return "Production cloud AI endpoints must use https."
+            return "生产环境中的云端 AI endpoint 必须使用 https。"
         if endpoint_is_cloud and self._hostname_is_private(parsed.hostname, parsed.port):
-            return "Cloud AI endpoints must not resolve to loopback, private, link-local, or reserved addresses."
+            return "云端 AI endpoint 不得解析为环回、私有、链路本地或保留地址。"
         return None
 
     def _hostname_is_private(self, hostname: str, port: int | None) -> bool:
@@ -263,7 +263,7 @@ class OpenAICompatibleLLMError(RuntimeError):
 
 
 class OpenAICompatibleCrewAILLM:
-    """CrewAI BaseLLM adapter for OpenAI Chat Completions-compatible endpoints."""
+    """面向 OpenAI Chat Completions-compatible endpoint 的 CrewAI BaseLLM adapter。"""
 
     def __new__(
         cls,
@@ -328,12 +328,12 @@ class OpenAICompatibleCrewAILLM:
                 role_constraints = ""
                 if allowed_inference_types:
                     allowed = ", ".join(json.dumps(value) for value in allowed_inference_types)
-                    role_constraints = f" Every inferences item must use type exactly equal to one of: {allowed}."
+                    role_constraints = f" 每个 inferences 条目的 type 必须严格等于以下值之一：{allowed}。"
                 return (
-                    "Return only one JSON object that validates against the following JSON Schema. "
-                    "Use the exact property names and enum/const values from the schema; do not add Markdown fences "
-                    f"or explanatory text.{role_constraints}\n\n"
-                    f"JSON Schema:\n{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
+                    "只返回一个能通过以下 JSON Schema 验证的 JSON 对象。"
+                    "必须使用 schema 中准确的属性名以及 enum/const 值；不要添加 Markdown 代码围栏或说明文本。"
+                    f"{role_constraints}\n\n"
+                    f"JSON Schema：\n{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
                 )
 
             def _post_chat_completions(self, payload: dict[str, Any]) -> str:
@@ -341,7 +341,7 @@ class OpenAICompatibleCrewAILLM:
                 headers = {"Content-Type": "application/json", "Accept": "application/json"}
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"
-                # The endpoint is normalized and restricted to HTTP(S) before the adapter is constructed.
+                # 构造 adapter 前，endpoint 已完成规范化，并被限制为 HTTP(S)。
                 chat_request = request.Request(  # noqa: S310
                     self._endpoint,
                     data=body,
@@ -356,46 +356,46 @@ class OpenAICompatibleCrewAILLM:
                         raw = response.read()
                 except TimeoutError as exc:
                     raise OpenAICompatibleLLMError(
-                        f"OpenAI-compatible endpoint timed out after {self._request_timeout_seconds:g}s."
+                        f"OpenAI-compatible endpoint 在 {self._request_timeout_seconds:g} 秒后超时。"
                     ) from exc
                 except error.HTTPError as exc:
                     detail = exc.read().decode("utf-8", errors="replace")[:500]
                     raise OpenAICompatibleLLMError(
-                        f"OpenAI-compatible endpoint returned HTTP {exc.code}: {detail}"
+                        f"OpenAI-compatible endpoint 返回 HTTP {exc.code}：{detail}"
                     ) from exc
                 except error.URLError as exc:
                     reason = getattr(exc, "reason", exc)
                     if isinstance(reason, TimeoutError):
                         raise OpenAICompatibleLLMError(
-                            f"OpenAI-compatible endpoint timed out after {self._request_timeout_seconds:g}s."
+                            f"OpenAI-compatible endpoint 在 {self._request_timeout_seconds:g} 秒后超时。"
                         ) from exc
-                    raise OpenAICompatibleLLMError(f"OpenAI-compatible endpoint request failed: {reason}") from exc
+                    raise OpenAICompatibleLLMError(f"OpenAI-compatible endpoint 请求失败：{reason}") from exc
 
                 try:
                     data = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise OpenAICompatibleLLMError(
-                        "OpenAI-compatible endpoint returned non-JSON response."
+                        "OpenAI-compatible endpoint 返回了非 JSON 响应。"
                     ) from exc
                 return self._extract_content(data)
 
             def _extract_content(self, data: Any) -> str:
                 if not isinstance(data, dict):
-                    raise OpenAICompatibleLLMError("OpenAI-compatible endpoint response must be a JSON object.")
+                    raise OpenAICompatibleLLMError("OpenAI-compatible endpoint 响应必须是 JSON 对象。")
                 choices = data.get("choices")
                 if not isinstance(choices, list) or not choices:
                     raise OpenAICompatibleLLMError(
-                        "OpenAI-compatible endpoint response is missing choices[0].message.content."
+                        "OpenAI-compatible endpoint 响应缺少 choices[0].message.content。"
                     )
                 first_choice = choices[0]
                 if not isinstance(first_choice, dict):
                     raise OpenAICompatibleLLMError(
-                        "OpenAI-compatible endpoint response has invalid choices[0]."
+                        "OpenAI-compatible endpoint 响应中的 choices[0] 无效。"
                     )
                 message = first_choice.get("message")
                 if not isinstance(message, dict) or not isinstance(message.get("content"), str):
                     raise OpenAICompatibleLLMError(
-                        "OpenAI-compatible endpoint response is missing choices[0].message.content."
+                        "OpenAI-compatible endpoint 响应缺少 choices[0].message.content。"
                     )
                 content = message["content"]
                 return self._apply_stop_words(content)
@@ -415,12 +415,12 @@ class OpenAICompatibleCrewAILLM:
             def _chat_completions_url(raw_base_url: str) -> str:
                 normalized = raw_base_url.strip().rstrip("/")
                 if not normalized:
-                    raise ValueError("OpenAI-compatible base URL cannot be empty.")
+                    raise ValueError("OpenAI 兼容 base URL 不能为空。")
                 parsed = urlparse(normalized)
                 if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                    raise ValueError("OpenAI-compatible base URL must use http or https and include a hostname.")
+                    raise ValueError("OpenAI 兼容 base URL 必须使用 http 或 https，并包含主机名。")
                 if parsed.username or parsed.password:
-                    raise ValueError("OpenAI-compatible base URL must not include credentials.")
+                    raise ValueError("OpenAI 兼容 base URL 不得包含凭据。")
                 if normalized.endswith("/chat/completions"):
                     return normalized
                 if normalized.endswith("/v1"):
@@ -453,12 +453,12 @@ def prepare_crewai_storage() -> None:
 
         appdirs.user_data_dir = project_user_data_dir
     except Exception:
-        # CrewAI can still use the environment-backed storage path when appdirs is unavailable.
+        # appdirs 不可用时，CrewAI 仍可使用环境变量提供的存储路径。
         return
 
 
 class CrewAIBackend:
-    """Encapsulates raw CrewAI calls for a single agent execution."""
+    """封装单次 Agent 执行所需的原始 CrewAI 调用。"""
 
     def __init__(self) -> None:
         self._prepared = False
@@ -485,10 +485,10 @@ class CrewAIBackend:
         context_json = json.dumps(prompt_context, ensure_ascii=False, indent=2, sort_keys=True)
         task = Task(
             description=(
-                "Read the structured, audited runtime context and return only schema-valid JSON for your role. "
-                "Preserve uncertainty. Do not request source text outside provided evidence references.\n\n{agent_context}"
+                "阅读经过审计的结构化运行时上下文，并且只返回符合角色 schema 的 JSON。"
+                "保留不确定性，不要请求所提供证据引用范围之外的源码文本。\n\n{agent_context}"
             ),
-            expected_output=f"Structured {spec.output_kind} records for {spec.name}.",
+            expected_output=f"为 {spec.name} 生成结构化的 {spec.output_kind} 记录。",
             agent=agent,
             output_pydantic=output_model,
         )
@@ -526,7 +526,7 @@ class CrewAIBackend:
 
 
 class CrewAIExecutionAdapter:
-    """Converts policy-checked prompt context into isolated CrewAI agent executions."""
+    """将通过策略检查的提示上下文转换为隔离的 CrewAI Agent 执行。"""
 
     tool_name = "crewai.agent_pass"
     tool_version = AGENT_TOOL_VERSION
@@ -765,7 +765,7 @@ class CrewAIExecutionAdapter:
         repair_instructions = [self._repair_instruction_from_output(item) for item in output.repair_instructions]
         status = self._execution_status(review.status if review is not None else "pass")
         failure_class = review.failure_class if review is not None else "none"
-        message = review.decision if review is not None else f"{spec.name} completed with no explicit review decision."
+        message = review.decision if review is not None else f"{spec.name} 已完成，但没有明确的审查决策。"
         return CrewAgentExecution(
             spec=spec,
             status=status,
@@ -799,10 +799,10 @@ class CrewAIExecutionAdapter:
         input_artifact_ids: list[str],
         evidence_refs: list[EvidenceRef],
     ) -> CrewAgentExecution:
-        reason = policy.denial_reason or "Agent model policy denied execution."
+        reason = policy.denial_reason or "Agent 模型策略拒绝执行。"
         review = AgentReviewDraft(
             status="best_effort",
-            decision=f"{spec.name} skipped because model policy denied execution: {reason}",
+            decision=f"{spec.name} 已跳过，因为模型策略拒绝执行：{reason}",
             failure_class="policy_denied",
         ) if spec.name == "ReviewAgent" else None
         return CrewAgentExecution(
@@ -813,7 +813,7 @@ class CrewAIExecutionAdapter:
             duration_ms=0.0,
             input_artifact_ids=input_artifact_ids,
             evidence_refs=evidence_refs,
-            message=f"{spec.name} skipped because model policy denied execution: {reason}",
+            message=f"{spec.name} 已跳过，因为模型策略拒绝执行：{reason}",
             raw_output={"limitations": [reason], "policyDenied": True},
             review=review,
             model_provider=policy.model_provider,
@@ -834,7 +834,7 @@ class CrewAIExecutionAdapter:
         evidence_refs: list[EvidenceRef],
         error: Exception,
     ) -> CrewAgentExecution:
-        detail = f"CrewAI runtime failed: {error}"
+        detail = f"CrewAI runtime 失败：{error}"
         review = AgentReviewDraft(
             status="fail",
             decision=detail,
@@ -882,7 +882,7 @@ class CrewAIExecutionAdapter:
             diagnosis=output.diagnosis,
             recommended_actions=list(output.recommended_actions),
             confidence=max(0, min(1, output.confidence)),
-            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI output did not include uncertainty details."],
+            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI 输出未包含不确定性详情。"],
             agent_name=output.agent_name,
         )
 
@@ -894,7 +894,7 @@ class CrewAIExecutionAdapter:
             content=output.content,
             status=self._run_status(output.status, default="best_effort"),
             confidence=max(0, min(1, output.confidence)),
-            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI output did not include uncertainty details."],
+            uncertainty_reasons=list(output.uncertainty_reasons) or ["CrewAI 输出未包含不确定性详情。"],
             details=[(detail.label, detail.value) for detail in output.details],
             agent_name=output.agent_name,
         )
@@ -918,8 +918,8 @@ class CrewAIExecutionAdapter:
             type=self._inference_type(inference.type),
             agent_name=inference.agent_name,
             confidence=max(0, min(1, inference.confidence)),
-            uncertainty_reasons=inference.uncertainty_reasons or ["CrewAI output did not include uncertainty details."],
-            alternatives=inference.alternatives or ["keep deterministic Core evidence unchanged"],
+            uncertainty_reasons=inference.uncertainty_reasons or ["CrewAI 输出未包含不确定性详情。"],
+            alternatives=inference.alternatives or ["保持确定性 Core 证据不变"],
             validation_status=self._validation_status(inference.validation_status),
         )
 

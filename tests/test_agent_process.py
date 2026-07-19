@@ -174,7 +174,7 @@ class AgentProcessWorkerTest(unittest.TestCase):
 
         request = invocation_request()
         invoker = SubprocessCrewAIInvoker()
-        payload = invoker._request_payload(  # noqa: SLF001 - protocol unit test
+        payload = invoker._request_payload(  # noqa: SLF001 - 协议单元测试
             request,
             invocation_id="invocation-1",
             data_root=Path("D:/tmp/isolated"),
@@ -197,7 +197,7 @@ class AgentProcessWorkerTest(unittest.TestCase):
                 raise json.JSONDecodeError("invalid model JSON", "{", 0)
 
         request = invocation_request()
-        payload = SubprocessCrewAIInvoker()._request_payload(  # noqa: SLF001 - protocol unit test
+        payload = SubprocessCrewAIInvoker()._request_payload(  # noqa: SLF001 - 协议单元测试
             request,
             invocation_id="invocation-1",
             data_root=Path("D:/tmp/isolated"),
@@ -219,7 +219,7 @@ class AgentProcessWorkerTest(unittest.TestCase):
                 raise ValueError("No JSON found in response")
 
         request = invocation_request()
-        payload = SubprocessCrewAIInvoker()._request_payload(  # noqa: SLF001 - protocol unit test
+        payload = SubprocessCrewAIInvoker()._request_payload(  # noqa: SLF001 - 协议单元测试
             request,
             invocation_id="invocation-1",
             data_root=Path("D:/tmp/isolated"),

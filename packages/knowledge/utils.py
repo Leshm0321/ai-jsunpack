@@ -51,8 +51,8 @@ def runtime_validation_excerpt(payload: dict[str, Any]) -> str:
     failed_requests = string_list(payload.get("failedRequests"))
     details = [*console_errors[:2], *page_errors[:2], *failed_requests[:2]]
     if details:
-        return "Runtime validation reported: " + "; ".join(details)
-    return "Existing runtime validation evidence should guide Runtime and Repair Agent review."
+        return "运行时验证报告：" + "; ".join(details)
+    return "现有运行时验证证据应指导运行时 Agent 和修复 Agent 的审查。"
 
 
 def excerpt(payload: dict[str, Any], *, fallback: str) -> str:

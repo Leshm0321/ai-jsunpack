@@ -1,1 +1,1 @@
-"""远程 browser-runner 服务包。"""
+"""Remote Browser Runner 服务包。"""

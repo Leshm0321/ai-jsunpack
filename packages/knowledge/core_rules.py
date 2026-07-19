@@ -24,9 +24,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_html_entry",
                 category="runtime_entry",
-                label="HTML entry discovered",
+                label="已发现 HTML 入口",
                 locator="knowledge:runtime_entry/html",
-                excerpt="HTML entries usually provide script, stylesheet, public path, and runtime loading evidence.",
+                excerpt="HTML 入口通常会提供脚本、样式表、公共路径和运行时加载证据。",
                 confidence=0.8,
                 source_kinds=["input_inventory"],
             )
@@ -36,9 +36,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_browser_shim_missing_html_entry",
                 category="browser_shim",
-                label="No HTML entry discovered",
+                label="未发现 HTML 入口",
                 locator="knowledge:browser_shim/html_entry",
-                excerpt="A missing HTML entry usually requires a deterministic host page before browser validation can run.",
+                excerpt="缺少 HTML 入口时，通常需要先生成确定性宿主页，才能运行浏览器验证。",
                 confidence=0.72,
                 source_kinds=["input_inventory"],
             )
@@ -48,9 +48,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_source_map_available",
                 category="source_map",
-                label="Source map candidate discovered",
+                label="已发现 source map 候选",
                 locator="knowledge:source_map/available",
-                excerpt="Source maps can seed source-file candidates but must not replace current artifact evidence.",
+                excerpt="source map 可用于生成源文件候选，但不能替代当前 artifact 证据。",
                 confidence=0.7,
                 source_kinds=["input_inventory"],
             )
@@ -60,9 +60,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_esm_exports",
                 category="module_pattern",
-                label="ES module export evidence",
+                label="ES 模块导出证据",
                 locator="knowledge:module_pattern/esm",
-                excerpt="Named exports suggest module boundaries and can guide reconstruction planning.",
+                excerpt="具名导出可提示模块边界，并指导重建规划。",
                 confidence=0.65,
                 source_kinds=["ast_index"],
             )
@@ -72,9 +72,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_runtime_multi_chunk",
                 category="build_runtime",
-                label="Multi-chunk runtime pattern",
+                label="多 chunk 运行时模式",
                 locator="knowledge:build_runtime/multi_chunk",
-                excerpt="Multiple JavaScript chunks indicate loader ordering and public path evidence should be preserved.",
+                excerpt="多个 JavaScript chunk 表明应保留加载器顺序和公共路径证据。",
                 confidence=0.74,
                 source_kinds=["input_inventory", "ast_index"],
             )
@@ -84,9 +84,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_runtime_single_bundle",
                 category="build_runtime",
-                label="Single-bundle best-effort pattern",
+                label="单 bundle 尽力而为模式",
                 locator="knowledge:build_runtime/single_bundle",
-                excerpt="A single bundle without a full source graph should bias reconstruction toward conservative static hosting.",
+                excerpt="缺少完整源码图的单个 bundle 应让重建更倾向于保守的静态托管。",
                 confidence=0.68,
                 source_kinds=["input_inventory", "ast_index"],
             )
@@ -98,7 +98,7 @@ def extend_core_hits(
                 category="build_runtime",
                 label="Manifest runtime metadata",
                 locator="knowledge:build_runtime/manifest",
-                excerpt="Manifest files may contain asset, route, or service worker metadata that should remain evidence-bound.",
+                excerpt="Manifest 文件可能包含 asset、route 或 Service Worker 元数据，这些信息应继续受证据约束。",
                 confidence=0.64,
                 source_kinds=["input_inventory"],
             )
@@ -108,9 +108,9 @@ def extend_core_hits(
             KnowledgeHit(
                 id="knowledge_runtime_stylesheet_assets",
                 category="build_runtime",
-                label="Stylesheet assets discovered",
+                label="已发现样式表资源",
                 locator="knowledge:build_runtime/stylesheets",
-                excerpt="Stylesheet assets are runtime-visible evidence and should be included in browser comparison scenarios.",
+                excerpt="样式表资源属于运行时可见证据，应纳入浏览器对比场景。",
                 confidence=0.62,
                 source_kinds=["input_inventory"],
             )
@@ -122,9 +122,9 @@ def extend_core_hits(
                 KnowledgeHit(
                     id=f"knowledge_detected_runtime_{runtime_id}",
                     category="build_runtime",
-                    label=f"Detected runtime: {runtime}",
+                    label=f"检测到的运行时：{runtime}",
                     locator=f"knowledge:build_runtime/{runtime_id}",
-                    excerpt=f"Core detected {runtime} from local inventory and AST evidence.",
+                    excerpt=f"Core 根据本地 Manifest 和 AST 证据检测到 {runtime}。",
                     confidence=0.66,
                     source_kinds=["ast_index"],
                 )
@@ -149,29 +149,29 @@ def extend_framework_hits(
         (
             "react",
             ("react", "react-dom", "jsx", "createelement", "usestate", "useeffect"),
-            "React framework signature",
-            "React imports, JSX helpers, or React hook symbols should guide component-boundary inference.",
+            "React 框架特征",
+            "React 导入、JSX helper 或 React Hook 符号应指导组件边界推断。",
             0.72,
         ),
         (
             "vue",
             ("vue", "createapp", "definecomponent", "__vue", ".vue"),
-            "Vue framework signature",
-            "Vue runtime or component symbols should guide component and template reconstruction assumptions.",
+            "Vue 框架特征",
+            "Vue 运行时或组件符号应指导组件与模板重建假设。",
             0.72,
         ),
         (
             "vite_rollup",
             ("vite", "import.meta", "vite_or_rollup", "assets/"),
-            "Vite/Rollup build signature",
-            "Vite or Rollup asset conventions should preserve module-script and public asset path assumptions.",
+            "Vite/Rollup 构建特征",
+            "Vite 或 Rollup 的资源约定应保留模块脚本和公共资源路径假设。",
             0.68,
         ),
         (
             "webpack",
             ("__webpack_require__", "webpack", "webpackchunk"),
-            "Webpack runtime signature",
-            "Webpack runtime symbols should preserve chunk loader and public path evidence during analysis.",
+            "Webpack runtime 特征",
+            "分析期间应依据 Webpack runtime 标记保留 chunk loader 和 public path 证据。",
             0.7,
         ),
     ]
@@ -212,9 +212,9 @@ def extend_obfuscation_hits(
             KnowledgeHit(
                 id="knowledge_obfuscation_short_symbols",
                 category="obfuscation_pattern",
-                label="Short symbol obfuscation pattern",
+                label="短符号混淆模式",
                 locator="knowledge:obfuscation_pattern/short_symbols",
-                excerpt="A high ratio of one- or two-character symbols without source maps suggests obfuscated or minified input.",
+                excerpt="在没有 source map 的情况下，大量一至两个字符的符号表明输入可能经过混淆或压缩。",
                 confidence=0.7,
                 source_kinds=["input_inventory", "ast_index"],
             )
@@ -224,9 +224,9 @@ def extend_obfuscation_hits(
             KnowledgeHit(
                 id="knowledge_obfuscation_parse_warnings",
                 category="obfuscation_pattern",
-                label="Parse warning pattern",
+                label="解析警告模式",
                 locator="knowledge:obfuscation_pattern/parse_warnings",
-                excerpt="Inventory or AST parse warnings should reduce confidence and keep transformations conservative.",
+                excerpt="Manifest 或 AST parse warning 应降低置信度，并让转换保持保守。",
                 confidence=0.62,
                 source_kinds=["input_inventory", "ast_index"],
             )
@@ -244,22 +244,22 @@ def extend_browser_shim_hits(
         (
             "dom_globals",
             ("window", "document", "navigator", "location"),
-            "Browser global usage",
-            "Browser global symbols suggest runtime smoke should execute inside a browser-like environment.",
+            "浏览器全局对象使用情况",
+            "浏览器全局符号表明运行时冒烟测试应在类浏览器环境中执行。",
             0.66,
         ),
         (
             "node_globals",
             ("process", "buffer", "__dirname", "__filename", "global"),
-            "Node global shim candidate",
-            "Node-style globals in browser artifacts may require explicit shim review instead of silent rewriting.",
+            "Node 全局对象垫片候选",
+            "浏览器 Artifact 中的 Node 风格全局对象可能需要明确审查 shim，而不是静默重写。",
             0.65,
         ),
         (
             "global_this",
             ("globalthis",),
-            "globalThis runtime assumption",
-            "globalThis references should be preserved as runtime environment evidence for browser validation.",
+            "globalThis 运行时假设",
+            "应保留 globalThis 引用，将其作为浏览器验证的运行时环境证据。",
             0.6,
         ),
     ]
@@ -281,9 +281,9 @@ def extend_browser_shim_hits(
             KnowledgeHit(
                 id="knowledge_browser_shim_generated_host",
                 category="browser_shim",
-                label="Generated host page candidate",
+                label="生成宿主页候选",
                 locator="knowledge:browser_shim/generated_host",
-                excerpt="Script-only inputs need a generated host page before browser runtime evidence is authoritative.",
+                excerpt="仅含脚本的输入需要先生成宿主页，浏览器运行时证据才具有权威性。",
                 confidence=0.73,
                 source_kinds=["input_inventory"],
             )

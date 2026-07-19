@@ -83,7 +83,7 @@ export async function updateSystemSettings(settings: Record<string, unknown>, ex
   return requestJson<RuntimeSettingsResponse>("/v1/settings/system", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings, expectedRevision, reason: "updated from web settings center" })
+    body: JSON.stringify({ settings, expectedRevision, reason: "通过网页设置中心更新" })
   });
 }
 
@@ -99,7 +99,7 @@ export async function updateProjectSettings(
   return requestJson<RuntimeSettingsResponse>(`/v1/projects/${encodeURIComponent(projectId)}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings, expectedRevision, reason: "updated from web settings center" })
+    body: JSON.stringify({ settings, expectedRevision, reason: "通过网页设置中心更新" })
   });
 }
 

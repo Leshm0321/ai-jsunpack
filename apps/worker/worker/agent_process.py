@@ -5,7 +5,7 @@ import json
 import os
 import re
 import shutil
-# The invoker launches a fixed Python module and never enables a shell.
+# 调用器只启动固定的 Python 模块，绝不启用 shell。
 import subprocess  # nosec B404
 import sys
 import threading
@@ -80,7 +80,7 @@ class CrewAIProcessInvoker(Protocol):
 
 
 class SubprocessCrewAIInvoker:
-    """Runs each CrewAI pass in a fresh Python process with isolated storage."""
+    """在使用隔离存储的全新 Python 进程中运行每轮 CrewAI 调用。"""
 
     parallel_safe = True
     isolation_mode = "process"
@@ -108,7 +108,7 @@ class SubprocessCrewAIInvoker:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
         try:
-            completed = subprocess.run(  # nosec B603  # noqa: S603 - fixed executable and module arguments.
+            completed = subprocess.run(  # nosec B603  # noqa: S603 - 可执行文件与模块参数均为固定值。
                 [self.python_executable, "-m", self.worker_module],
                 input=json.dumps(payload, ensure_ascii=False),
                 capture_output=True,
@@ -122,7 +122,7 @@ class SubprocessCrewAIInvoker:
         except subprocess.TimeoutExpired:
             return self._result(
                 status="timeout",
-                message=f"CrewAI child process timed out after {timeout_seconds:g}s.",
+                message=f"CrewAI 子进程在 {timeout_seconds:g} 秒后超时。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -130,7 +130,7 @@ class SubprocessCrewAIInvoker:
         except OSError as error:
             return self._result(
                 status="process_error",
-                message=f"CrewAI child process could not start ({type(error).__name__}).",
+                message=f"CrewAI 子进程无法启动（{type(error).__name__}）。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -139,7 +139,7 @@ class SubprocessCrewAIInvoker:
         if completed.returncode != 0:
             return self._result(
                 status="exit_error",
-                message=f"CrewAI child process exited with status {completed.returncode}.",
+                message=f"CrewAI 子进程以状态 {completed.returncode} 退出。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -150,7 +150,7 @@ class SubprocessCrewAIInvoker:
         if response is None:
             return self._result(
                 status="invalid_response",
-                message="CrewAI child process returned invalid JSON.",
+                message="CrewAI 子进程返回了无效 JSON。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -159,7 +159,7 @@ class SubprocessCrewAIInvoker:
         if not isinstance(response, dict) or response.get("protocolVersion") != AGENT_PROCESS_PROTOCOL_VERSION:
             return self._result(
                 status="invalid_response",
-                message="CrewAI child process returned an incompatible protocol response.",
+                message="CrewAI 子进程返回了不兼容的协议响应。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -170,9 +170,9 @@ class SubprocessCrewAIInvoker:
             return self._result(
                 status="invalid_response" if error_kind == "schema_error" else "child_error",
                 message=(
-                    "CrewAI child invocation returned role-schema-invalid output."
+                    "CrewAI 子进程调用返回了不符合角色 schema 的输出。"
                     if error_kind == "schema_error"
-                    else "CrewAI child invocation failed."
+                    else "CrewAI 子进程调用失败。"
                 ),
                 started=started,
                 data_root=data_root,
@@ -189,7 +189,7 @@ class SubprocessCrewAIInvoker:
         except ValidationError:
             return self._result(
                 status="invalid_response",
-                message="CrewAI child process returned schema-invalid output.",
+                message="CrewAI 子进程返回了不符合 schema 的输出。",
                 started=started,
                 data_root=data_root,
                 invocation_id=invocation_id,
@@ -197,7 +197,7 @@ class SubprocessCrewAIInvoker:
             )
         return self._result(
             status="success",
-            message=f"{request.spec.name} completed in an isolated CrewAI child process.",
+            message=f"{request.spec.name} 已在隔离的 CrewAI 子进程中完成。",
             started=started,
             data_root=data_root,
             invocation_id=invocation_id,
@@ -294,7 +294,7 @@ class SubprocessCrewAIInvoker:
 
 
 class IsolatedCrewAIBackend:
-    """Drop-in CrewAIBackend replacement backed by one subprocess per invocation."""
+    """由每次调用一个子进程支撑、可直接替换 CrewAIBackend 的实现。"""
 
     parallel_safe = True
     isolation_mode = "process"
@@ -332,14 +332,14 @@ class IsolatedCrewAIBackend:
 
 
 class BoundedCrewAIProcessPool:
-    """Bounds independent process invocations while preserving request order."""
+    """在保持请求顺序的同时限制独立进程调用数量。"""
 
     parallel_safe = True
     isolation_mode = "process"
 
     def __init__(self, *, max_parallel: int, invoker: CrewAIProcessInvoker | None = None) -> None:
         if not 1 <= max_parallel <= 10:
-            raise ValueError("max_parallel must be between 1 and 10.")
+            raise ValueError("max_parallel 必须介于 1 和 10 之间。")
         self.max_parallel = max_parallel
         self.invoker = invoker or SubprocessCrewAIInvoker()
 

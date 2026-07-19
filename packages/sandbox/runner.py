@@ -64,35 +64,35 @@ def _local_capabilities() -> tuple[SandboxRuntimeCapability, ...]:
         SandboxRuntimeCapability(
             name="network",
             status="best_effort",
-            detail="Local runner records network policy but does not enforce OS-level network isolation.",
+            detail="Local Sandbox Runner 会记录网络策略，但不会强制实施 OS 级网络隔离。",
         ),
         SandboxRuntimeCapability(
             name="process",
             status="best_effort",
-            detail="Local runner records process limits but does not enforce a process-count boundary.",
+            detail="Local Sandbox Runner 会记录进程限制，但不会强制实施进程数量边界。",
         ),
         SandboxRuntimeCapability(
             name="cpu",
             status="best_effort",
-            detail="Local runner enforces wall-clock timeout only; CPU time limits are audit metadata.",
+            detail="Local Sandbox Runner 仅强制实施墙钟超时；CPU 时间限制仅作为审计元数据。",
         ),
         SandboxRuntimeCapability(
             name="memory",
             status="best_effort",
-            detail="Local runner records memory limits but does not enforce an OS memory boundary.",
+            detail="Local Sandbox Runner 会记录内存限制，但不会强制实施 OS 内存边界。",
         ),
         SandboxRuntimeCapability(
             name="filesystem",
             status="best_effort",
-            detail="Local runner executes in a temporary attempt workspace and validates relative working directories.",
+            detail="Local Sandbox Runner 在临时尝试工作区中执行，并验证相对工作目录。",
         ),
     )
 
 
 def _runner_label(runner_kind: SandboxRunnerKind) -> str:
     labels = {
-        "local": "Local",
-        "container": "Docker/Podman container",
+        "local": "Local Sandbox Runner",
+        "container": "Container Sandbox Runner",
         "gvisor": "gVisor",
         "firecracker": "Firecracker",
         "remote_browser_runner": "Remote Browser Runner",
@@ -174,8 +174,8 @@ def _profile_capabilities(
                 name=name,
                 status="unsupported",
                 detail=(
-                    f"{label} is configured as an audit profile only; this process does not have a "
-                    f"{label} execution adapter, so the capability is not applied."
+                    f"{label} 是 profile-only Sandbox Runner；当前进程没有 {label} execution adapter，"
+                    "因此不会应用该能力。"
                 ),
             )
             for name in ("network", "process", "cpu", "memory", "filesystem")
@@ -187,27 +187,27 @@ def _profile_capabilities(
             SandboxRuntimeCapability(
                 name="network",
                 status=network_status,
-                detail="Remote browser service owns browser egress policy and client network exposure rules.",
+                detail="Remote Browser Runner 服务负责浏览器出站策略和客户端网络暴露规则。",
             ),
             SandboxRuntimeCapability(
                 name="process",
                 status="enforced",
-                detail="Browser child processes run outside the Worker process boundary in the Browser Runner service.",
+                detail="浏览器子进程在 Browser Runner 服务中运行，位于 Worker 进程边界之外。",
             ),
             SandboxRuntimeCapability(
                 name="cpu",
                 status="best_effort",
-                detail="CPU limits are enforced by the remote service or orchestrator, not by the Worker process.",
+                detail="CPU 限制由远程服务或 orchestrator 实施，而非 Worker 进程。",
             ),
             SandboxRuntimeCapability(
                 name="memory",
                 status="best_effort",
-                detail="Memory limits are enforced by the remote service or orchestrator, not by the Worker process.",
+                detail="内存限制由远程服务或 orchestrator 实施，而非 Worker 进程。",
             ),
             SandboxRuntimeCapability(
                 name="filesystem",
                 status="enforced",
-                detail="Browser artifacts cross the service boundary through Artifact Store instead of host shared paths.",
+                detail="浏览器 Artifact 通过 Artifact Store 跨越服务边界，而非使用主机共享路径。",
             ),
         )
 
@@ -216,27 +216,27 @@ def _profile_capabilities(
         SandboxRuntimeCapability(
             name="network",
             status=network_status,
-            detail=f"{label} deployment profile requires network policy enforcement outside the Worker process.",
+            detail=f"{label} deployment profile 要求在 Worker 进程之外实施网络策略。",
         ),
         SandboxRuntimeCapability(
             name="process",
             status="enforced",
-            detail=f"{label} isolates workload processes behind a stronger runtime boundary.",
+            detail=f"{label} 通过更强的 runtime 边界隔离工作负载进程。",
         ),
         SandboxRuntimeCapability(
             name="cpu",
             status="best_effort",
-            detail=f"{label} CPU limits depend on the host runtime, cgroup, or microVM configuration.",
+            detail=f"{label} 的 CPU 限制取决于主机 runtime、cgroup 或 microVM 配置。",
         ),
         SandboxRuntimeCapability(
             name="memory",
             status="best_effort",
-            detail=f"{label} memory limits depend on the host runtime, cgroup, or microVM configuration.",
+            detail=f"{label} 的内存限制取决于主机 runtime、cgroup 或 microVM 配置。",
         ),
         SandboxRuntimeCapability(
             name="filesystem",
             status="enforced",
-            detail=f"{label} deployment profile requires an isolated root filesystem or mediated workspace mount.",
+            detail=f"{label} deployment profile 要求隔离的根文件系统或受控 workspace 挂载。",
         ),
     )
 
@@ -248,27 +248,27 @@ def _profile_limitations(
     label: str,
 ) -> tuple[str, ...]:
     adapter_note = (
-        f"{label} execution adapter is not wired in this process; command execution is denied instead of falling back "
-        "to a weaker runner."
+        f"{label} 执行适配器尚未接入当前进程；命令执行会被拒绝，"
+        "而不会回退到隔离更弱的 Sandbox Runner。"
         if not adapter_available
-        else f"{label} adapter is selected; verify runtime-specific evidence before treating limits as enforced."
+        else f"{label} 适配器已选中；在将限制视为已实施前，请验证运行时专属证据。"
     )
     if runner_kind == "gvisor":
         return (
-            "gVisor deployments must route container execution through runsc via Docker, containerd, Kubernetes, or OCI integration.",
-            "gVisor improves syscall isolation but has Linux syscall, /proc, and /sys compatibility differences that can affect arbitrary generated projects.",
+            "gVisor 部署必须通过 Docker、containerd、Kubernetes 或 OCI 集成，将容器执行路由到 runsc。",
+            "gVisor 可改善 syscall 隔离，但 Linux syscall、/proc 和 /sys 存在兼容性差异，可能影响任意生成项目。",
             adapter_note,
         )
     if runner_kind == "firecracker":
         return (
-            "Firecracker deployments require Linux KVM, a prepared guest kernel/rootfs, jailer setup, and explicit Artifact Store exchange across the VM boundary.",
-            "Firecracker provides a microVM boundary but host CPU, memory, network, storage, and metadata controls must be configured by the deployment layer.",
+            "Firecracker 部署需要 Linux KVM、准备好的 guest kernel/rootfs、jailer 配置，并通过 VM 边界显式交换 Artifact Store 数据。",
+            "Firecracker 提供 microVM 边界，但主机 CPU、内存、网络、存储和元数据控制必须由部署层配置。",
             adapter_note,
         )
     if runner_kind == "remote_browser_runner":
         return (
-            "Remote Browser Runner is for browser/runtime validation isolation and does not execute build/typecheck commands in the Worker process.",
-            "Playwright client/server versions, websocket authentication, client network exposure, and Artifact Store exchange must be pinned by deployment configuration.",
+            "Remote Browser Runner 用于隔离浏览器/runtime 验证，不会在 Worker 进程中执行 build/typecheck 命令。",
+            "Playwright client/server 版本、websocket authentication、client network exposure 和 Artifact Store 交换必须由 deployment profile 固定。",
             adapter_note,
         )
     return (adapter_note,)
@@ -286,8 +286,8 @@ class SandboxResourcePolicy:
     host_platform: str = field(default_factory=_host_platform)
     capabilities: tuple[SandboxRuntimeCapability, ...] = field(default_factory=_local_capabilities)
     limitations: tuple[str, ...] = (
-        "Local sandbox runner records process, CPU, and memory policy but does not enforce OS/container isolation.",
-        "Local sandbox runner is a development and audit-only boundary; do not treat it as production multi-tenant isolation.",
+        "Local Sandbox Runner 会记录进程、CPU 和内存策略，但不会强制实施 OS/容器隔离。",
+        "Local Sandbox Runner 仅用于开发和审计；不得将其视为生产多租户隔离边界。",
     )
 
 
@@ -445,19 +445,19 @@ class LocalSandboxRunner:
 
     def _denied_reason(self, command: SandboxCommand, workspace: Path) -> str | None:
         if self.policy.resource_policy.runner_kind == "local" and is_production_profile(self.policy.deployment_profile):
-            return "Local sandbox execution is disabled by the production deployment profile."
+            return "production deployment profile 已禁用 Local Sandbox Runner 执行。"
         if not self._is_allowed(command.argv):
-            return f"Command is not allowed: {command.executable}"
+            return f"不允许执行命令：{command.executable}"
         if command.working_directory is None:
             return None
         candidate = Path(command.working_directory)
         if candidate.is_absolute():
-            return "Sandbox working directory must be relative to the attempt workspace."
+            return "沙箱工作目录必须是相对于尝试工作区的路径。"
         resolved = (workspace / candidate).resolve()
         try:
             resolved.relative_to(workspace.resolve())
         except ValueError:
-            return "Sandbox working directory escaped the attempt workspace."
+            return "沙箱工作目录逃逸出尝试工作区。"
         return None
 
     def _denied_result(
@@ -550,7 +550,7 @@ class LocalSandboxRunner:
 
 
 class ContainerSandboxRunner(LocalSandboxRunner):
-    """通过 Docker 或 Podman 执行 sandbox 命令，并应用容器级限制。"""
+    """通过 Docker 或 Podman 执行 Container Sandbox Runner 命令，并应用容器级限制。"""
 
     def __init__(
         self,
@@ -589,7 +589,7 @@ class ContainerSandboxRunner(LocalSandboxRunner):
                 command,
                 workspace,
                 started,
-                "Container runtime is not available; install docker or podman, or use the local sandbox runner.",
+                "container runtime 不可用；请安装 docker 或 podman，或使用 Local Sandbox Runner。",
             )
 
         working_directory = self._working_directory(command, workspace)
@@ -662,7 +662,7 @@ class ContainerSandboxRunner(LocalSandboxRunner):
         if denied_reason is not None or not self.volume_name:
             return denied_reason
         if self.workspace_root is None:
-            return f"{SANDBOX_WORKSPACE_ROOT_ENV} is required when {SANDBOX_VOLUME_NAME_ENV} is set."
+            return f"设置 {SANDBOX_VOLUME_NAME_ENV} 时必须配置 {SANDBOX_WORKSPACE_ROOT_ENV}。"
         try:
             self._volume_subpath(workspace)
         except ValueError as error:
@@ -674,10 +674,10 @@ class ContainerSandboxRunner(LocalSandboxRunner):
         limitations = tuple(resource_policy.limitations or ())
         local_default_limitations = SandboxResourcePolicy().limitations
         container_limitations = (
-            "Container sandbox runner maps resource policy to Docker/Podman flags; enforcement depends on the selected runtime, host OS, and container backend.",
-            "CPU time limits use container ulimit settings and remain best-effort across Docker/Podman and host platforms.",
-            "Windows and macOS container resource controls are enforced by the backing Linux VM/cgroup layer when available.",
-            "For stricter multi-tenant isolation, evaluate gVisor, Firecracker, or an equivalent stronger sandbox runtime before production exposure.",
+            "Container Sandbox Runner 将资源策略映射为 Docker/Podman 参数；实施效果取决于所选 container runtime、主机 OS 和容器 backend。",
+            "CPU 时间限制使用容器 ulimit 设置，在不同 Docker/Podman 和主机平台上仍属于 best_effort。",
+            "Windows 和 macOS 的容器资源控制由底层 Linux VM/cgroup 层实施（若可用）。",
+            "生产暴露前，如需更严格的多租户隔离，请评估 gVisor、Firecracker 或等效的更强 sandbox runtime。",
         )
         if not limitations:
             limitations = container_limitations
@@ -711,63 +711,63 @@ class ContainerSandboxRunner(LocalSandboxRunner):
         network_policy: NetworkPolicy,
         runtime_name: str | None,
     ) -> tuple[SandboxRuntimeCapability, ...]:
-        runtime_label = runtime_name or "unavailable container runtime"
+        runtime_label = runtime_name or "不可用的容器 runtime"
         if runtime_name is None:
             return (
                 SandboxRuntimeCapability(
                     name="network",
                     status="unsupported",
-                    detail="No Docker or Podman runtime was found, so network isolation cannot be applied.",
+                    detail="未找到 Docker 或 Podman runtime，因此无法应用网络隔离。",
                 ),
                 SandboxRuntimeCapability(
                     name="process",
                     status="unsupported",
-                    detail="No Docker or Podman runtime was found, so process limits cannot be applied.",
+                    detail="未找到 Docker 或 Podman runtime，因此无法应用进程限制。",
                 ),
                 SandboxRuntimeCapability(
                     name="cpu",
                     status="unsupported",
-                    detail="No Docker or Podman runtime was found, so CPU limits cannot be applied.",
+                    detail="未找到 Docker 或 Podman runtime，因此无法应用 CPU 限制。",
                 ),
                 SandboxRuntimeCapability(
                     name="memory",
                     status="unsupported",
-                    detail="No Docker or Podman runtime was found, so memory limits cannot be applied.",
+                    detail="未找到 Docker 或 Podman runtime，因此无法应用内存限制。",
                 ),
                 SandboxRuntimeCapability(
                     name="filesystem",
                     status="unsupported",
-                    detail="No Docker or Podman runtime was found, so the attempt workspace cannot be mounted into a container.",
+                    detail="未找到 Docker 或 Podman runtime，因此无法把尝试工作区挂载到容器中。",
                 ),
             )
 
         network_status: SandboxCapabilityStatus = "enforced" if network_policy == "deny" else "best_effort"
         network_detail = (
-            f"{runtime_label} receives --network none for deny policy."
+            f"{runtime_label} 将接收 --network none 以实施 deny 策略。"
             if network_policy == "deny"
-            else f"Network access is allowed by policy; {runtime_label} network isolation is not requested."
+            else f"策略允许网络访问；未请求 {runtime_label} 网络隔离。"
         )
         process_status: SandboxCapabilityStatus = "enforced" if resource_policy.process_limit is not None else "best_effort"
         process_detail = (
-            f"{runtime_label} receives --pids-limit={resource_policy.process_limit}."
+            f"{runtime_label} 将接收 --pids-limit={resource_policy.process_limit}。"
             if resource_policy.process_limit is not None
-            else f"No process limit is configured; {runtime_label} uses its default process boundary."
+            else f"未配置进程限制；{runtime_label} 使用默认进程边界。"
         )
         memory_status: SandboxCapabilityStatus = "enforced" if resource_policy.memory_limit_bytes is not None else "best_effort"
         memory_detail = (
-            f"{runtime_label} receives --memory={resource_policy.memory_limit_bytes}; enforcement depends on cgroup support in the host/container backend."
+            f"{runtime_label} 将接收 --memory={resource_policy.memory_limit_bytes}；实施效果取决于主机/容器 backend 的 cgroup 支持。"
             if resource_policy.memory_limit_bytes is not None
-            else f"No memory limit is configured; {runtime_label} uses its default memory boundary."
+            else f"未配置内存限制；{runtime_label} 使用默认内存边界。"
         )
         cpu_detail = (
-            f"{runtime_label} receives a CPU ulimit derived from {resource_policy.cpu_time_limit_ms} ms; support differs across Docker/Podman and host platforms."
+            f"{runtime_label} 将接收由 {resource_policy.cpu_time_limit_ms} ms 换算的 CPU ulimit；不同 Docker/Podman 和主机平台的支持情况存在差异。"
             if resource_policy.cpu_time_limit_ms is not None
-            else f"No CPU time limit is configured; {runtime_label} uses its default CPU boundary."
+            else f"未配置 CPU 时间限制；{runtime_label} 使用默认 CPU 边界。"
         )
         filesystem_detail = (
-            f"The attempt workspace is mounted from Docker volume {self.volume_name!r} at /workspace using a per-attempt volume subpath."
+            f"尝试工作区从 Docker volume {self.volume_name!r} 挂载到 /workspace，并为每次尝试使用 volume subpath。"
             if self.volume_name
-            else "The attempt workspace is bind-mounted at /workspace; no read-only root filesystem or stronger runtime isolation is configured."
+            else "尝试工作区以 bind mount 挂载到 /workspace；未配置只读根文件系统或更强的 runtime 隔离。"
         )
         return (
             SandboxRuntimeCapability(name="network", status=network_status, detail=network_detail),
@@ -841,13 +841,13 @@ class ContainerSandboxRunner(LocalSandboxRunner):
 
     def _volume_subpath(self, workspace: Path) -> str:
         if self.workspace_root is None:
-            raise ValueError(f"{SANDBOX_WORKSPACE_ROOT_ENV} is required when {SANDBOX_VOLUME_NAME_ENV} is set.")
+            raise ValueError(f"设置 {SANDBOX_VOLUME_NAME_ENV} 时必须配置 {SANDBOX_WORKSPACE_ROOT_ENV}。")
         try:
             volume_subpath = workspace.resolve().relative_to(self.workspace_root).as_posix()
         except ValueError as error:
-            raise ValueError("Sandbox workspace is outside the configured named-volume root.") from error
+            raise ValueError("Sandbox workspace 位于配置的具名 volume 根目录之外。") from error
         if not volume_subpath or volume_subpath == ".":
-            raise ValueError("Sandbox named-volume workspace must use a non-root subdirectory.")
+            raise ValueError("Sandbox 具名 volume workspace 必须使用非根子目录。")
         return volume_subpath
 
     def _container_environment(self, command: SandboxCommand) -> dict[str, str]:
@@ -887,9 +887,9 @@ class GVisorSandboxRunner(ContainerSandboxRunner):
                 command,
                 workspace,
                 started,
-                "gVisor container runtime command is not configured; set "
-                "AI_JSUNPACK_SANDBOX_GVISOR_RUNTIME_COMMAND, buildValidation.gvisorRuntimeCommand, "
-                "or provide Docker/Podman with runsc configured.",
+                "未配置 gVisor container runtime 命令；请设置 "
+                "AI_JSUNPACK_SANDBOX_GVISOR_RUNTIME_COMMAND、buildValidation.gvisorRuntimeCommand，"
+                "或提供已配置 runsc 的 Docker/Podman。",
             )
         return super().run_in_workspace(command, workspace, started_at=started)
 
@@ -962,8 +962,8 @@ class FirecrackerSandboxRunner(LocalSandboxRunner):
                 command,
                 workspace,
                 started,
-                "Firecracker runner command is not configured; set AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND "
-                "or buildValidation.firecrackerRunnerCommand to use the Firecracker adapter.",
+                "未配置 Firecracker 运行器命令；请设置 AI_JSUNPACK_FIRECRACKER_RUNNER_COMMAND，"
+                "或通过 buildValidation.firecrackerRunnerCommand 使用 Firecracker 适配器。",
             )
 
         working_directory = self._working_directory(command, workspace)
@@ -984,7 +984,7 @@ class FirecrackerSandboxRunner(LocalSandboxRunner):
                 shell=False,
             )
         except OSError as error:
-            denied_reason = f"Firecracker runner command could not be started: {error}"
+            denied_reason = f"无法启动 Firecracker 运行器命令：{error}"
             return SandboxResult(
                 command=command.argv,
                 stdout="",
@@ -1043,7 +1043,7 @@ class FirecrackerSandboxRunner(LocalSandboxRunner):
                 working_directory=str(working_directory),
                 network_policy=self.policy.network_policy,
                 resource_policy=self.policy.resource_policy,
-                denied_reason="Firecracker runner did not return a valid JSON result.",
+                denied_reason="Firecracker 运行器未返回有效的 JSON 结果。",
             )
 
         stdout, stderr, guest_output_truncated = self._decode_limited_output(
@@ -1151,7 +1151,7 @@ class FirecrackerSandboxRunner(LocalSandboxRunner):
 
 
 class ProfileOnlySandboxRunner(LocalSandboxRunner):
-    """记录更强 sandbox profile，并在 adapter 接入前拒绝执行。"""
+    """记录 profile-only Sandbox Runner 配置，并在 adapter 接入前拒绝执行。"""
 
     def __init__(
         self,
@@ -1162,7 +1162,7 @@ class ProfileOnlySandboxRunner(LocalSandboxRunner):
         runtime_version: str | None = None,
     ) -> None:
         if runner_kind not in PROFILE_ONLY_RUNNERS:
-            raise ValueError(f"{runner_kind!r} is not a profile-only sandbox runner.")
+            raise ValueError(f"{runner_kind!r} 不是 profile-only Sandbox Runner。")
         profile_policy = policy or SandboxPolicy()
         resource_policy = sandbox_resource_policy_profile(
             profile_policy.resource_policy,
@@ -1185,8 +1185,8 @@ class ProfileOnlySandboxRunner(LocalSandboxRunner):
     ) -> SandboxResult:
         started = started_at if started_at is not None else time.perf_counter()
         denied_reason = (
-            f"{self.runtime_label} sandbox runner is configured as an audit profile, but this Worker does not "
-            f"include a {self.runtime_label} execution adapter. Configure a supported adapter or use the container runner."
+            f"{self.runtime_label} 已配置为 profile-only Sandbox Runner 的审计 profile，但此 Worker 不包含 "
+            f"{self.runtime_label} execution adapter。请配置受支持的 adapter，或使用 Container Sandbox Runner。"
         )
         command_denied_reason = self._denied_reason(command, workspace)
         if command_denied_reason is not None:

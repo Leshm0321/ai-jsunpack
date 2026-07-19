@@ -29,7 +29,7 @@ class ReconstructionResult:
 
 
 class ReconstructionRunner:
-    """运行确定性 Core writer，并持久化 reconstruction artifact。"""
+    """运行 deterministic Core writer，并持久化重建 Artifact。"""
 
     def __init__(self, core_bridge: CoreBridge | None = None) -> None:
         self.core_bridge = core_bridge or CoreBridge()
@@ -89,7 +89,7 @@ class ReconstructionRunner:
             plan_artifact=plan_artifact,
             generated_project_artifact=generated_project_artifact,
             project_path=store.artifact_local_path(generated_project_artifact),
-            message="Deterministic writer produced a generated_project directory for sandbox validation.",
+            message="deterministic writer 已生成用于沙箱验证的 generated_project 目录。",
         )
 
     def _with_writer_feedback(
@@ -104,7 +104,7 @@ class ReconstructionRunner:
         updated["agentFeedbackInputs"] = self._feedback_audit_summary(feedback)
         limitations = list(updated.get("limitations") if isinstance(updated.get("limitations"), list) else [])
         limitations.append(
-            "Agent Review/Fix feedback was read as deterministic writer input; only low-risk supported actions are eligible for automatic consumption."
+            "Agent Review/Fix 反馈已作为确定性 writer 输入读取；只有受支持的低风险动作可被自动使用。"
         )
         updated["limitations"] = limitations
         return updated
@@ -122,7 +122,7 @@ class ReconstructionRunner:
         except (TypeError, ValueError) as error:
             if feedback is not None:
                 raise ReconstructionError(
-                    "Core bridge feedback capability could not be verified; refusing to omit agent_feedback."
+                    "无法验证 Core bridge 的反馈能力；拒绝省略 agent_feedback。"
                 ) from error
             parameters = {}
         kwargs: dict[str, Any] = {
@@ -137,7 +137,7 @@ class ReconstructionRunner:
             )
             if not accepts_feedback:
                 raise ReconstructionError(
-                    "Core bridge does not accept agent_feedback; refusing to record unapplied writer feedback."
+                    "Core bridge 不接受 agent_feedback；拒绝记录未应用的写入器反馈。"
                 )
             kwargs["agent_feedback"] = feedback
         return self.core_bridge.reconstruct_input_package(**kwargs)
@@ -162,7 +162,7 @@ class ReconstructionRunner:
             try:
                 payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
             except Exception as error:
-                rejected.append({"sourceArtifactId": artifact.id, "reason": f"review_run could not be read: {error}"})
+                rejected.append({"sourceArtifactId": artifact.id, "reason": f"无法读取 review_run：{error}"})
                 continue
             if not isinstance(payload, dict) or payload.get("reviewType") != "agent_review":
                 continue
@@ -170,14 +170,14 @@ class ReconstructionRunner:
                 rejected.append(
                     {
                         "sourceArtifactId": artifact.id,
-                        "reason": "agent ReviewRun must pass with failureClass=none before repairs can be approved.",
+                        "reason": "批准修复前，Agent review record 必须以 failureClass=none 通过。",
                     }
                 )
                 continue
             repair_ids = payload.get("repairInstructionIds")
             if not isinstance(repair_ids, list) or not all(isinstance(item, str) and item for item in repair_ids):
                 rejected.append(
-                    {"sourceArtifactId": artifact.id, "reason": "agent ReviewRun has invalid repairInstructionIds."}
+                    {"sourceArtifactId": artifact.id, "reason": "Agent review record 的 repairInstructionIds 无效。"}
                 )
                 continue
             review_artifact_ids.append(artifact.id)
@@ -192,10 +192,10 @@ class ReconstructionRunner:
             try:
                 payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
             except Exception as error:
-                rejected.append({"sourceArtifactId": artifact.id, "reason": f"repair_instruction could not be read: {error}"})
+                rejected.append({"sourceArtifactId": artifact.id, "reason": f"无法读取 repair_instruction：{error}"})
                 continue
             if not isinstance(payload, dict):
-                rejected.append({"sourceArtifactId": artifact.id, "reason": "repair_instruction payload is not an object."})
+                rejected.append({"sourceArtifactId": artifact.id, "reason": "repair_instruction payload 不是对象。"})
                 continue
             instruction_id = payload.get("id") if isinstance(payload.get("id"), str) else None
             actions = payload.get("actions")
@@ -210,7 +210,7 @@ class ReconstructionRunner:
                     {
                         "sourceArtifactId": artifact.id,
                         **({"repairInstructionId": instruction_id} if instruction_id else {}),
-                        "reason": eligibility_reason or "repair_instruction has no actions.",
+                        "reason": eligibility_reason or "repair_instruction 不包含动作。",
                     }
                 )
                 continue
@@ -255,11 +255,11 @@ class ReconstructionRunner:
         approved_repair_ids: set[str],
     ) -> str | None:
         if artifact_id not in approved_repair_ids and (instruction_id is None or instruction_id not in approved_repair_ids):
-            return "repair_instruction was not approved by an agent ReviewRun."
+            return "repair_instruction 未获得 Agent review record 批准。"
         if payload.get("riskLevel") != "low":
-            return "repair_instruction riskLevel must be low."
+            return "repair_instruction 的 riskLevel 必须为 low。"
         if payload.get("status") != "planned":
-            return "repair_instruction status must be planned."
+            return "repair_instruction 的 status 必须为 planned。"
         return None
 
     def _normalize_action(
@@ -270,16 +270,16 @@ class ReconstructionRunner:
         payload: Any,
     ) -> tuple[dict[str, str] | None, str]:
         if not isinstance(payload, dict):
-            return None, "repair action is not an object."
+            return None, "修复动作不是对象。"
         required = ("action", "path", "value", "reason")
         if any(not isinstance(payload.get(field), str) or not payload[field].strip() for field in required):
-            return None, "repair action requires non-empty action, path, value, and reason strings."
+            return None, "修复动作要求 action、path、value 和 reason 均为非空字符串。"
         if payload["action"] not in {
             "add_package_script",
             "replace_package_script",
             "mirror_original_static_entry",
         }:
-            return None, f"Unsupported repair action: {payload['action']}."
+            return None, f"不支持的修复动作：{payload['action']}。"
         normalized = {
             "sourceArtifactId": artifact_id,
             "action": payload["action"],
@@ -304,13 +304,13 @@ class ReconstructionRunner:
             signatures = {(action["action"], action["value"]) for action in actions}
             if len(signatures) > 1:
                 rejected.extend(
-                    self._rejected_action(action, "Conflicting Review-approved actions target the same field.")
+                    self._rejected_action(action, "存在冲突的审查批准动作指向同一字段。")
                     for action in actions
                 )
                 continue
             approved.append(actions[0])
             rejected.extend(
-                self._rejected_action(action, "Duplicate Review-approved action was removed.")
+                self._rejected_action(action, "已移除重复的审查批准动作。")
                 for action in actions[1:]
             )
         return approved, rejected

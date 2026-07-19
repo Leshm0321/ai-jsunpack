@@ -61,7 +61,7 @@ export function RuntimeCompareStatus({
       comparisonArtifacts.map((artifact) =>
         fetchArtifactText(currentJob.id, artifact.id, controller.signal).then((text) => ({
           artifactId: artifact.id,
-          report: parseRuntimeComparisonReport(text)
+          report: parseRuntimeComparisonReport(text, t)
         }))
       )
     )
@@ -80,10 +80,10 @@ export function RuntimeCompareStatus({
       active = false;
       controller.abort();
     };
-  }, [currentJob?.id, comparisonArtifacts]);
+  }, [currentJob?.id, comparisonArtifacts, t]);
 
   const scenarioOptions = useMemo(() => uniqueRuntimeComparisonScenarios(comparison.reports), [comparison.reports]);
-  const viewportOptions = useMemo(() => uniqueRuntimeComparisonViewports(comparison.reports), [comparison.reports]);
+  const viewportOptions = useMemo(() => uniqueRuntimeComparisonViewports(comparison.reports, t), [comparison.reports, t]);
   const filteredReports = useMemo(
     () => comparison.reports.filter((item) => runtimeComparisonMatchesFilters(item.report, filters)),
     [comparison.reports, filters]
@@ -210,7 +210,7 @@ export function RuntimeCompareStatus({
                     >
                       <Eye size={15} aria-hidden="true" />
                       <span>{runtimeComparisonScopeLabel(item.report, t)}</span>
-                      <small>{formatScreenshotDiff(item.report.differences)}</small>
+                      <small>{formatScreenshotDiff(item.report.differences, t)}</small>
                       <StatusToken status={item.report.status} />
                     </button>
                   ))}
@@ -226,7 +226,7 @@ export function RuntimeCompareStatus({
         <>
           <div className="runtime-diff-grid" aria-label={t("app.aria.runtimeDiff")}>
             <RuntimeDiffMetric label={t("runtime.scope")} value={runtimeComparisonScopeLabel(report, t)} />
-            <RuntimeDiffMetric label={t("runtime.screenshot")} value={formatScreenshotDiff(differences)} />
+            <RuntimeDiffMetric label={t("runtime.screenshot")} value={formatScreenshotDiff(differences, t)} />
             <RuntimeDiffMetric label={t("runtime.pixels")} value={formatPixelDiff(differences, t)} />
             <RuntimeDiffMetric label={t("runtime.domPaths")} value={String(differences.domDifferences.length)} />
             <RuntimeDiffMetric label={t("runtime.networkGroups")} value={formatRuntimeGroups(differences.networkDiff.groups, t)} />

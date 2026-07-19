@@ -28,7 +28,7 @@ class ReleaseEvidenceManifestConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> ReleaseEvidenceManifestConfig:
-    parser = argparse.ArgumentParser(description="Generate a production release evidence manifest template.")
+    parser = argparse.ArgumentParser(description="生成 production release evidence Manifest 模板。")
     parser.add_argument("--release-gate-report", type=Path, required=True)
     parser.add_argument("--output", dest="output_path", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--compose-smoke-report", type=Path)
@@ -46,7 +46,7 @@ def run_release_evidence_manifest(config: ReleaseEvidenceManifestConfig) -> dict
     started = time.perf_counter()
     release_gate = read_json(config.release_gate_report)
     if release_gate.get("kind") != "release_gate_report":
-        raise ValueError("--release-gate-report must point to a release_gate_report JSON file.")
+        raise ValueError("--release-gate-report 必须指向 release_gate_report JSON 文件。")
 
     manifest: dict[str, Any] = {
         "kind": "production_release_evidence_manifest",
@@ -178,12 +178,12 @@ def rollback_evidence(release_gate: dict[str, Any], config: ReleaseEvidenceManif
 def completion_notes(release_gate: dict[str, Any]) -> list[str]:
     push_required = bool(release_gate.get("config", {}).get("push"))
     notes = [
-        "Replace every registryDigests[].digest placeholder with the digest reported by the container registry.",
-        "Replace snapshot/export/log placeholders with retained production evidence references before archive verification.",
-        "Keep containsSecretValues=false and do not record secret values in this manifest.",
+        "将每个 registryDigests[].digest placeholder 替换为 container registry 报告的 digest。",
+        "执行 archive verification 前，将 snapshot/export/log placeholder 替换为已保留的生产证据引用。",
+        "保持 containsSecretValues=false，且不要在此 Manifest 中记录 secret values。",
     ]
     if push_required:
-        notes.append("Because release gate used push=true, deploy.release_archive requires a valid digest for every service image.")
+        notes.append("由于 release gate 使用了 push=true，deploy.release_archive 要求每个 service image 都提供有效 digest。")
     return notes
 
 

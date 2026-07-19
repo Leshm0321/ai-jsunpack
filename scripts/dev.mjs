@@ -113,7 +113,7 @@ function argumentValue(args, name) {
   }
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
-    usage(`${name} requires a file path`);
+    usage(`${name} 需要文件路径`);
   }
   return value;
 }
@@ -126,7 +126,7 @@ function loadApplicationConfig(env) {
   );
   if (result.status !== 0) {
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`Unable to load application config: ${output || `exit ${result.status}`}`);
+    throw new Error(`无法加载应用配置：${output || `退出码 ${result.status}`}`);
   }
   return JSON.parse(result.stdout);
 }
@@ -180,7 +180,7 @@ function createAuthToken(env, { subject, kind }) {
   });
   if (result.status !== 0) {
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`生成本地 Bearer token 失败：${output || `exit ${result.status}`}`);
+    throw new Error(`生成本地 Bearer token 失败：${output || `退出码 ${result.status}`}`);
   }
   return result.stdout.trim();
 }

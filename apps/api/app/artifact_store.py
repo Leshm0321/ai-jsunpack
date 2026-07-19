@@ -99,7 +99,7 @@ class Boto3ObjectStorageClient:
             response = self.client.get_object(Bucket=bucket, Key=key)
         except Exception as error:
             if _is_missing_object_error(error):
-                raise FileNotFoundError(f"Object not found: s3://{bucket}/{key}") from error
+                raise FileNotFoundError(f"未找到对象：s3://{bucket}/{key}") from error
             raise
         body = response["Body"]
         try:
@@ -187,7 +187,7 @@ class Boto3ObjectStorageClient:
             from botocore.config import Config
         except ImportError as error:
             raise ArtifactStoreConfigurationError(
-                "S3/MinIO artifact store requires boto3. Install project Python dependencies first."
+                "S3/MinIO Artifact Store 需要 boto3。请先安装项目的 Python 依赖。"
             ) from error
 
         client_kwargs: dict[str, Any] = {}
@@ -294,7 +294,7 @@ class LocalArtifactStore:
     ) -> StoredArtifactRef:
         source = Path(source_path)
         if not source.exists():
-            raise FileNotFoundError(f"Artifact source path does not exist: {source}")
+            raise FileNotFoundError(f"Artifact 源路径不存在：{source}")
         target = self._target_path(job_id=job_id, artifact_id=artifact_id, filename=filename or source.name)
         if source.is_dir():
             shutil.copytree(source, target)
@@ -324,7 +324,7 @@ class LocalArtifactStore:
     def materialize_directory(self, storage_uri: str, target_dir: Path | str) -> Path:
         source = Path(storage_uri)
         if not source.is_dir():
-            raise NotADirectoryError(f"Artifact is not a directory: {storage_uri}")
+            raise NotADirectoryError(f"Artifact 不是目录：{storage_uri}")
         target = Path(target_dir)
         if target.exists():
             shutil.rmtree(target)
@@ -342,7 +342,7 @@ class LocalArtifactStore:
         root = self.root.resolve()
         resolved = target.resolve()
         if resolved != root and root not in resolved.parents:
-            raise ArtifactStoreError(f"Refusing to delete artifact outside store root: {storage_uri}")
+            raise ArtifactStoreError(f"拒绝删除 Artifact Store 根目录之外的 Artifact：{storage_uri}")
         if not target.exists() and not target.is_symlink():
             return
         if target.is_symlink() or target.is_file():
@@ -370,7 +370,7 @@ class S3CompatibleArtifactStore:
         presign_ttl_seconds: int = 3600,
     ) -> None:
         if not bucket:
-            raise ArtifactStoreConfigurationError("S3-compatible artifact store requires a bucket name.")
+            raise ArtifactStoreConfigurationError("S3-compatible Artifact Store 需要指定 bucket 名称。")
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.client = client
@@ -406,7 +406,7 @@ class S3CompatibleArtifactStore:
     ) -> StoredArtifactRef:
         source = Path(source_path)
         if not source.exists():
-            raise FileNotFoundError(f"Artifact source path does not exist: {source}")
+            raise FileNotFoundError(f"Artifact 源路径不存在：{source}")
         if source.is_dir():
             base_key = self._object_key(job_id=job_id, artifact_id=artifact_id, filename=filename).rstrip("/")
             digest, size = hash_directory(source)
@@ -433,7 +433,7 @@ class S3CompatibleArtifactStore:
     def read_bytes(self, storage_uri: str) -> bytes:
         bucket, key = self._parse_uri(storage_uri)
         if storage_uri.endswith("/"):
-            raise IsADirectoryError(f"Artifact is a directory prefix: {storage_uri}")
+            raise IsADirectoryError(f"Artifact 是目录前缀：{storage_uri}")
         return self._client().get_object(bucket, key)
 
     def exists(self, storage_uri: str) -> bool:
@@ -460,7 +460,7 @@ class S3CompatibleArtifactStore:
         target.mkdir(parents=True, exist_ok=True)
         object_keys = self._client().list_objects(bucket, prefix)
         if not object_keys:
-            raise FileNotFoundError(f"Directory artifact content not found: {storage_uri}")
+            raise FileNotFoundError(f"未找到目录 Artifact 内容：{storage_uri}")
         for object_key in object_keys:
             relative = PurePosixPath(object_key.removeprefix(prefix))
             if not relative.parts or ".." in relative.parts:
@@ -488,11 +488,11 @@ class S3CompatibleArtifactStore:
     def presigned_read_url(self, storage_uri: str, *, expires_in_seconds: int | None = None) -> str:
         bucket, key = self._parse_uri(storage_uri)
         if storage_uri.endswith("/"):
-            raise IsADirectoryError(f"Artifact is a directory prefix: {storage_uri}")
+            raise IsADirectoryError(f"Artifact 是目录前缀：{storage_uri}")
         client = self._client()
         signer = getattr(client, "presigned_get_object_url", None)
         if not callable(signer):
-            raise ArtifactStoreConfigurationError("S3-compatible artifact store client does not support signed URLs.")
+            raise ArtifactStoreConfigurationError("兼容 S3 的 Artifact Store client 不支持签名 URL。")
         return signer(
             bucket,
             key,
@@ -502,7 +502,7 @@ class S3CompatibleArtifactStore:
     def _client(self) -> ObjectStorageClient:
         if self.client is None:
             raise ArtifactStoreConfigurationError(
-                "S3-compatible artifact store requires an ObjectStorageClient adapter; no SDK is bundled."
+                "兼容 S3 的 Artifact Store 需要 ObjectStorageClient 适配器；项目未内置相应 SDK。"
             )
         return self.client
 
@@ -517,7 +517,7 @@ class S3CompatibleArtifactStore:
     def _parse_uri(self, storage_uri: str) -> tuple[str, str]:
         parsed = urlparse(storage_uri)
         if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
-            raise ValueError(f"Unsupported S3 artifact URI: {storage_uri}")
+            raise ValueError(f"不支持的 S3 Artifact URI：{storage_uri}")
         return parsed.netloc, parsed.path.lstrip("/")
 
 
@@ -544,7 +544,7 @@ class InMemoryObjectStorageClient:
         try:
             return self.objects[(bucket, key)]
         except KeyError as error:
-            raise FileNotFoundError(f"Object not found: s3://{bucket}/{key}") from error
+            raise FileNotFoundError(f"未找到对象：s3://{bucket}/{key}") from error
 
     def object_exists(self, bucket: str, key: str) -> bool:
         return (bucket, key) in self.objects
@@ -559,7 +559,7 @@ class InMemoryObjectStorageClient:
 
     def presigned_get_object_url(self, bucket: str, key: str, *, expires_in_seconds: int) -> str:
         if not self.object_exists(bucket, key):
-            raise FileNotFoundError(f"Object not found: s3://{bucket}/{key}")
+            raise FileNotFoundError(f"未找到对象：s3://{bucket}/{key}")
         return f"https://object-storage.local/{bucket}/{key}?expires={expires_in_seconds}"
 
 
@@ -580,7 +580,7 @@ def hash_directory(directory: Path) -> tuple[str, int]:
 
 def artifact_lifecycle_rules(*, prefix: str, ephemeral_days: int) -> list[dict[str, Any]]:
     if ephemeral_days <= 0:
-        raise ArtifactStoreConfigurationError("S3 artifact lifecycle days must be greater than zero.")
+        raise ArtifactStoreConfigurationError("S3 Artifact 生命周期天数必须大于零。")
     normalized_prefix = prefix.strip("/")
     prefix_filter = f"{normalized_prefix}/" if normalized_prefix else ""
     return [

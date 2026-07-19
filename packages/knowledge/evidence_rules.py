@@ -21,11 +21,11 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                 KnowledgeHit(
                     id=f"knowledge_validation_build_{slug_value}",
                     category="validation_feedback",
-                    label=f"Build validation feedback: {review_type}",
+                    label=f"构建验证反馈：{review_type}",
                     locator=f"knowledge:validation_feedback/build/{slug_value}",
                     excerpt=excerpt(
                         payload,
-                        fallback="Existing build/typecheck evidence should guide low-risk repair suggestions.",
+                        fallback="现有构建和类型检查证据应指导低风险修复建议。",
                     ),
                     confidence=0.78,
                     source_artifact_ids=source_artifact_ids,
@@ -39,7 +39,7 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                 KnowledgeHit(
                     id=f"knowledge_validation_runtime_{slug_value}",
                     category="validation_feedback",
-                    label=f"Runtime validation feedback: {target}",
+                    label=f"运行时验证反馈：{target}",
                     locator=f"knowledge:validation_feedback/runtime/{slug_value}",
                     excerpt=runtime_validation_excerpt(payload),
                     confidence=0.8,
@@ -58,11 +58,11 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                         KnowledgeHit(
                             id=f"knowledge_browser_shim_runtime_boundary_{slug_value}",
                             category="browser_shim",
-                            label="Runtime execution boundary evidence",
+                            label="运行时执行边界证据",
                             locator=f"knowledge:browser_shim/runtime_boundary/{slug_value}",
                             excerpt=(
-                                "Existing runtime trace captured browser execution boundary "
-                                f"with runner(s): {', '.join(runner_values)}."
+                                "现有运行时 trace 已捕获浏览器执行边界，"
+                                f"runner：{', '.join(runner_values)}。"
                             ),
                             confidence=0.77,
                             source_artifact_ids=source_artifact_ids,
@@ -75,7 +75,7 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                     KnowledgeHit(
                         id=f"knowledge_validation_runtime_trace_{slug_value}",
                         category="validation_feedback",
-                        label="Runtime trace feedback",
+                        label="运行时 trace 反馈",
                         locator=f"knowledge:validation_feedback/runtime_trace/{slug_value}",
                         excerpt=runtime_validation_excerpt(payload),
                         confidence=0.79,
@@ -89,9 +89,9 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                 KnowledgeHit(
                     id=f"knowledge_validation_runtime_comparison_{slug_value}",
                     category="validation_feedback",
-                    label="Runtime comparison feedback",
+                    label="运行时对比反馈",
                     locator=f"knowledge:validation_feedback/runtime_compare/{slug_value}",
-                    excerpt="Existing runtime comparison differences should guide behavior-preserving repair review.",
+                    excerpt="现有运行时对比差异应指导保持行为的修复审查。",
                     confidence=0.82,
                     source_artifact_ids=source_artifact_ids,
                     source_kinds=[kind],
@@ -104,11 +104,11 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                 KnowledgeHit(
                     id=f"knowledge_review_feedback_{slug_value}",
                     category="validation_feedback",
-                    label=f"Review feedback: {review_type}",
+                    label=f"审查反馈：{review_type}",
                     locator=f"knowledge:validation_feedback/review/{slug_value}",
                     excerpt=excerpt(
                         payload,
-                        fallback="Existing review evidence should remain audit-only unless a deterministic repair consumes it.",
+                        fallback="除非确定性修复使用了现有审查证据，否则该证据应仅用于审计。",
                     ),
                     confidence=0.76,
                     source_artifact_ids=source_artifact_ids,
@@ -123,11 +123,11 @@ def extend_prior_evidence_hits(*, hits: list[KnowledgeHit], payloads: list[dict[
                 KnowledgeHit(
                     id=f"knowledge_repair_case_{slug_value}",
                     category="repair_case",
-                    label=f"Current-job repair case: {target_stage}",
+                    label=f"当前任务修复案例：{target_stage}",
                     locator=f"knowledge:repair_case/current_job/{slug_value}",
                     excerpt=excerpt(
                         payload,
-                        fallback="Existing repair instruction can be used as current-job historical context only.",
+                        fallback="现有修复指令只能作为当前任务的历史上下文使用。",
                     ),
                     confidence=0.84 if risk == "low" else 0.72,
                     source_artifact_ids=source_artifact_ids,
@@ -144,13 +144,13 @@ def extend_historical_repair_hits(*, hits: list[KnowledgeHit], payloads: list[di
         if kind == "repair_instruction":
             target_stage = str(payload.get("targetStage") or "repair")
             risk = str(payload.get("riskLevel") or "unknown")
-            decision = excerpt(payload, fallback="Historical repair case available for evidence reference only.")
+            decision = excerpt(payload, fallback="历史修复案例仅可作为证据引用。")
             slug_value = slug(f"{target_stage}_{risk}_{current_artifact_id or 'historical'}") or "historical_repair_case"
             hits.append(
                 KnowledgeHit(
                     id=f"knowledge_historical_repair_case_{slug_value}",
                     category="historical_repair_case",
-                    label=f"Historical repair case: {target_stage}",
+                    label=f"历史修复案例：{target_stage}",
                     locator=f"knowledge:repair_case/historical/{slug_value}",
                     excerpt=decision,
                     confidence=0.66 if risk == "low" else 0.58,
@@ -168,11 +168,11 @@ def extend_historical_repair_hits(*, hits: list[KnowledgeHit], payloads: list[di
                     KnowledgeHit(
                         id=f"knowledge_historical_review_feedback_{slug_value}",
                         category="historical_validation_feedback",
-                        label=f"Historical review feedback: {review_type}",
+                        label=f"历史审查反馈：{review_type}",
                         locator=f"knowledge:validation_feedback/historical_review/{slug_value}",
                         excerpt=excerpt(
                             payload,
-                            fallback="Historical review evidence is evidence-only and same-project scoped.",
+                            fallback="历史审查证据仅作为证据使用，并限定在同一项目范围内。",
                         ),
                         confidence=0.62,
                         source_artifact_ids=source_artifact_ids,
@@ -188,9 +188,9 @@ def extend_historical_repair_hits(*, hits: list[KnowledgeHit], payloads: list[di
                     KnowledgeHit(
                         id=f"knowledge_historical_runtime_comparison_{slug_value}",
                         category="historical_validation_feedback",
-                        label="Historical runtime comparison feedback",
+                        label="历史运行时对比反馈",
                         locator=f"knowledge:validation_feedback/historical_runtime_compare/{slug_value}",
-                        excerpt="Historical runtime comparison differences are evidence-only and same-project scoped.",
+                        excerpt="历史运行时对比差异仅作为证据使用，并限定在同一项目范围内。",
                         confidence=0.64,
                         source_artifact_ids=source_artifact_ids,
                         source_kinds=[kind],

@@ -80,7 +80,7 @@ export function AppContainer({
       })
       .catch((error) => {
         if (active) {
-          setPollError(errorMessage(error));
+          setPollError(errorMessage(error, t));
         }
       })
       .finally(() => {
@@ -91,14 +91,14 @@ export function AppContainer({
     return () => {
       active = false;
     };
-  }, [routeJobId, currentJob?.id]);
+  }, [routeJobId, currentJob?.id, t]);
 
   useEffect(() => {
     if (!currentJob?.id || !selectedArtifact || route.kind !== "workbench" || route.section !== "artifacts") {
       setArtifactPreview(emptyArtifactPreview());
       return;
     }
-    const previewSupport = artifactPreviewSupport(selectedArtifact);
+    const previewSupport = artifactPreviewSupport(selectedArtifact, t);
     if (!previewSupport.supported) {
       setArtifactPreview({ artifactId: selectedArtifact.id, error: null, reason: previewSupport.reason, status: "unsupported", text: null });
       return;
@@ -109,11 +109,11 @@ export function AppContainer({
       .then((text) => setArtifactPreview({ artifactId: selectedArtifact.id, error: null, reason: null, status: "ready", text: formatArtifactPreviewText(selectedArtifact, text) }))
       .catch((error) => {
         if (!(error instanceof Error && error.name === "AbortError")) {
-          setArtifactPreview({ artifactId: selectedArtifact.id, error: errorMessage(error), reason: null, status: "error", text: null });
+          setArtifactPreview({ artifactId: selectedArtifact.id, error: errorMessage(error, t), reason: null, status: "error", text: null });
         }
       });
     return () => controller.abort();
-  }, [currentJob?.id, route.kind, route.kind === "workbench" ? route.section : null, selectedArtifact]);
+  }, [currentJob?.id, route.kind, route.kind === "workbench" ? route.section : null, selectedArtifact, t]);
 
   useEffect(() => {
     if (!currentJob?.id) {
@@ -130,7 +130,7 @@ export function AppContainer({
         }
       } catch (error) {
         if (!cancelled) {
-          setPollError(errorMessage(error));
+          setPollError(errorMessage(error, t));
         }
       }
     };
@@ -139,7 +139,7 @@ export function AppContainer({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [currentJob?.id]);
+  }, [currentJob?.id, t]);
 
   const handleSubmitJob = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -161,7 +161,7 @@ export function AppContainer({
       setEvidence(await fetchJobEvidence(created.job.id));
       onNavigate(workbenchPath(uploaded.job.id, "overview"));
     } catch (error) {
-      setUploadError(errorMessage(error));
+      setUploadError(errorMessage(error, t));
     } finally {
       setIsSubmitting(false);
     }
@@ -176,7 +176,7 @@ export function AppContainer({
       setJobSummary(workspace.summary);
       setEvidence(workspace.evidence);
     } catch (error) {
-      setPollError(errorMessage(error));
+      setPollError(errorMessage(error, t));
     } finally {
       setIsRefreshing(false);
     }
@@ -195,7 +195,7 @@ export function AppContainer({
       setEvidence(await fetchJobEvidence(rerun.job.id));
       onNavigate(workbenchPath(rerun.job.id, "overview"));
     } catch (error) {
-      setPollError(errorMessage(error));
+      setPollError(errorMessage(error, t));
     } finally {
       setIsRerunning(false);
     }

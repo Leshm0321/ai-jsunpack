@@ -25,11 +25,11 @@ class ToolSpec:
     def to_registry_entry(self, job_id: str) -> ToolRegistryEntry:
         behavior: list[str] = []
         if self.stateful:
-            behavior.append("stateful")
+            behavior.append("有状态")
         if not self.parallel_safe:
-            behavior.append("not parallel-safe")
+            behavior.append("不支持安全并行")
         if self.side_effects:
-            behavior.append(f"side effects: {', '.join(self.side_effects)}")
+            behavior.append(f"副作用：{', '.join(self.side_effects)}")
         description = self.description
         if behavior:
             description = f"{description} ({'; '.join(behavior)})."
@@ -48,7 +48,7 @@ class ToolSpec:
 
 
 class AgentToolRegistryBuilder:
-    """Creates auditable tool registry entries from declarative tool specs."""
+    """根据声明式工具规格创建可审计的工具注册表条目。"""
 
     def specs(self) -> list[ToolSpec]:
         return [
@@ -70,8 +70,8 @@ class AgentToolRegistryBuilder:
                 ],
                 failure_classes=["none", "policy_denied", "agent_failed", "resource_limit"],
                 description=(
-                    "Runs schema-first Agent analysis over deterministic Core evidence in an isolated "
-                    "child process with a per-invocation CrewAI storage root."
+                    "在隔离的子进程中基于确定性 Core 证据运行 schema 优先的 Agent 分析，"
+                    "并为每次调用使用独立的 CrewAI 存储根目录。"
                 ),
                 stateful=True,
                 parallel_safe=True,
@@ -85,7 +85,7 @@ class AgentToolRegistryBuilder:
                 input_artifact_kinds=["input_inventory", "ast_index"],
                 output_artifact_kinds=["memory_record"],
                 failure_classes=["none", "unknown"],
-                description="Builds short-term, long-term, entity, and scenario memory records for the current project.",
+                description="为当前项目构建短期、长期、实体和场景记忆记录。",
                 side_effects=["artifact_write"],
             ),
             ToolSpec(
@@ -107,7 +107,7 @@ class AgentToolRegistryBuilder:
                 ],
                 output_artifact_kinds=["knowledge_evidence"],
                 failure_classes=["none", "unknown"],
-                description="Retrieves static build, framework, runtime, repair, current-job validation, and same-project historical evidence hints.",
+                description="检索静态构建、框架、运行时、修复、当前任务验证以及同项目历史证据线索。",
                 side_effects=["artifact_write"],
             ),
         ]

@@ -15,9 +15,9 @@ export interface LocalizationValue {
 const translations = { en, zh } satisfies Record<Language, TranslationTable>;
 
 export const LocalizationContext = createContext<LocalizationValue>({
-  language: "en",
+  language: "zh",
   setLanguage: () => undefined,
-  t: (key) => translate("en", key)
+  t: (key) => translate("zh", key)
 });
 
 const languageStorageKey = "ai-jsunpack.language.v1";
@@ -30,13 +30,13 @@ export function translate(language: Language, key: string): string {
 
 export function readPreferredLanguage(): Language {
   if (typeof window === "undefined") {
-    return "en";
+    return "zh";
   }
   try {
     const value = window.localStorage.getItem(languageStorageKey);
-    return value === "zh" || value === "en" ? value : "en";
+    return value === "zh" || value === "en" ? value : "zh";
   } catch {
-    return "en";
+    return "zh";
   }
 }
 
@@ -47,7 +47,7 @@ export function persistPreferredLanguage(language: Language): void {
   try {
     window.localStorage.setItem(languageStorageKey, language);
   } catch {
-    // Ignore unavailable storage; the in-memory language still updates.
+    // 忽略不可用的存储；内存中的语言状态仍会更新。
   }
 }
 

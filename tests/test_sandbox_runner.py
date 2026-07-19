@@ -26,7 +26,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.failure_class, "sandbox_denied")
         self.assertIsNone(result.exit_code)
-        self.assertIn("not allowed", result.denied_reason or "")
+        self.assertIn("不允许执行命令", result.denied_reason or "")
 
     def test_production_profile_denies_allowed_local_command(self):
         runner = LocalSandboxRunner(
@@ -124,7 +124,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(result.failure_class, "sandbox_denied")
-        self.assertIn("relative", result.stderr)
+        self.assertIn("相对于尝试工作区", result.stderr)
 
     def test_records_resource_policy_for_audit(self):
         runner = LocalSandboxRunner(
@@ -146,8 +146,8 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIsNone(result.resource_policy.runtime_name)
         self.assertTrue(result.resource_policy.host_platform)
         self.assertEqual(result.resource_policy.process_limit, 8)
-        self.assertIn("does not enforce", result.resource_policy.limitations[0])
-        self.assertIn("production multi-tenant isolation", result.resource_policy.limitations[1])
+        self.assertIn("不会强制实施", result.resource_policy.limitations[0])
+        self.assertIn("生产多租户隔离", result.resource_policy.limitations[1])
         capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
         self.assertEqual(capabilities["network"].status, "best_effort")
         self.assertEqual(capabilities["cpu"].status, "best_effort")
@@ -168,7 +168,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         capabilities = {capability.name: capability for capability in result.resource_policy.capabilities}
         self.assertEqual(capabilities["network"].status, "unsupported")
         self.assertEqual(capabilities["memory"].status, "unsupported")
-        self.assertIn("Container runtime is not available", result.denied_reason or "")
+        self.assertIn("container runtime 不可用", result.denied_reason or "")
 
     def test_container_runner_maps_policy_to_runtime_arguments(self):
         secret_name = "AI_JSUNPACK_TEST_SECRET"
@@ -284,7 +284,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
             result = runner.run_in_workspace(SandboxCommand(executable="node"), outside)
 
         self.assertEqual(result.failure_class, "sandbox_denied")
-        self.assertIn("outside the configured named-volume root", result.denied_reason or "")
+        self.assertIn("配置的具名 volume 根目录之外", result.denied_reason or "")
 
     def test_gvisor_profile_records_unsupported_capabilities_without_adapter(self):
         policy = sandbox_resource_policy_profile(
@@ -298,8 +298,8 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(policy.runtime_name, "runsc")
         capabilities = {capability.name: capability for capability in policy.capabilities}
         self.assertEqual(capabilities["network"].status, "unsupported")
-        self.assertIn("audit profile only", capabilities["network"].detail)
-        self.assertIn("gVisor deployments", policy.limitations[0])
+        self.assertIn("profile-only Sandbox Runner", capabilities["network"].detail)
+        self.assertIn("gVisor 部署", policy.limitations[0])
 
     def test_gvisor_runner_maps_policy_to_runsc_runtime_arguments(self):
         secret_name = "AI_JSUNPACK_TEST_SECRET"
@@ -373,7 +373,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
         self.assertEqual(result.resource_policy.runner_kind, "gvisor")
-        self.assertIn("gVisor container runtime command is not configured", result.denied_reason or "")
+        self.assertIn("未配置 gVisor container runtime 命令", result.denied_reason or "")
 
     def test_remote_browser_runner_profile_records_remote_isolation_boundary(self):
         policy = sandbox_resource_policy_profile(
@@ -387,8 +387,8 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertEqual(policy.runtime_name, "playwright-remote")
         capabilities = {capability.name: capability for capability in policy.capabilities}
         self.assertEqual(capabilities["process"].status, "enforced")
-        self.assertIn("Browser Runner service", capabilities["process"].detail)
-        self.assertIn("browser/runtime validation", policy.limitations[0])
+        self.assertIn("Browser Runner 服务", capabilities["process"].detail)
+        self.assertIn("浏览器/runtime 验证", policy.limitations[0])
 
     def test_profile_only_runner_denies_execution_without_fallback(self):
         runner = ProfileOnlySandboxRunner(
@@ -402,7 +402,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertEqual(result.resource_policy.enforcement, "remote_isolated")
         self.assertEqual(result.resource_policy.runner_kind, "remote_browser_runner")
-        self.assertIn("does not include a Remote Browser Runner execution adapter", result.denied_reason or "")
+        self.assertIn("不包含 Remote Browser Runner execution adapter", result.denied_reason or "")
 
     def test_firecracker_runner_requires_configured_launcher(self):
         runner = FirecrackerSandboxRunner(SandboxPolicy(allowed_commands=((sys.executable,),)))
@@ -413,7 +413,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertEqual(result.resource_policy.enforcement, "runtime_isolated")
         self.assertEqual(result.resource_policy.runner_kind, "firecracker")
-        self.assertIn("runner command is not configured", result.denied_reason or "")
+        self.assertIn("未配置 Firecracker 运行器命令", result.denied_reason or "")
 
     def test_firecracker_runner_delegates_to_launcher_protocol(self):
         secret_name = "AI_JSUNPACK_TEST_SECRET"
@@ -494,7 +494,7 @@ class LocalSandboxRunnerTest(unittest.TestCase):
             result = runner.run(SandboxCommand(executable=sys.executable, args=("-c", "print('guest')")))
 
         self.assertEqual(result.failure_class, "sandbox_denied")
-        self.assertEqual(result.denied_reason, "Firecracker runner did not return a valid JSON result.")
+        self.assertEqual(result.denied_reason, "Firecracker 运行器未返回有效的 JSON 结果。")
         self.assertIn("not json", result.stdout)
 
 

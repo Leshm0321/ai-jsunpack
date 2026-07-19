@@ -87,7 +87,7 @@ class LeaseRenewer:
                 try:
                     self.on_renew()
                 except Exception as error:
-                    logger.debug("Lease renew callback failed for job %s: %s", self.job_id, error, exc_info=True)
+                    logger.debug("任务 %s 的租约续期回调失败：%s", self.job_id, error, exc_info=True)
 
 
 class WorkerQueueRunner:
@@ -113,7 +113,7 @@ class WorkerQueueRunner:
         self.store.requeue_expired_leases(max_attempts=self.max_attempts)
         self._record_ops_heartbeat(
             status=self._heartbeat_status(),
-            metrics=self._ops_metrics_snapshot(phase="poll", job_id=None, job_status=None, message="poll loop"),
+            metrics=self._ops_metrics_snapshot(phase="poll", job_id=None, job_status=None, message="轮询循环"),
         )
         job = self.store.lease_next_job(
             worker_id=self.worker_id,
@@ -123,7 +123,7 @@ class WorkerQueueRunner:
         if job is None:
             self._record_ops_heartbeat(
                 status=self._heartbeat_status(),
-                metrics=self._ops_metrics_snapshot(phase="idle", job_id=None, job_status=None, message="no job available"),
+                metrics=self._ops_metrics_snapshot(phase="idle", job_id=None, job_status=None, message="没有可用任务"),
             )
             return None
         return self.run_leased_job(job)
@@ -153,7 +153,7 @@ class WorkerQueueRunner:
                             phase="lease_renewed",
                             job_id=job.id,
                             job_status="leased",
-                            message="lease renewed",
+                            message="租约已续期",
                         ),
                     ),
                 )
@@ -165,7 +165,7 @@ class WorkerQueueRunner:
                             phase="running",
                             job_id=job.id,
                             job_status="leased",
-                            message="job leased",
+                            message="任务已租用",
                         ),
                     )
                     pipeline_run = self.pipeline.run(job.id, input_path=input_path, store=proxy)
@@ -174,7 +174,7 @@ class WorkerQueueRunner:
 
             current = self.store.get_job(job.id)
             status = current.status if current is not None else "failed"
-            message = pipeline_run.events[-1].message if pipeline_run.events else "Worker pipeline finished."
+            message = pipeline_run.events[-1].message if pipeline_run.events else "Worker pipeline 已结束。"
             self._record_ops_heartbeat(
                 status=self._heartbeat_status(job_status=status),
                 metrics=self._ops_metrics_snapshot(
@@ -201,7 +201,7 @@ class WorkerQueueRunner:
                     OpsAlert(
                         code="worker_pipeline_failed",
                         severity="warning",
-                        message="Worker pipeline failed for the current job.",
+                        message="当前任务的 Worker pipeline 执行失败。",
                         field="failureClass",
                         value=failure_class,
                         threshold="none",
@@ -221,10 +221,10 @@ class WorkerQueueRunner:
 
     def _source_artifact(self, job: JobRecord) -> ArtifactRecord:
         if job.input_artifact_id is None:
-            raise ValueError(f"Job {job.id} has no source input artifact.")
+            raise ValueError(f"任务 {job.id} 没有源输入 artifact。")
         source_artifact = self.store.get_artifact(job.id, job.input_artifact_id)
         if source_artifact is None:
-            raise ValueError(f"Job {job.id} source input artifact is missing: {job.input_artifact_id}")
+            raise ValueError(f"任务 {job.id} 的源输入 artifact 缺失：{job.input_artifact_id}")
         return source_artifact
 
     @contextmanager
@@ -289,7 +289,7 @@ class WorkerQueueRunner:
                 OpsAlert(
                     code="worker_deployment_profile_warning",
                     severity="warning",
-                    message="Worker deployment profile is not fully ok.",
+                    message="Worker deployment profile 状态不是完全正常。",
                     field="deploymentProfile",
                     value=self.deployment_profile.status,
                     threshold="ok",
@@ -313,7 +313,7 @@ class WorkerQueueRunner:
                 )
             )
         except Exception as error:
-            logger.debug("Worker ops heartbeat could not be recorded: %s", error, exc_info=True)
+            logger.debug("无法记录 Worker 运维心跳：%s", error, exc_info=True)
             return
 
 

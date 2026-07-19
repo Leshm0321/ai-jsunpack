@@ -64,7 +64,7 @@ class WorkerPipelineTest(unittest.TestCase):
         npm = shutil.which("npm")
         node = shutil.which("node")
         if npm is None or node is None:
-            raise unittest.SkipTest("npm and node are required for worker Core integration checks")
+            raise unittest.SkipTest("Worker Core 集成检查需要 npm 和 node")
 
         subprocess.run(
             [npm, "run", "build", "--workspace", "@ai-jsunpack/shared"],
@@ -346,18 +346,18 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(typecheck_review_artifact.id, runtime_compare_trace_artifact.parent_artifact_ids)
                 self.assertIn(runtime_compare_review_artifact.id, artifact_by_kind["audit_report"].parent_artifact_ids)
                 audit_report = Path(artifact_by_kind["audit_report"].storage_uri).read_text(encoding="utf-8")
-                self.assertIn("# AI JS Unpack Audit Report", audit_report)
+                self.assertIn("# AI JS Unpack 审计报告", audit_report)
                 self.assertIn("completed_best_effort", audit_report)
-                self.assertIn("## Evidence Attachment Index", audit_report)
-                self.assertIn("## Review/Fix Convergence", audit_report)
-                self.assertIn("## Runtime Compare Difference Summary", audit_report)
-                self.assertIn("## Agent Runtime Audit", audit_report)
+                self.assertIn("## 证据附件索引", audit_report)
+                self.assertIn("## Review/Fix 收敛情况", audit_report)
+                self.assertIn("## 运行时对比差异摘要", audit_report)
+                self.assertIn("## Agent 运行时审计", audit_report)
                 html_report = Path(artifact_by_kind["html_report"].storage_uri).read_text(encoding="utf-8")
                 self.assertIn("<!doctype html>", html_report)
-                self.assertIn("Evidence Attachment Index", html_report)
-                self.assertIn("Review/Fix Convergence", html_report)
-                self.assertIn("Runtime Compare Difference Summary", html_report)
-                self.assertIn("Agent Runtime Audit", html_report)
+                self.assertIn("证据附件索引", html_report)
+                self.assertIn("Review/Fix 收敛情况", html_report)
+                self.assertIn("运行时对比差异摘要", html_report)
+                self.assertIn("Agent 运行时审计", html_report)
                 evidence_index_payload = json.loads(
                     Path(artifact_by_kind["evidence_index"].storage_uri).read_text(encoding="utf-8")
                 )
@@ -443,7 +443,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(inventory_payload["inventory"]["isSingleBundle"])
                 self.assertTrue(
                     any(
-                        "single_script file was wrapped" in warning
+                        "single_script 文件已封装" in warning
                         for warning in inventory_payload["inventory"]["warnings"]
                     )
                 )
@@ -632,7 +632,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("mirror_original_static_entry", runtime_mapping["automaticActions"])
                 self.assertEqual(
                     review_fix_summary["nextSteps"],
-                    ["No user action is required; retain the review-fix summary with the result package for audit."],
+                    ["无需用户操作；请随结果包保留 Review/Fix 摘要以供审计。"],
                 )
                 self.assertIn(audit_report.id, result_package.parent_artifact_ids)
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
@@ -722,7 +722,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(review_fix_summary["runtimeCompare"]["attemptsUsed"], 3)
                 self.assertTrue(review_fix_summary["runtimeCompare"]["budgetExhausted"])
                 self.assertTrue(
-                    any("Runtime compare retry budget was exhausted" in step for step in review_fix_summary["nextSteps"])
+                    any("运行时对比重试预算已耗尽" in step for step in review_fix_summary["nextSteps"])
                 )
                 runtime_mapping = next(
                     item for item in review_fix_summary["failureActionMap"] if item["failureClass"] == "runtime_error"
@@ -733,10 +733,10 @@ class WorkerPipelineTest(unittest.TestCase):
                 report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
                 review_fix_details = report_sections["review-fix-convergence"]["details"]
-                matrix_detail = next(item for item in runtime_details if item["label"] == "Runtime compare matrix summary")
-                scope_detail = next(item for item in runtime_details if item["label"] == "Runtime compare scope")
+                matrix_detail = next(item for item in runtime_details if item["label"] == "运行时对比矩阵摘要")
+                scope_detail = next(item for item in runtime_details if item["label"] == "运行时对比范围")
                 review_fix_detail = next(
-                    item for item in review_fix_details if item["label"] == "Review/Fix convergence summary"
+                    item for item in review_fix_details if item["label"] == "Review/Fix 收敛摘要"
                 )
                 self.assertEqual(matrix_detail["status"], "fail")
                 self.assertTrue(matrix_detail["details"]["retryBudget"]["budgetExhausted"])
@@ -746,14 +746,14 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertTrue(review_fix_detail["details"]["policy"]["allowLowRiskRepairs"])
                 self.assertTrue(review_fix_detail["details"]["activeFailureActionMap"])
                 self.assertTrue(
-                    any("Runtime compare retry budget was exhausted" in step for step in review_fix_detail["details"]["nextSteps"])
+                    any("运行时对比重试预算已耗尽" in step for step in review_fix_detail["details"]["nextSteps"])
                 )
                 self.assertEqual(len(scope_detail["details"]["attemptHistory"]), 3)
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix next step" for item in review_fix_details)
+                    any(item["label"] == "Review/Fix 后续步骤" for item in review_fix_details)
                 )
                 self.assertTrue(
-                    any(item["label"] == "Review/Fix failure action map" for item in review_fix_details)
+                    any(item["label"] == "Review/Fix 失败动作映射" for item in review_fix_details)
                 )
                 self.assertTrue(
                     any(
@@ -763,13 +763,13 @@ class WorkerPipelineTest(unittest.TestCase):
                 )
                 self.assertTrue(
                     any(
-                        item["label"] == "Runtime compare matrix summary" and item["status"] == "fail"
+                        item["label"] == "运行时对比矩阵摘要" and item["status"] == "fail"
                         for item in report_sections["risk-and-failure-groups"]["details"]
                     )
                 )
                 self.assertTrue(
                     any(
-                        item["label"] == "Review/Fix convergence summary" and item["status"] == "best_effort"
+                        item["label"] == "Review/Fix 收敛摘要" and item["status"] == "best_effort"
                         for item in report_sections["risk-and-failure-groups"]["details"]
                     )
                 )

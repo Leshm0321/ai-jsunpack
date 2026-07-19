@@ -52,7 +52,7 @@ def _positive_int_env(name: str, default: int) -> int:
 def main() -> int:
     secret = os.getenv(AUTH_SECRET_ENV, "").strip()
     if not secret:
-        raise RuntimeError(f"{AUTH_SECRET_ENV} is required")
+        raise RuntimeError(f"必须设置 {AUTH_SECRET_ENV}")
     output_dir = Path(os.getenv(OUTPUT_DIR_ENV, "/run/ai-jsunpack-auth"))
     paths = generate_tokens(
         output_dir,

@@ -56,10 +56,10 @@ class SyntheticBrowserAdapter:
             if self.fail_every and capture_index % self.fail_every == 0:
                 with self._lock:
                     self.failed_captures += 1
-                raise RuntimeError(f"synthetic browser capture failure {capture_index}")
+                raise RuntimeError(f"模拟浏览器捕获失败：{capture_index}")
             request.screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nbrowser-runner-soak")
             return BrowserSmokeCapture(
-                console_messages=[f"synthetic capture {capture_index}"],
+                console_messages=[f"模拟捕获 {capture_index}"],
                 responses=[f"200 {request.entry_url}"],
                 dom_summary={"title": "browser-runner-soak", "nodeCount": 1},
             )
@@ -131,17 +131,17 @@ def run_browser_runner_soak(config: BrowserRunnerSoakConfig) -> dict[str, Any]:
 
 def _validate_config(config: BrowserRunnerSoakConfig) -> None:
     if config.instances < 1:
-        raise ValueError("instances must be >= 1")
+        raise ValueError("instances 必须大于或等于 1")
     if config.workers_per_instance < 1:
-        raise ValueError("workers_per_instance must be >= 1")
+        raise ValueError("workers_per_instance 必须大于或等于 1")
     if config.runs < 1:
-        raise ValueError("runs must be >= 1")
+        raise ValueError("runs 必须大于或等于 1")
     if config.max_attempts < 1:
-        raise ValueError("max_attempts must be >= 1")
+        raise ValueError("max_attempts 必须大于或等于 1")
     if config.lease_seconds < 1:
-        raise ValueError("lease_seconds must be >= 1")
+        raise ValueError("lease_seconds 必须大于或等于 1")
     if config.timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be > 0")
+        raise ValueError("timeout_seconds 必须大于 0")
 
 
 def _create_engine(config: BrowserRunnerSoakConfig, root: Path) -> Engine:
@@ -167,7 +167,7 @@ def _wait_for_terminal_runs(
         if pending:
             time.sleep(0.02)
     if pending:
-        raise TimeoutError(f"Browser Runner soak timed out with {len(pending)} pending run(s).")
+        raise TimeoutError(f"Browser Runner soak test 超时，仍有 {len(pending)} 个运行待处理。")
     return [terminal[summary.id] for summary in submitted]
 
 
@@ -195,13 +195,13 @@ def _run_recovery_probe(root: Path) -> dict[str, Any]:
         run = stale_queue.submit(_request(0, prefix="recovery"))
         claimed = stale_queue._claim(run.id)
         if claimed is None:
-            raise RuntimeError("Recovery probe could not claim the initial run.")
+            raise RuntimeError("恢复探针无法认领初始运行。")
         stale_queue.backend.update(run.id, lease_expires_at="2026-01-01T00:00:00+00:00")
         recovered = recovery_queue.recover_expired_leases(now="2026-01-01T00:00:02+00:00", schedule=False)
         recovery_queue._execute(run.id)
         summary = recovery_queue.get(run.id)
         if summary is None:
-            raise RuntimeError("Recovery probe run disappeared after execution.")
+            raise RuntimeError("恢复探针运行在执行后消失。")
         return {
             "recoveredCount": len(recovered),
             "status": summary.status,
@@ -262,9 +262,9 @@ def _backend_assessment(result: dict[str, Any]) -> dict[str, Any]:
         "recommendation": "continue_shared_db_backend" if acceptable else "reassess_queue_backend",
         "confidence": "medium" if acceptable else "low",
         "rationale": (
-            "Shared SQL queue completed the configured multi-instance soak with stable metrics and lease recovery."
+            "共享 SQL 队列完成了配置的多实例 soak test，指标稳定且租约恢复正常。"
             if acceptable
-            else "The soak exposed incomplete runs, degraded health, active backlog, expired leases, or failed recovery."
+            else "soak test 发现运行未完成、健康状态下降、仍有积压、租约过期或恢复失败。"
         ),
         "messageQueueMigrationRequired": not acceptable,
     }
@@ -285,7 +285,7 @@ def _utc_timestamp() -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> BrowserRunnerSoakConfig:
-    parser = argparse.ArgumentParser(description="Run a Browser Runner multi-instance queue soak baseline.")
+    parser = argparse.ArgumentParser(description="运行 Browser Runner 多实例队列 soak test 基线。")
     parser.add_argument("--instances", type=int, default=BrowserRunnerSoakConfig.instances)
     parser.add_argument("--workers-per-instance", type=int, default=BrowserRunnerSoakConfig.workers_per_instance)
     parser.add_argument("--runs", type=int, default=BrowserRunnerSoakConfig.runs)

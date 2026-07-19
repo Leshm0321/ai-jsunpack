@@ -109,9 +109,9 @@ class ReconstructionFeedbackTest(unittest.TestCase):
             rejection_by_source = {
                 item["sourceArtifactId"]: item["reason"] for item in bridge.feedback["rejectedActions"]
             }
-            self.assertIn("riskLevel must be low", rejection_by_source[high_risk.id])
-            self.assertIn("not approved", rejection_by_source[unapproved.id])
-            self.assertIn("Unsupported repair action", rejection_by_source[malformed.id])
+            self.assertIn("riskLevel 必须为 low", rejection_by_source[high_risk.id])
+            self.assertIn("未获得", rejection_by_source[unapproved.id])
+            self.assertIn("不支持的修复动作", rejection_by_source[malformed.id])
             plan_payload = json.loads(store.read_artifact("job_feedback", result.plan_artifact.id))
             self.assertEqual(plan_payload["agentFeedbackInputs"]["approvedActions"][0]["sourceArtifactId"], approved.id)
 
@@ -172,7 +172,7 @@ class ReconstructionFeedbackTest(unittest.TestCase):
             assert feedback is not None
             self.assertEqual(feedback["approvedActions"], [])
             self.assertEqual(len(feedback["rejectedActions"]), 2)
-            self.assertTrue(all("Conflicting" in item["reason"] for item in feedback["rejectedActions"]))
+            self.assertTrue(all("存在冲突" in item["reason"] for item in feedback["rejectedActions"]))
 
     def test_failed_agent_review_cannot_authorize_repairs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -214,7 +214,7 @@ class ReconstructionFeedbackTest(unittest.TestCase):
             assert feedback is not None
             self.assertEqual(feedback["approvedActions"], [])
             self.assertTrue(
-                any("must pass" in item["reason"] for item in feedback["rejectedActions"])
+                any("必须以 failureClass=none 通过" in item["reason"] for item in feedback["rejectedActions"])
             )
 
     def test_core_bridge_serializes_feedback_to_cli_file(self):
@@ -275,7 +275,7 @@ class ReconstructionFeedbackTest(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaisesRegex(ReconstructionError, "does not accept agent_feedback"):
+            with self.assertRaisesRegex(ReconstructionError, "不接受 agent_feedback"):
                 ReconstructionRunner(core_bridge=UnsupportedBridge())._reconstruct_with_feedback(
                     job_id="job_feedback",
                     input_path=Path(temp_dir) / "input",

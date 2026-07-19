@@ -2,18 +2,18 @@ import type { RuntimeComparisonReport } from "@ai-jsunpack/shared";
 import type { RuntimeComparisonFilters, RuntimeComparisonLoaded } from "./workbench-types";
 import { formatPercent } from "./workbench-format";
 
-export function parseRuntimeComparisonReport(text: string): RuntimeComparisonReport {
+export function parseRuntimeComparisonReport(text: string, t: (key: string) => string): RuntimeComparisonReport {
   const payload = JSON.parse(text) as Partial<RuntimeComparisonReport>;
   if (!payload.id || !payload.differences || !payload.original || !payload.reconstructed) {
-    throw new Error("Artifact is not a valid runtime comparison report.");
+    throw new Error(t("parse.runtimeComparisonInvalid"));
   }
   return payload as RuntimeComparisonReport;
 }
 
-export function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"]): string {
+export function formatScreenshotDiff(differences: RuntimeComparisonReport["differences"], t: (key: string) => string): string {
   const changed = differences.screenshotDiff.changed ?? differences.screenshotChanged;
   const status = differences.screenshotDiff.pixelDiffStatus;
-  return `changed ${String(changed)} / ${status}`;
+  return `${t("summary.changed")} ${String(changed)} / ${status}`;
 }
 
 export function formatPixelDiff(differences: RuntimeComparisonReport["differences"], t: (key: string) => string): string {
@@ -49,7 +49,7 @@ export function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparis
     return t("runtime.scenario").toLowerCase();
   }
   if (report.traceArtifactIds.includes(artifactId)) {
-    return "trace";
+    return t("runtime.trace");
   }
   if (report.screenshotArtifactIds.includes(artifactId)) {
     return artifactId === report.differences.screenshotDiff.diffArtifactId ? t("runtime.pixelDiff") : t("runtime.screenshot");
@@ -57,18 +57,21 @@ export function runtimeEvidenceLabel(artifactId: string, report: RuntimeComparis
   if (artifactId === report.differences.screenshotDiff.diffArtifactId) {
     return t("runtime.pixelDiff");
   }
-  return "comparison";
+  return t("runtime.comparison");
 }
 
 export function uniqueRuntimeComparisonScenarios(reports: RuntimeComparisonLoaded[]): string[] {
   return [...new Set(reports.map((item) => item.report.differences.comparisonScope.scenarioName))].sort();
 }
 
-export function uniqueRuntimeComparisonViewports(reports: RuntimeComparisonLoaded[]): Array<{ label: string; value: string }> {
+export function uniqueRuntimeComparisonViewports(
+  reports: RuntimeComparisonLoaded[],
+  t: (key: string) => string
+): Array<{ label: string; value: string }> {
   const viewports = new Map<string, string>();
   for (const item of reports) {
     const value = runtimeComparisonViewportValue(item.report);
-    viewports.set(value, runtimeComparisonViewportLabel(item.report));
+    viewports.set(value, runtimeComparisonViewportLabel(item.report, t));
   }
   return [...viewports.entries()].map(([value, label]) => ({ label, value })).sort((left, right) => left.label.localeCompare(right.label));
 }
@@ -86,10 +89,10 @@ export function runtimeComparisonMatchesFilters(report: RuntimeComparisonReport,
   return true;
 }
 
-export function runtimeComparisonViewportLabel(report: RuntimeComparisonReport): string {
+export function runtimeComparisonViewportLabel(report: RuntimeComparisonReport, t: (key: string) => string): string {
   const viewport = report.differences.comparisonScope.viewport;
   if (!viewport) {
-    return "default viewport";
+    return t("status.defaultViewport");
   }
   const name = viewport.name ? `${viewport.name} ` : "";
   return `${name}${viewport.width}x${viewport.height}`;

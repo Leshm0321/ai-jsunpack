@@ -49,7 +49,7 @@ export function ReportArtifactList({
     let active = true;
     setEvidenceIndex({ artifactId: evidenceIndexArtifact.id, error: null, payload: null, status: "loading" });
     fetchArtifactText(currentJob.id, evidenceIndexArtifact.id, controller.signal)
-      .then((text) => parseEvidenceIndexPayload(text))
+      .then((text) => parseEvidenceIndexPayload(text, t))
       .then((payload) => {
         if (active) {
           setEvidenceIndex({ artifactId: evidenceIndexArtifact.id, error: null, payload, status: "ready" });
@@ -70,7 +70,7 @@ export function ReportArtifactList({
       active = false;
       controller.abort();
     };
-  }, [currentJob?.id, evidenceIndexArtifact?.id]);
+  }, [currentJob?.id, evidenceIndexArtifact?.id, t]);
 
   if (artifacts.length === 0) {
     return <EmptyState title={t("empty.noReportOutputs.title")} detail={t("empty.noReportOutputs.detail")} />;
@@ -86,10 +86,10 @@ export function ReportArtifactList({
   const packageContents = evidenceIndex.payload?.packageContents ?? [];
   const reportSections = evidenceIndex.payload?.reportSections ?? [];
   const failureSummary =
-    evidenceIndex.payload?.failureSummary.length ? evidenceIndex.payload.failureSummary : buildFailureSummary(evidence, currentJob);
-  const indexedPackageContents = packageContents.length > 0 ? packageContents : buildFallbackPackageContents(attachments);
-  const indexedReportSections = reportSections.length > 0 ? reportSections : buildFallbackReportSections(attachments, artifacts);
-  const filteredReportSections = filterReportSections(indexedReportSections, reportDetailQuery);
+    evidenceIndex.payload?.failureSummary.length ? evidenceIndex.payload.failureSummary : buildFailureSummary(evidence, currentJob, t);
+  const indexedPackageContents = packageContents.length > 0 ? packageContents : buildFallbackPackageContents(attachments, t);
+  const indexedReportSections = reportSections.length > 0 ? reportSections : buildFallbackReportSections(attachments, artifacts, t);
+  const filteredReportSections = filterReportSections(indexedReportSections, reportDetailQuery, t);
   const reportDetailFilterActive = reportDetailQuery.trim().length > 0;
   const riskCount = failureSummary.length || reviewAttention;
 
@@ -246,7 +246,7 @@ export function ReportArtifactList({
                               <div>
                                 <span>{detail.label}</span>
                                 <strong>{detail.value}</strong>
-                                <small>{reportSectionDetailSummary(detail)}</small>
+                                <small>{reportSectionDetailSummary(detail, t)}</small>
                               </div>
                               {detail.status ? <StatusToken status={detail.status} /> : null}
                             </div>

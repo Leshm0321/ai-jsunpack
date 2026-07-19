@@ -52,10 +52,10 @@ export function EvidenceGraphPanel({
 
     Promise.all([
       inventoryArtifact
-        ? fetchArtifactText(currentJob.id, inventoryArtifact.id, controller.signal).then(parseInputInventoryArtifact)
+        ? fetchArtifactText(currentJob.id, inventoryArtifact.id, controller.signal).then((text) => parseInputInventoryArtifact(text, t))
         : Promise.resolve<InputInventory | null>(null),
       astIndexArtifact
-        ? fetchArtifactText(currentJob.id, astIndexArtifact.id, controller.signal).then(parseAstIndexArtifact)
+        ? fetchArtifactText(currentJob.id, astIndexArtifact.id, controller.signal).then((text) => parseAstIndexArtifact(text, t))
         : Promise.resolve<AstIndex[] | null>(null)
     ])
       .then(([inventory, astIndexes]) => {
@@ -73,7 +73,7 @@ export function EvidenceGraphPanel({
       active = false;
       controller.abort();
     };
-  }, [currentJob?.id, inventoryArtifact?.id, astIndexArtifact?.id]);
+  }, [currentJob?.id, inventoryArtifact?.id, astIndexArtifact?.id, t]);
 
   const graph = useMemo(() => {
     if (mode === "chunks") {

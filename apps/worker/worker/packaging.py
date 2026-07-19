@@ -21,6 +21,85 @@ DEFAULT_EVIDENCE_ATTACHMENT_KINDS = {
 SENSITIVITY_CLASSES = {"public", "derived", "source_sensitive", "secret"}
 RETENTION_CLASSES = {"ephemeral", "project", "archive"}
 
+REPORT_COLUMN_LABELS = {
+    "agentName": "Agent 名称",
+    "alerts": "告警",
+    "area": "检查领域",
+    "artifactExchange": "Artifact 交换",
+    "artifactId": "Artifact ID",
+    "auth": "认证",
+    "averageRunDurationMs": "平均运行时长（毫秒）",
+    "backendHealthStatus": "后端健康状态",
+    "caller": "调用方",
+    "category": "分类",
+    "checkedAt": "检查时间",
+    "claimLatencyMs": "领取延迟（毫秒）",
+    "cloudContextAllowed": "是否允许云端上下文",
+    "cloudMode": "云端模式",
+    "code": "代码",
+    "confidence": "置信度",
+    "content": "内容",
+    "contextHandling": "上下文处理方式",
+    "count": "数量",
+    "decision": "判定",
+    "deliveryStatus": "投递状态",
+    "diagnosis": "诊断",
+    "enforcement": "实施状态",
+    "entryUrl": "入口 URL",
+    "expiredRunningCount": "已过期运行数",
+    "failureClass": "失败类别",
+    "field": "字段",
+    "group": "分组",
+    "id": "ID",
+    "importer": "导入方",
+    "included": "是否包含",
+    "instanceId": "实例 ID",
+    "kind": "类型",
+    "leaseRecoveryCount": "租约恢复次数",
+    "limitation": "限制",
+    "memoryType": "记忆类型",
+    "message": "消息",
+    "modelContextScope": "模型上下文范围",
+    "name": "名称",
+    "oldestQueuedAgeMs": "最早排队时长（毫秒）",
+    "packagePath": "包内路径",
+    "placeholderExports": "占位导出",
+    "producer": "生成方",
+    "queueBackend": "队列后端",
+    "queueLength": "队列长度",
+    "reason": "原因",
+    "remoteRunId": "远程运行 ID",
+    "resolvedPath": "解析路径",
+    "retentionClass": "保留级别",
+    "retryRate": "重试率",
+    "reviewType": "检查类型",
+    "runnerKind": "运行器类型",
+    "runningCount": "运行中数量",
+    "runtimeContract": "运行时约定",
+    "scenarioArtifactId": "Scenario Artifact ID",
+    "scope": "范围",
+    "sensitivityClass": "敏感级别",
+    "serviceRole": "服务角色",
+    "severity": "严重级别",
+    "size": "大小",
+    "specifier": "引用路径",
+    "stage": "阶段",
+    "status": "状态",
+    "summary": "摘要",
+    "target": "目标",
+    "targetStage": "目标阶段",
+    "terminalCount": "已结束数量",
+    "threshold": "阈值",
+    "title": "标题",
+    "toolName": "工具名称",
+    "toolVersion": "工具版本",
+    "totalCount": "总数",
+    "traceArtifactId": "Trace Artifact ID",
+    "traceArtifactIds": "Trace Artifact ID 列表",
+    "screenshotArtifactIds": "Screenshot Artifact ID 列表",
+    "value": "值",
+}
+
 
 @dataclass(frozen=True)
 class EvidenceAttachmentPolicy:
@@ -75,7 +154,7 @@ class PackagingRunner:
         store.update_status(job_id, "packaging")
         job = store.get_job(job_id)
         if job is None:
-            raise PackagingError(f"Job not found during packaging: {job_id}")
+            raise PackagingError(f"打包时未找到任务：{job_id}")
 
         artifacts = store.list_artifacts(job_id)
         parents = parent_artifact_ids or [artifact.id for artifact in artifacts]
@@ -149,8 +228,8 @@ class PackagingRunner:
             failure_class=decision["failureClass"],
             failure_reason=decision["reason"],
             message=(
-                "Packaging produced audit_report, html_report, evidence_index, "
-                f"and result_package with final status {decision['status']}."
+                "打包已生成 audit_report、html_report、evidence_index 和 result_package，"
+                f"最终状态为 {decision['status']}。"
             ),
         )
 
@@ -270,7 +349,7 @@ class PackagingRunner:
                             "group": group,
                             "status": str(status),
                             "failureClass": str(record.get("failureClass") or "unknown"),
-                            "decision": str(record.get("decision") or record.get("entryUrl") or "Validation did not fully pass."),
+                            "decision": str(record.get("decision") or record.get("entryUrl") or "验证未完全通过。"),
                         }
                     )
 
@@ -281,8 +360,8 @@ class PackagingRunner:
             (item["failureClass"] for item in observations if item["failureClass"] != "none"),
             "unknown",
         )
-        reason = "; ".join(
-            f"{item['group']} {item['status']}: {item['decision']}" for item in observations[:3]
+        reason = "；".join(
+            f"{item['group']} 状态为 {item['status']}：{item['decision']}" for item in observations[:3]
         )
         return {
             "status": "completed_best_effort",
@@ -302,9 +381,15 @@ class PackagingRunner:
         if str(record.get("failureClass") or "unknown") not in {"none", "unknown"}:
             return False
         decision = str(record.get("decision") or "").lower()
-        runtime_uncertainty = "runtime evidence" in decision and any(
-            phrase in decision
-            for phrase in ("inconclusive", "without current runtime", "no current runtime", "runtime comparison evidence")
+        runtime_uncertainty = (
+            "runtime evidence" in decision
+            and any(
+                phrase in decision
+                for phrase in ("inconclusive", "without current runtime", "no current runtime", "runtime comparison evidence")
+            )
+        ) or (
+            "运行时证据" in decision
+            and any(phrase in decision for phrase in ("无法确认", "缺少当前运行时", "没有当前运行时", "运行时对比证据"))
         )
         if not runtime_uncertainty:
             return False
@@ -374,46 +459,45 @@ class PackagingRunner:
         attachments = evidence_index["attachments"]
 
         lines = [
-            "# AI JS Unpack Audit Report",
+            "# AI JS Unpack 审计报告",
             "",
-            f"- Job: `{job['id']}`",
-            f"- Final status: `{decision['status']}`",
-            f"- Cloud mode: `{job['cloudMode']}`",
-            f"- Access boundary: owner `{policy_summary['accessBoundary']['ownerId']}` / project `{policy_summary['accessBoundary']['projectId']}`",
-            f"- Artifacts included: {len(artifact_manifest)}",
-            f"- Runtime validations: {len(runtime_reports)}",
-            f"- Runtime comparisons: {len(runtime_comparisons)}",
-            f"- Review runs: {len(review_runs)}",
-            f"- Agent executions: {len(agent_executions)}",
-            f"- Inference records: {len(inference_records)}",
-            f"- Tool calls: {len(tool_calls)}",
-            f"- Tool registry entries: {len(tool_registry)}",
-            f"- Memory records: {len(memory_records)}",
+            f"- 任务：`{job['id']}`",
+            f"- 最终状态：`{decision['status']}`",
+            f"- 云端模式：`{job['cloudMode']}`",
+            f"- 访问边界：所有者 `{policy_summary['accessBoundary']['ownerId']}` / 项目 `{policy_summary['accessBoundary']['projectId']}`",
+            f"- 已纳入的 Artifact：{len(artifact_manifest)}",
+            f"- 运行时验证：{len(runtime_reports)}",
+            f"- 运行时对比：{len(runtime_comparisons)}",
+            f"- 审查运行：{len(review_runs)}",
+            f"- Agent 执行：{len(agent_executions)}",
+            f"- 推理记录：{len(inference_records)}",
+            f"- 工具调用：{len(tool_calls)}",
+            f"- 工具注册表条目：{len(tool_registry)}",
+            f"- 记忆记录：{len(memory_records)}",
             "",
-            "## Completion Decision",
+            "## 完成判定",
             "",
-            decision["reason"] or "All collected build, review, and runtime validation evidence passed.",
+            decision["reason"] or "收集到的构建、审查和运行时验证证据均已通过。",
             "",
-            "## Review/Fix Convergence",
+            "## Review/Fix 收敛情况",
             "",
             self._review_fix_markdown(review_fix_summary),
             "",
-            "## Policy Summary",
+            "## 策略摘要",
             "",
             self._policy_summary_markdown(policy_summary),
             "",
-            "## Risk And Failure Groups",
+            "## 风险与失败分组",
             "",
             self._status_table(decision["observations"], ("group", "status", "failureClass", "decision"))
             if decision["observations"]
-            else "No failing or best-effort observations were collected.",
+            else "未收集到失败或 best_effort 观察项。",
             "",
-            "## Dependency Placeholder Summary",
+            "## 依赖占位摘要",
             "",
             (
-                "Missing dependencies listed here received load-only continuity. Their real semantic behavior was not recovered; "
-                "generated named/default exports throw `MissingDependencyPlaceholderError` with code "
-                "`AI_JSUNPACK_MISSING_DEPENDENCY` when called."
+                "此处列出的缺失依赖仅提供加载连续性，未恢复其真实语义行为；调用生成的命名导出或默认导出时，"
+                "会抛出代码为 `AI_JSUNPACK_MISSING_DEPENDENCY` 的 `MissingDependencyPlaceholderError`。"
             ),
             "",
             self._status_table(
@@ -421,21 +505,21 @@ class PackagingRunner:
                 ("status", "importer", "specifier", "resolvedPath", "placeholderExports", "runtimeContract", "limitation"),
             )
             if dependency_placeholders
-            else "No missing static relative ESM dependencies required placeholders.",
+            else "没有缺失的静态相对 ESM 依赖需要占位文件。",
             "",
-            "## Build And Typecheck",
+            "## 构建与类型检查",
             "",
             self._status_table(build_artifacts, ("reviewType", "status", "failureClass", "decision")),
             "",
-            "## Runtime Evidence",
+            "## 运行时证据",
             "",
             self._status_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
             "",
-            "## Browser Runner Boundary",
+            "## Browser Runner 执行边界",
             "",
             self._status_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
             "",
-            "## Browser Runner Operations",
+            "## Browser Runner 运行情况",
             "",
             self._status_table(
                 runtime_operations,
@@ -458,40 +542,40 @@ class PackagingRunner:
                 ),
             ),
             "",
-            "## Ops Alert Summary",
+            "## 运维告警摘要",
             "",
             self._status_table(
                 ops_alert_events,
                 ("checkedAt", "severity", "code", "serviceRole", "instanceId", "field", "value", "threshold", "deliveryStatus"),
             ),
             "",
-            "## Runtime Compare",
+            "## 运行时对比",
             "",
             self._status_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
             "",
-            "## Runtime Compare Difference Summary",
+            "## 运行时对比差异摘要",
             "",
             self._runtime_compare_diff_markdown([*runtime_comparisons, *audit_payload["runtimeTraces"]]),
             "",
-            "## Agent Runtime Audit",
+            "## Agent 运行时审计",
             "",
-            f"- Tool registry entries: {len(tool_registry)}",
-            f"- Memory records: {self._memory_record_summary(memory_records)}",
-            f"- Agent executions: {self._agent_execution_summary(agent_executions)}",
-            f"- Runtime diagnoses: {len(runtime_diagnoses)}",
-            f"- Report sections: {len(report_sections)}",
+            f"- 工具注册表条目：{len(tool_registry)}",
+            f"- 记忆记录：{self._memory_record_summary(memory_records)}",
+            f"- Agent 执行：{self._agent_execution_summary(agent_executions)}",
+            f"- 运行时诊断：{len(runtime_diagnoses)}",
+            f"- 报告章节：{len(report_sections)}",
             "",
             self._status_table(agent_executions, ("stage", "name", "status", "failureClass", "message")),
             "",
             self._status_table(runtime_diagnoses, ("agentName", "targetStage", "status", "failureClass", "diagnosis")),
             "",
-            "## Review Evidence",
+            "## 审查证据",
             "",
             self._status_table(review_runs, ("reviewType", "status", "failureClass", "decision")),
             "",
             "## Artifact Manifest",
             "",
-            "| Kind | Stage | Artifact | Producer | Size | Deep link |",
+            "| 类型 | 阶段 | Artifact | 生成方 | 大小 | deep link |",
             "| --- | --- | --- | --- | ---: | --- |",
         ]
         for artifact in artifact_manifest:
@@ -502,14 +586,14 @@ class PackagingRunner:
         lines.extend(
             [
                 "",
-                "## Evidence Attachment Index",
+                "## 证据附件索引",
                 "",
                 self._status_table(
                     attachments,
                     ("kind", "artifactId", "included", "packagePath", "reason"),
                 ),
                 "",
-                "## Reproduction",
+                "## 复现方法",
                 "",
                 "```bash",
                 "unzip result-package.zip -d ai-jsunpack-result",
@@ -517,7 +601,7 @@ class PackagingRunner:
                 "cat ai-jsunpack-result/evidence-index.json",
                 "```",
                 "",
-                "For shell environments without `open`, load `audit-report.html` in a browser or inspect `audit-report.md`.",
+                "如果 shell 环境不提供 `open` 命令，请在浏览器中打开 `audit-report.html`，或直接查看 `audit-report.md`。",
                 "",
             ]
         )
@@ -547,16 +631,16 @@ class PackagingRunner:
         review_fix_summary = audit_payload["reviewFixSummary"]
         ops_alert_events = self._ops_alert_event_rows(audit_payload["opsAlertEvents"])
         attachments = evidence_index["attachments"]
-        decision_text = decision["reason"] or "All collected build, review, and runtime validation evidence passed."
+        decision_text = decision["reason"] or "收集到的构建、审查和运行时验证证据均已通过。"
 
         return "\n".join(
             [
                 "<!doctype html>",
-                '<html lang="en">',
+                '<html lang="zh-CN">',
                 "<head>",
                 '<meta charset="utf-8">',
                 '<meta name="viewport" content="width=device-width, initial-scale=1">',
-                "<title>AI JS Unpack Audit Report</title>",
+                "<title>AI JS Unpack 审计报告</title>",
                 "<style>",
                 ":root{color-scheme:light;--ink:#0f172a;--muted:#475569;--primary:#0369a1;--border:#cbd5e1;--surface:#fff;--bg:#f0f9ff;--warn:#92400e;--fail:#991b1b;--pass:#166534}",
                 "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,sans-serif;line-height:1.5}",
@@ -568,28 +652,28 @@ class PackagingRunner:
                 "</head>",
                 "<body>",
                 "<main>",
-                "<h1>AI JS Unpack Audit Report</h1>",
-                f"<p>Offline report for job <code>{escape(str(job['id']))}</code>.</p>",
-                '<section class="summary" aria-label="Report summary">',
-                self._metric_html("Final status", str(decision["status"]), f"status-{decision['status']}"),
-                self._metric_html("Cloud mode", str(job["cloudMode"])),
-                self._metric_html("Owner", str(policy_summary["accessBoundary"]["ownerId"])),
-                self._metric_html("Project", str(policy_summary["accessBoundary"]["projectId"])),
-                self._metric_html("Artifacts", str(len(artifact_manifest))),
-                self._metric_html("Runtime validations", str(len(runtime_reports))),
-                self._metric_html("Runtime comparisons", str(len(runtime_comparisons))),
-                self._metric_html("Review runs", str(len(review_runs))),
-                self._metric_html("Agent executions", str(len(agent_executions))),
-                self._metric_html("Tool registry", str(len(tool_registry))),
-                self._metric_html("Memory records", str(len(memory_records))),
-                self._metric_html("Evidence attachments", str(sum(1 for item in attachments if item["included"]))),
-                self._metric_html("Dependency placeholders", str(len(dependency_placeholders))),
+                "<h1>AI JS Unpack 审计报告</h1>",
+                f"<p>任务 <code>{escape(str(job['id']))}</code> 的离线报告。</p>",
+                '<section class="summary" aria-label="报告摘要">',
+                self._metric_html("最终状态", str(decision["status"]), f"status-{decision['status']}"),
+                self._metric_html("云端模式", str(job["cloudMode"])),
+                self._metric_html("所有者", str(policy_summary["accessBoundary"]["ownerId"])),
+                self._metric_html("项目", str(policy_summary["accessBoundary"]["projectId"])),
+                self._metric_html("Artifact 数量", str(len(artifact_manifest))),
+                self._metric_html("运行时验证", str(len(runtime_reports))),
+                self._metric_html("运行时对比", str(len(runtime_comparisons))),
+                self._metric_html("审查运行", str(len(review_runs))),
+                self._metric_html("Agent 执行", str(len(agent_executions))),
+                self._metric_html("工具注册表", str(len(tool_registry))),
+                self._metric_html("记忆记录", str(len(memory_records))),
+                self._metric_html("证据附件", str(sum(1 for item in attachments if item["included"]))),
+                self._metric_html("依赖占位项", str(len(dependency_placeholders))),
                 "</section>",
-                "<h2>Completion Decision</h2>",
+                "<h2>完成判定</h2>",
                 f'<div class="notice">{escape(decision_text)}</div>',
-                "<h2>Review/Fix Convergence</h2>",
+                "<h2>Review/Fix 收敛情况</h2>",
                 self._review_fix_html(review_fix_summary),
-                "<h2>Policy Summary</h2>",
+                "<h2>策略摘要</h2>",
                 self._html_table(
                     [policy_summary["modelPolicy"]],
                     ("cloudMode", "modelContextScope", "contextHandling", "cloudContextAllowed", "limitation"),
@@ -602,27 +686,27 @@ class PackagingRunner:
                     self._policy_summary_rows(policy_summary["retentionCounts"], "retentionClass"),
                     ("retentionClass", "count"),
                 ),
-                "<h2>Risk And Failure Groups</h2>",
+                "<h2>风险与失败分组</h2>",
                 self._html_table(decision["observations"], ("group", "status", "failureClass", "decision"))
                 if decision["observations"]
-                else '<div class="notice">No failing or best-effort observations were collected.</div>',
-                "<h2>Dependency Placeholder Summary</h2>",
+                else '<div class="notice">未收集到失败或 best_effort 观察项。</div>',
+                "<h2>依赖占位摘要</h2>",
                 (
-                    '<div class="notice">Missing dependencies listed here received load-only continuity. Their real semantic '
-                    'behavior was not recovered; generated named/default exports throw <code>MissingDependencyPlaceholderError</code> '
-                    'with code <code>AI_JSUNPACK_MISSING_DEPENDENCY</code> when called.</div>'
+                    '<div class="notice">此处列出的缺失依赖仅提供加载连续性，未恢复其真实语义行为；调用生成的命名导出或默认导出时，'
+                    '会抛出代码为 <code>AI_JSUNPACK_MISSING_DEPENDENCY</code> 的 '
+                    '<code>MissingDependencyPlaceholderError</code>。</div>'
                 ),
                 self._html_table(
                     dependency_placeholders,
                     ("status", "importer", "specifier", "resolvedPath", "placeholderExports", "runtimeContract", "limitation"),
                 ),
-                "<h2>Build And Typecheck</h2>",
+                "<h2>构建与类型检查</h2>",
                 self._html_table(build_artifacts, ("reviewType", "status", "failureClass", "decision")),
-                "<h2>Runtime Evidence</h2>",
+                "<h2>运行时证据</h2>",
                 self._html_table(runtime_reports, ("target", "status", "entryUrl", "traceArtifactId")),
-                "<h2>Browser Runner Boundary</h2>",
+                "<h2>Browser Runner 执行边界</h2>",
                 self._html_table(runtime_boundaries, ("stage", "runnerKind", "enforcement", "remoteRunId", "auth", "artifactExchange")),
-                "<h2>Browser Runner Operations</h2>",
+                "<h2>Browser Runner 运行情况</h2>",
                 self._html_table(
                     runtime_operations,
                     (
@@ -643,28 +727,28 @@ class PackagingRunner:
                         "alerts",
                     ),
                 ),
-                "<h2>Ops Alert Summary</h2>",
+                "<h2>运维告警摘要</h2>",
                 self._html_table(
                     ops_alert_events,
                     ("checkedAt", "severity", "code", "serviceRole", "instanceId", "field", "value", "threshold", "deliveryStatus"),
                 ),
-                "<h2>Runtime Compare</h2>",
+                "<h2>运行时对比</h2>",
                 self._html_table(runtime_comparisons, ("status", "scenarioArtifactId", "screenshotArtifactIds", "traceArtifactIds")),
-                "<h2>Runtime Compare Difference Summary</h2>",
+                "<h2>运行时对比差异摘要</h2>",
                 self._runtime_compare_diff_html([*runtime_comparisons, *audit_payload["runtimeTraces"]]),
-                "<h2>Agent Runtime Audit</h2>",
+                "<h2>Agent 运行时审计</h2>",
                 self._html_table(tool_registry, ("toolName", "toolVersion", "category", "caller")),
                 self._html_table(memory_records, ("memoryType", "scope", "sensitivityClass", "retentionClass", "content")),
                 self._html_table(agent_executions, ("stage", "name", "status", "failureClass", "message")),
                 self._html_table(runtime_diagnoses, ("agentName", "targetStage", "status", "failureClass", "diagnosis")),
                 self._html_table(report_sections, ("title", "status", "confidence", "summary")),
-                "<h2>Review Evidence</h2>",
+                "<h2>审查证据</h2>",
                 self._html_table(review_runs, ("reviewType", "status", "failureClass", "decision")),
-                "<h2>Evidence Attachment Index</h2>",
+                "<h2>证据附件索引</h2>",
                 self._html_table(attachments, ("kind", "artifactId", "included", "packagePath", "reason")),
                 "<h2>Artifact Manifest</h2>",
                 self._html_table(artifact_manifest, ("kind", "stage", "id", "producer", "size")),
-                "<h2>Reproduction</h2>",
+                "<h2>复现方法</h2>",
                 "<pre>unzip result-package.zip -d ai-jsunpack-result\nopen ai-jsunpack-result/audit-report.html\ncat ai-jsunpack-result/evidence-index.json</pre>",
                 "</main>",
                 "</body>",
@@ -678,8 +762,8 @@ class PackagingRunner:
 
     def _html_table(self, records: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
         if not records:
-            return '<div class="notice">No records.</div>'
-        header = "".join(f"<th>{escape(column)}</th>" for column in columns)
+            return '<div class="notice">无记录。</div>'
+        header = "".join(f"<th>{escape(self._report_column_label(column))}</th>" for column in columns)
         rows = [f"<tr>{header}</tr>"]
         for record in records:
             cells = "".join(f"<td>{self._html_cell(record.get(column))}</td>" for column in columns)
@@ -690,17 +774,17 @@ class PackagingRunner:
         model_policy = policy_summary["modelPolicy"]
         return "\n".join(
             [
-                "| Area | Value |",
+                "| 项目 | 值 |",
                 "| --- | --- |",
-                f"| Owner | `{policy_summary['accessBoundary']['ownerId']}` |",
-                f"| Project | `{policy_summary['accessBoundary']['projectId']}` |",
-                f"| Cloud mode | `{model_policy['cloudMode']}` |",
-                f"| Model context scope | `{model_policy['modelContextScope']}` |",
-                f"| Model context handling | `{model_policy['contextHandling']}` |",
-                f"| Cloud context allowed | `{model_policy['cloudContextAllowed']}` |",
-                f"| Policy limitation | {model_policy['limitation']} |",
-                f"| Sensitivity counts | `{self._count_summary(policy_summary['sensitivityCounts'])}` |",
-                f"| Retention counts | `{self._count_summary(policy_summary['retentionCounts'])}` |",
+                f"| 所有者 | `{policy_summary['accessBoundary']['ownerId']}` |",
+                f"| 项目 | `{policy_summary['accessBoundary']['projectId']}` |",
+                f"| 云端模式 | `{model_policy['cloudMode']}` |",
+                f"| 模型上下文范围 | `{model_policy['modelContextScope']}` |",
+                f"| 模型上下文处理方式 | `{model_policy['contextHandling']}` |",
+                f"| 是否允许云端上下文 | `{model_policy['cloudContextAllowed']}` |",
+                f"| 策略限制 | {model_policy['limitation']} |",
+                f"| 敏感级别计数 | `{self._count_summary(policy_summary['sensitivityCounts'])}` |",
+                f"| 保留级别计数 | `{self._count_summary(policy_summary['retentionCounts'])}` |",
             ]
         )
 
@@ -708,7 +792,7 @@ class PackagingRunner:
         return [{key: name, "count": count} for name, count in sorted(counts.items())]
 
     def _count_summary(self, counts: dict[str, int]) -> str:
-        return ", ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "none"
+        return ", ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "无"
 
     def _dependency_placeholder_rows(self, plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -724,9 +808,9 @@ class PackagingRunner:
                 if record.get("defaultImport") is True and "default" not in exports:
                     exports.insert(0, "default")
                 if record.get("namespaceImport") is True:
-                    exports.append("namespace(load-only)")
+                    exports.append("namespace（仅加载）")
                 if record.get("exportAll") is True:
-                    exports.append("export-all(load-only)")
+                    exports.append("export-all（仅加载）")
                 status = self._optional_string(record.get("status")) or "unsupported"
                 rows.append(
                     {
@@ -734,14 +818,14 @@ class PackagingRunner:
                         "importer": self._optional_string(record.get("importerPath")) or "unknown",
                         "specifier": self._optional_string(record.get("specifier")) or "unknown",
                         "resolvedPath": self._optional_string(record.get("resolvedPath")) or "not-written",
-                        "placeholderExports": ", ".join(dict.fromkeys(exports)) or "side-effect/load-only",
+                        "placeholderExports": ", ".join(dict.fromkeys(exports)) or "仅副作用/仅加载",
                         "runtimeContract": (
-                            "warning on load; throws AI_JSUNPACK_MISSING_DEPENDENCY when a generated export is called"
+                            "加载时发出警告；调用生成的导出时抛出 AI_JSUNPACK_MISSING_DEPENDENCY"
                             if status == "generated"
-                            else "report-only; no file written"
+                            else "仅记录报告，不写入文件"
                         ),
                         "semanticBehaviorAvailable": False,
-                        "limitation": self._optional_string(record.get("limitation")) or "Semantic behavior is unavailable.",
+                        "limitation": self._optional_string(record.get("limitation")) or "无法提供语义行为。",
                     }
                 )
         return rows
@@ -790,7 +874,7 @@ class PackagingRunner:
                 "failureClass": "unknown",
                 "finalOutcome": "best_effort_with_limitations",
                 "available": False,
-                "decision": "Review/Fix convergence summary evidence was not available at packaging time.",
+                "decision": "打包时没有可用的 Review/Fix 收敛摘要证据。",
                 "evidenceArtifactIds": [],
                 "evidenceLinks": [],
             }
@@ -803,19 +887,19 @@ class PackagingRunner:
         runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
         build_typecheck = summary.get("buildTypecheck") if isinstance(summary.get("buildTypecheck"), dict) else {}
         if final_outcome == "repaired_passed":
-            return "Review/Fix applied deterministic repair evidence and final validation passed."
+            return "Review/Fix 流程已应用确定性修复证据，最终验证通过。"
         if final_outcome == "passed_without_repair":
-            return "Build/typecheck and runtime compare passed without deterministic repair."
+            return "构建、类型检查和运行时对比均已通过，无需确定性修复。"
         if final_outcome == "budget_exhausted_best_effort":
             return (
-                "Review/Fix stopped after using "
-                f"{runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')} runtime compare attempts."
+                "Review/Fix 流程在使用 "
+                f"{runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')} 次运行时对比尝试后停止。"
             )
         if final_outcome == "no_deterministic_repair":
-            return "Review/Fix found no applicable low-risk deterministic repair for the remaining failure."
+            return "Review/Fix 流程未找到适用于剩余失败的低风险确定性修复。"
         if build_typecheck.get("needsAttention") or runtime_compare.get("finalReviewStatus") in {"fail", "best_effort", "retry"}:
-            return "Review/Fix completed with remaining best-effort limitations."
-        return str(summary.get("decision") or "Review/Fix convergence completed.")
+            return "Review/Fix 流程已完成，但仍存在 best_effort 限制。"
+        return str(summary.get("decision") or "Review/Fix 流程已完成收敛。")
 
     def _review_fix_markdown(self, summary: dict[str, Any]) -> str:
         runtime_compare = summary.get("runtimeCompare") if isinstance(summary.get("runtimeCompare"), dict) else {}
@@ -824,26 +908,26 @@ class PackagingRunner:
         policy = summary.get("policy") if isinstance(summary.get("policy"), dict) else {}
         failure_action_map = summary.get("failureActionMap") if isinstance(summary.get("failureActionMap"), list) else []
         rows = [
-            {"area": "Final outcome", "value": summary.get("finalOutcome")},
-            {"area": "Status", "value": summary.get("status")},
-            {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {"area": "最终结果", "value": summary.get("finalOutcome")},
+            {"area": "状态", "value": summary.get("status")},
+            {"area": "判定", "value": self._review_fix_decision(summary)},
             {
-                "area": "Policy",
+                "area": "策略",
                 "value": (
-                    f"lowRiskAuto={policy.get('allowLowRiskRepairs')}; "
-                    f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                    f"低风险自动修复={policy.get('allowLowRiskRepairs')}；"
+                    f"动作={', '.join(self._string_list(policy.get('allowedRepairActions'))) or '默认'}"
                 ),
             },
             {
-                "area": "Build/typecheck repairs",
+                "area": "构建/类型检查修复",
                 "value": (
-                    f"instructions={build_typecheck.get('repairInstructionCount')}; "
-                    f"applied={build_typecheck.get('appliedRepairCount')}; "
-                    f"allPassed={build_typecheck.get('allPassed')}"
+                    f"指令={build_typecheck.get('repairInstructionCount')}；"
+                    f"已应用={build_typecheck.get('appliedRepairCount')}；"
+                    f"全部通过={build_typecheck.get('allPassed')}"
                 ),
             },
             {
-                "area": "Runtime compare budget",
+                "area": "运行时对比预算",
                 "value": (
                     f"attempts={runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')}; "
                     f"stoppedReason={runtime_compare.get('stoppedReason')}; "
@@ -851,20 +935,20 @@ class PackagingRunner:
                 ),
             },
             {
-                "area": "Runtime repairs",
+                "area": "运行时修复",
                 "value": (
-                    f"planned={runtime_compare.get('plannedRepairCount')}; "
-                    f"applied={runtime_compare.get('appliedRepairCount')}; "
-                    f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
+                    f"已规划={runtime_compare.get('plannedRepairCount')}；"
+                    f"已应用={runtime_compare.get('appliedRepairCount')}；"
+                    f"最终项目={runtime_compare.get('finalProjectArtifactId')}"
                 ),
             },
             {
-                "area": "Failure/action mapping",
+                "area": "失败/动作映射",
                 "value": self._failure_action_map_summary(failure_action_map),
             },
             {
-                "area": "Next steps",
-                "value": " | ".join(next_steps) if next_steps else "No follow-up action required.",
+                "area": "后续步骤",
+                "value": " | ".join(next_steps) if next_steps else "无需后续操作。",
             },
         ]
         return self._status_table(rows, ("area", "value"))
@@ -876,26 +960,26 @@ class PackagingRunner:
         policy = summary.get("policy") if isinstance(summary.get("policy"), dict) else {}
         failure_action_map = summary.get("failureActionMap") if isinstance(summary.get("failureActionMap"), list) else []
         rows = [
-            {"area": "Final outcome", "value": summary.get("finalOutcome")},
-            {"area": "Status", "value": summary.get("status")},
-            {"area": "Decision", "value": self._review_fix_decision(summary)},
+            {"area": "最终结果", "value": summary.get("finalOutcome")},
+            {"area": "状态", "value": summary.get("status")},
+            {"area": "判定", "value": self._review_fix_decision(summary)},
             {
-                "area": "Policy",
+                "area": "策略",
                 "value": (
-                    f"lowRiskAuto={policy.get('allowLowRiskRepairs')}; "
-                    f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                    f"低风险自动修复={policy.get('allowLowRiskRepairs')}；"
+                    f"动作={', '.join(self._string_list(policy.get('allowedRepairActions'))) or '默认'}"
                 ),
             },
             {
-                "area": "Build/typecheck repairs",
+                "area": "构建/类型检查修复",
                 "value": (
-                    f"instructions={build_typecheck.get('repairInstructionCount')}; "
-                    f"applied={build_typecheck.get('appliedRepairCount')}; "
-                    f"allPassed={build_typecheck.get('allPassed')}"
+                    f"指令={build_typecheck.get('repairInstructionCount')}；"
+                    f"已应用={build_typecheck.get('appliedRepairCount')}；"
+                    f"全部通过={build_typecheck.get('allPassed')}"
                 ),
             },
             {
-                "area": "Runtime compare budget",
+                "area": "运行时对比预算",
                 "value": (
                     f"attempts={runtime_compare.get('attemptsUsed')}/{runtime_compare.get('maxAttempts')}; "
                     f"stoppedReason={runtime_compare.get('stoppedReason')}; "
@@ -903,20 +987,20 @@ class PackagingRunner:
                 ),
             },
             {
-                "area": "Runtime repairs",
+                "area": "运行时修复",
                 "value": (
-                    f"planned={runtime_compare.get('plannedRepairCount')}; "
-                    f"applied={runtime_compare.get('appliedRepairCount')}; "
-                    f"finalProject={runtime_compare.get('finalProjectArtifactId')}"
+                    f"已规划={runtime_compare.get('plannedRepairCount')}；"
+                    f"已应用={runtime_compare.get('appliedRepairCount')}；"
+                    f"最终项目={runtime_compare.get('finalProjectArtifactId')}"
                 ),
             },
             {
-                "area": "Failure/action mapping",
+                "area": "失败/动作映射",
                 "value": self._failure_action_map_summary(failure_action_map),
             },
             {
-                "area": "Next steps",
-                "value": " | ".join(next_steps) if next_steps else "No follow-up action required.",
+                "area": "后续步骤",
+                "value": " | ".join(next_steps) if next_steps else "无需后续操作。",
             },
         ]
         return self._html_table(rows, ("area", "value"))
@@ -928,30 +1012,30 @@ class PackagingRunner:
         for record in scoped[:4]:
             automatic_actions = self._string_list(record.get("automaticActions"))
             parts.append(
-                f"{record.get('failureClass') or 'unknown'}->{', '.join(automatic_actions) or 'audit-only'}"
+                f"{record.get('failureClass') or 'unknown'}->{', '.join(automatic_actions) or '仅审计'}"
             )
-        return "; ".join(parts) or "none"
+        return "；".join(parts) or "无"
 
     def _runtime_compare_diff_markdown(self, records: list[dict[str, Any]]) -> str:
         comparison_records = self._runtime_compare_comparison_records(records)
         matrix_summaries = self._runtime_compare_matrix_summaries(records)
         retry_summary = self._runtime_compare_retry_summary(records)
         if not comparison_records and not matrix_summaries and not retry_summary:
-            return "No runtime comparison difference records."
+            return "没有运行时对比差异记录。"
         rows = []
         if matrix_summaries or retry_summary:
             rows.extend(
                 [
-                    "| Summary | Value |",
+                    "| 摘要 | 值 |",
                     "| --- | --- |",
                     *[
-                        "| Matrix attempt "
+                        "| 矩阵尝试 "
                         + self._cell(summary.get("attempt"))
                         + " | "
                         + self._cell(
-                            f"selected={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}; "
-                            f"omitted={summary.get('omittedRunCount')}; maxMatrixRuns={summary.get('maxMatrixRuns')}; "
-                            f"selection={summary.get('matrixSelection')}"
+                            f"已选择={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}；"
+                            f"已省略={summary.get('omittedRunCount')}；maxMatrixRuns={summary.get('maxMatrixRuns')}；"
+                            f"选择方式={summary.get('matrixSelection')}"
                         )
                         + " |"
                         for summary in matrix_summaries
@@ -960,10 +1044,10 @@ class PackagingRunner:
             )
             if retry_summary:
                 rows.append(
-                    "| Retry budget | "
+                    "| 重试预算 | "
                     + self._cell(
-                        f"attempts={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}; "
-                        f"budgetExhausted={retry_summary.get('budgetExhausted')}; "
+                        f"attemptsUsed={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}；"
+                        f"budgetExhausted={retry_summary.get('budgetExhausted')}；"
                         f"stoppedReason={retry_summary.get('stoppedReason')}"
                     )
                     + " |"
@@ -971,7 +1055,7 @@ class PackagingRunner:
             rows.append("")
         rows.extend(
             [
-                "| Comparison | Status | Scope | Screenshot | DOM | Network | Console | Evidence |",
+                "| 对比 | 状态 | 范围 | 截图 | DOM | 网络 | Console | 证据 |",
                 "| --- | --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
@@ -1000,29 +1084,29 @@ class PackagingRunner:
         matrix_summaries = self._runtime_compare_matrix_summaries(records)
         retry_summary = self._runtime_compare_retry_summary(records)
         if not comparison_records and not matrix_summaries and not retry_summary:
-            return '<div class="notice">No runtime comparison difference records.</div>'
+            return '<div class="notice">没有运行时对比差异记录。</div>'
         summary_html = ""
         if matrix_summaries or retry_summary:
             summary_rows = []
             for summary in matrix_summaries:
                 value = (
-                    f"selected={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}; "
-                    f"omitted={summary.get('omittedRunCount')}; maxMatrixRuns={summary.get('maxMatrixRuns')}; "
-                    f"selection={summary.get('matrixSelection')}"
+                    f"已选择={summary.get('selectedRunCount')}/{summary.get('requestedRunCount')}；"
+                    f"已省略={summary.get('omittedRunCount')}；maxMatrixRuns={summary.get('maxMatrixRuns')}；"
+                    f"选择方式={summary.get('matrixSelection')}"
                 )
                 summary_rows.append(
-                    f"<tr><td>Matrix attempt {self._html_cell(summary.get('attempt'))}</td><td>{self._html_cell(value)}</td></tr>"
+                    f"<tr><td>矩阵尝试 {self._html_cell(summary.get('attempt'))}</td><td>{self._html_cell(value)}</td></tr>"
                 )
             if retry_summary:
                 value = (
-                    f"attempts={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}; "
-                    f"budgetExhausted={retry_summary.get('budgetExhausted')}; "
+                    f"attemptsUsed={retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}；"
+                    f"budgetExhausted={retry_summary.get('budgetExhausted')}；"
                     f"stoppedReason={retry_summary.get('stoppedReason')}"
                 )
-                summary_rows.append(f"<tr><td>Retry budget</td><td>{self._html_cell(value)}</td></tr>")
-            summary_html = "<table><tr><th>Summary</th><th>Value</th></tr>" + "".join(summary_rows) + "</table>"
+                summary_rows.append(f"<tr><td>重试预算</td><td>{self._html_cell(value)}</td></tr>")
+            summary_html = "<table><tr><th>摘要</th><th>值</th></tr>" + "".join(summary_rows) + "</table>"
         rows = [
-            "<tr><th>Comparison</th><th>Status</th><th>Scope</th><th>Screenshot</th><th>DOM</th><th>Network</th><th>Console</th><th>Evidence</th></tr>"
+            "<tr><th>对比</th><th>状态</th><th>范围</th><th>截图</th><th>DOM</th><th>网络</th><th>Console</th><th>证据</th></tr>"
         ]
         for record in comparison_records:
             differences = record.get("differences") or {}
@@ -1104,7 +1188,7 @@ class PackagingRunner:
 
     def _browser_runner_alert_label(self, alerts: Any) -> str:
         if not isinstance(alerts, list) or not alerts:
-            return "none"
+            return "无"
         labels: list[str] = []
         for alert in alerts[:4]:
             if isinstance(alert, dict):
@@ -1120,8 +1204,8 @@ class PackagingRunner:
                 )
         remaining = len(alerts) - len(labels)
         if remaining > 0:
-            labels.append(f"+{remaining} more")
-        return ", ".join(labels) if labels else "none"
+            labels.append(f"另有 {remaining} 项")
+        return ", ".join(labels) if labels else "无"
 
     def _runtime_compare_scope_label(self, differences: dict[str, Any]) -> str:
         scope = differences.get("comparisonScope") or {}
@@ -1130,8 +1214,8 @@ class PackagingRunner:
         viewport_size = ""
         if viewport.get("width") and viewport.get("height"):
             viewport_size = f"{viewport.get('width')}x{viewport.get('height')}"
-        viewport_label = " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "default viewport"
-        return f"{scope.get('scenarioName') or 'unknown scenario'} / {viewport_label}"
+        viewport_label = " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "默认视口"
+        return f"{scope.get('scenarioName') or '未知场景'} / {viewport_label}"
 
     def _screenshot_diff_label(self, differences: dict[str, Any]) -> str:
         screenshot = differences.get("screenshotDiff") or {}
@@ -1147,32 +1231,32 @@ class PackagingRunner:
             sizes = f" ({original_size or 0}B -> {reconstructed_size or 0}B)"
         pixels = ""
         if changed_pixels is not None and pixel_count is not None:
-            percent = f"{float(ratio) * 100:.3f}%" if isinstance(ratio, (int, float)) else "unknown"
-            pixels = f"; pixels={changed_pixels}/{pixel_count} ({percent})"
-        diff_artifact = f"; diff={screenshot.get('diffArtifactId')}" if screenshot.get("diffArtifactId") else ""
-        return f"changed={changed}; pixel={pixel_status}{pixels}{diff_artifact}{sizes}"
+            percent = f"{float(ratio) * 100:.3f}%" if isinstance(ratio, (int, float)) else "未知"
+            pixels = f"；像素={changed_pixels}/{pixel_count}（{percent}）"
+        diff_artifact = f"；diff Artifact={screenshot.get('diffArtifactId')}" if screenshot.get("diffArtifactId") else ""
+        return f"已变化={changed}；像素状态={pixel_status}{pixels}{diff_artifact}{sizes}"
 
     def _dom_diff_label(self, differences: dict[str, Any]) -> str:
         dom_differences = differences.get("domDifferences") or []
         changed_fields = differences.get("changedDomFields") or []
         if dom_differences:
-            return f"{len(dom_differences)} path changes: {', '.join(str(item.get('path')) for item in dom_differences[:4])}"
+            return f"{len(dom_differences)} 处路径变化：{', '.join(str(item.get('path')) for item in dom_differences[:4])}"
         if changed_fields:
-            return f"{len(changed_fields)} top-level fields: {', '.join(map(str, changed_fields[:4]))}"
-        return "none"
+            return f"{len(changed_fields)} 个顶层字段：{', '.join(map(str, changed_fields[:4]))}"
+        return "无"
 
     def _collection_diff_label(self, diff: Any) -> str:
         if not isinstance(diff, dict):
-            return "unavailable"
+            return "不可用"
         original_only = len(diff.get("originalOnly") or [])
         reconstructed_only = len(diff.get("reconstructedOnly") or [])
         shared = len(diff.get("shared") or [])
-        groups = ", ".join(sorted((diff.get("groups") or {}).keys())[:4]) or "none"
-        return f"original-only={original_only}; reconstructed-only={reconstructed_only}; shared={shared}; groups={groups}"
+        groups = ", ".join(sorted((diff.get("groups") or {}).keys())[:4]) or "无"
+        return f"仅原始={original_only}；仅重建={reconstructed_only}；共有={shared}；分组={groups}"
 
     def _runtime_compare_evidence_links(self, record: dict[str, Any]) -> str:
         links = self._runtime_compare_evidence_link_list(record)
-        return ", ".join(links) if links else "none"
+        return ", ".join(links) if links else "无"
 
     def _runtime_compare_evidence_link_list(
         self,
@@ -1240,7 +1324,7 @@ class PackagingRunner:
                 "modelContextScope": "cloud",
                 "contextHandling": "full_context_allowed_when_configured",
                 "cloudContextAllowed": True,
-                "limitation": "Cloud model use still depends on configured model provider credentials.",
+                "limitation": "云端模型能否使用仍取决于是否已配置模型提供方凭据。",
             }
         if job.cloud_mode == "desensitized":
             return {
@@ -1249,9 +1333,8 @@ class PackagingRunner:
                 "contextHandling": "deterministic_context_redaction",
                 "cloudContextAllowed": True,
                 "limitation": (
-                    "Agent model context uses deterministic source excerpt, evidence reference, memory, "
-                    "path, and symbol redaction; original artifacts remain governed by artifact access "
-                    "and evidence attachment policy."
+                    "Agent 模型上下文会对源代码摘录、证据引用、记忆、路径和符号进行确定性脱敏；"
+                    "原始 Artifact 仍受 Artifact 访问策略和证据附件策略约束。"
                 ),
             }
         return {
@@ -1259,7 +1342,7 @@ class PackagingRunner:
             "modelContextScope": "local",
             "contextHandling": "local_context_only",
             "cloudContextAllowed": False,
-            "limitation": "Cloud model context is denied unless the job is created with cloud_allowed or desensitized mode.",
+            "limitation": "除非任务以 cloud_allowed 或 desensitized 模式创建，否则禁止使用云端模型上下文。",
         }
 
     def _artifact_count_by(self, artifacts: list[ArtifactRecord], field_name: str) -> dict[str, int]:
@@ -1280,121 +1363,121 @@ class PackagingRunner:
                 path="audit-report.md",
                 content_type="text/markdown; charset=utf-8",
                 source="audit_report",
-                description="Human-readable Markdown audit report.",
+                description="面向用户的 Markdown 审计报告。",
             ),
             self._package_content(
                 path="audit-report.html",
                 content_type="text/html; charset=utf-8",
                 source="html_report",
-                description="Offline HTML audit report.",
+                description="可离线查看的 HTML 审计报告。",
             ),
             self._package_content(
                 path="audit.json",
                 content_type="application/json",
                 source="audit_payload",
-                description="Structured audit payload with report inputs and completion decision.",
+                description="包含报告输入和完成判定的结构化审计数据。",
             ),
             self._package_content(
                 path="evidence-index.json",
                 content_type="application/json",
                 source="evidence_index",
-                description="Structured package, report, and evidence attachment index.",
+                description="结果包、报告和证据附件的结构化索引。",
             ),
             self._package_content(
                 path="artifact-manifest.json",
                 content_type="application/json",
                 source="artifact_manifest",
-                description="Artifact metadata manifest captured at packaging time.",
+                description="打包时记录的 Artifact 元数据 Manifest。",
             ),
             self._package_content(
                 path="build-artifacts.json",
                 content_type="application/json",
                 source="build_artifact",
-                description="Build and typecheck evidence records.",
+                description="构建和类型检查证据记录。",
             ),
             self._package_content(
                 path="agent-executions.json",
                 content_type="application/json",
                 source="agent_execution",
-                description="Per-agent and per-stage CrewAI execution audit records.",
+                description="按 Agent 和阶段记录的 CrewAI 执行审计数据。",
             ),
             self._package_content(
                 path="inference-records.json",
                 content_type="application/json",
                 source="inference_record",
-                description="Agent inference audit records.",
+                description="Agent 推理审计记录。",
             ),
             self._package_content(
                 path="runtime-report.json",
                 content_type="application/json",
                 source="runtime_validation",
-                description="Browser runtime validation records.",
+                description="浏览器运行时验证记录。",
             ),
             self._package_content(
                 path="runtime-traces.json",
                 content_type="application/json",
                 source="runtime_trace",
-                description="Browser runtime trace records, including remote Browser Runner execution boundaries.",
+                description="浏览器 runtime trace 记录，包括 remote Browser Runner 执行边界。",
             ),
             self._package_content(
                 path="runtime-comparisons.json",
                 content_type="application/json",
                 source="runtime_comparison",
-                description="Original-vs-reconstructed runtime comparison records.",
+                description="原始版本与重建版本的运行时对比记录。",
             ),
             self._package_content(
                 path="review-runs.json",
                 content_type="application/json",
                 source="review_run",
-                description="Review and gate decision records.",
+                description="审查和门禁判定记录。",
             ),
             self._package_content(
                 path="tool-calls.json",
                 content_type="application/json",
                 source="tool_call",
-                description="Tool call audit records.",
+                description="工具调用审计记录。",
             ),
             self._package_content(
                 path="tool-registry.json",
                 content_type="application/json",
                 source="tool_registry",
-                description="Tool Registry entries available to the Agent runtime.",
+                description="Agent runtime 可用的工具注册表条目。",
             ),
             self._package_content(
                 path="memory-records.json",
                 content_type="application/json",
                 source="memory_record",
-                description="Short-term, long-term, entity, and scenario memory records.",
+                description="短期、长期、实体和场景记忆记录。",
             ),
             self._package_content(
                 path="runtime-diagnoses.json",
                 content_type="application/json",
                 source="runtime_diagnosis",
-                description="Runtime Agent structured diagnosis records.",
+                description="Runtime Agent 的结构化诊断记录。",
             ),
             self._package_content(
                 path="report-sections.json",
                 content_type="application/json",
                 source="report_section",
-                description="Report Agent structured section records.",
+                description="Report Agent 的结构化章节记录。",
             ),
             self._package_content(
                 path="repair-instructions.json",
                 content_type="application/json",
                 source="repair_instruction",
-                description="Structured repair instructions and applied repair evidence.",
+                description="结构化修复指令和已应用的修复证据。",
             ),
             self._package_content(
                 path="review-fix-summary.json",
                 content_type="application/json",
                 source="review_fix_summary",
-                description="Unified Review/Fix convergence outcome, retry budget, and repair application summary.",
+                description="统一记录 Review/Fix 收敛结果、重试预算和修复应用情况的摘要。",
             ),
             self._package_content(
                 path="ops-alert-events.json",
                 content_type="application/json",
                 source="ops_alert_event",
-                description="Recent Ops alert events and webhook delivery audit records visible at packaging time.",
+                description="打包时可见的近期运维告警事件和 webhook 投递审计记录。",
             ),
         ]
         if generated_project is None:
@@ -1403,9 +1486,9 @@ class PackagingRunner:
                     path="generated_project/README.md",
                     content_type="text/markdown; charset=utf-8",
                     source="generated_project",
-                    description="Placeholder explaining that no generated project was available.",
+                    description="说明没有可用生成项目的占位文件。",
                     included=False,
-                    reason="No generated_project artifact was available when packaging ran.",
+                    reason="打包时没有可用的 generated_project Artifact。",
                 )
             )
         else:
@@ -1414,7 +1497,7 @@ class PackagingRunner:
                     path="generated_project/",
                     content_type="inode/directory",
                     source="generated_project",
-                    description="Generated TypeScript-oriented project directory.",
+                    description="生成的 TypeScript 项目目录。",
                     artifact_id=generated_project.id,
                     size=generated_project.size,
                 )
@@ -1425,7 +1508,7 @@ class PackagingRunner:
                     path=attachment["packagePath"] or f"evidence/{attachment['kind']}/{attachment['artifactId']}",
                     content_type=str(attachment["contentType"]),
                     source=str(attachment["kind"]),
-                    description="Evidence attachment collected into the result package.",
+                    description="已收集到结果包中的证据附件。",
                     artifact_id=str(attachment["artifactId"]),
                     included=bool(attachment["included"]),
                     reason=str(attachment["reason"]),
@@ -1443,7 +1526,7 @@ class PackagingRunner:
         description: str,
         artifact_id: str | None = None,
         included: bool = True,
-        reason: str = "included",
+        reason: str = "已包含",
         size: int | None = None,
     ) -> dict[str, Any]:
         return {
@@ -1480,81 +1563,80 @@ class PackagingRunner:
         risk_details = self._risk_report_details([*build_details, *review_details, *runtime_compare_details, *review_fix_details, *ops_alert_details])
         return [
             self._report_section(
-                title="Completion Decision",
+                title="完成判定",
                 anchor="completion-decision",
-                summary="Final completed or best-effort decision and the primary reason.",
+                summary="最终 completed 或 best_effort 判定及其主要原因。",
                 artifact_kinds=("audit_report", "html_report"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(
-                title="Risk And Failure Groups",
+                title="风险与失败分组",
                 anchor="risk-and-failure-groups",
-                summary="Failing or best-effort build, runtime, and review observations.",
+                summary="构建、运行时和审查中的失败或 best_effort 观察项。",
                 artifact_kinds=("build_artifact", "runtime_validation", "review_run", "runtime_trace"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=risk_details,
             ),
             self._report_section(
-                title="Dependency Placeholder Summary",
+                title="依赖占位摘要",
                 anchor="dependency-placeholder-summary",
                 summary=(
-                    "Missing static relative ESM dependencies, referring importers, generated exports, "
-                    "and the load-only runtime contract."
+                    "缺失的静态相对 ESM 依赖、引用它们的导入方、生成的导出项以及仅加载运行时约定。"
                 ),
                 artifact_kinds=("reconstruction_plan", "generated_project"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=dependency_placeholder_details,
             ),
             self._report_section(
-                title="Review/Fix Convergence",
+                title="Review/Fix 收敛情况",
                 anchor="review-fix-convergence",
-                summary="Unified build, runtime compare, Agent review, repair application, and stop reason summary.",
+                summary="统一汇总构建、runtime comparison、Agent review、修复应用情况和停止原因。",
                 artifact_kinds=("build_artifact", "review_run", "repair_instruction", "runtime_trace", "generated_project"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=review_fix_details,
             ),
             self._report_section(
-                title="Build And Typecheck",
+                title="构建与类型检查",
                 anchor="build-and-typecheck",
-                summary="Sandboxed build and typecheck results.",
+                summary="沙箱中的构建和类型检查结果。",
                 artifact_kinds=("build_artifact", "build_log"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=build_details,
             ),
             self._report_section(
-                title="Runtime Evidence",
+                title="运行时证据",
                 anchor="runtime-evidence",
-                summary="Browser validation reports, traces, screenshots, and request evidence.",
+                summary="浏览器验证报告、trace、截图和请求证据。",
                 artifact_kinds=("runtime_validation", "runtime_trace", "runtime_screenshot"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(
-                title="Runtime Compare Difference Summary",
+                title="运行时对比差异摘要",
                 anchor="runtime-compare-difference-summary",
-                summary="Scenario and viewport comparison differences with evidence deep links.",
+                summary="场景和视口对比差异及其证据深层链接。",
                 artifact_kinds=("runtime_comparison", "runtime_scenario", "runtime_trace", "runtime_screenshot"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=runtime_compare_details,
             ),
             self._report_section(
-                title="Browser Runner Operations",
+                title="Browser Runner 运行情况",
                 anchor="browser-runner-operations",
-                summary="Remote Browser Runner queue length, latency, retry, lease recovery, backend health, and alert evidence.",
+                summary="remote Browser Runner 的队列长度、延迟、重试、租约恢复、后端健康状态和告警证据。",
                 artifact_kinds=("runtime_trace",),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(
-                title="Ops Alert Summary",
+                title="运维告警摘要",
                 anchor="ops-alert-summary",
-                summary="Recent configured Ops alert events, service scope, and webhook delivery audit status.",
+                summary="近期已配置的运维告警事件、服务范围和 webhook 投递审计状态。",
                 artifact_kinds=("ops_alert_event",),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=ops_alert_details,
             ),
             self._report_section(
-                title="Agent Runtime Audit",
+                title="Agent 运行时审计",
                 anchor="agent-runtime-audit",
-                summary="Agent output contracts, Tool Registry entries, memory records, runtime diagnoses, and report sections.",
+                summary="Agent 输出约定、工具注册表条目、记忆记录、runtime diagnosis 和报告章节。",
                 artifact_kinds=(
                     "agent_plan",
                     "agent_execution",
@@ -1568,9 +1650,9 @@ class PackagingRunner:
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(
-                title="Review Evidence",
+                title="审查证据",
                 anchor="review-evidence",
-                summary="Review, repair gate, and best-effort decision evidence.",
+                summary="审查、修复门禁和 best_effort 判定证据。",
                 artifact_kinds=("review_run", "repair_instruction"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 details=review_details,
@@ -1578,22 +1660,22 @@ class PackagingRunner:
             self._report_section(
                 title="Artifact Manifest",
                 anchor="artifact-manifest",
-                summary="Packaged artifact manifest and artifact deep links.",
+                summary="已打包的 Artifact Manifest 和 Artifact deep link。",
                 artifact_kinds=tuple(sorted(artifact_ids_by_kind)),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
             self._report_section(
-                title="Evidence Attachment Index",
+                title="证据附件索引",
                 anchor="evidence-attachment-index",
-                summary="Evidence files included in or omitted from the result package.",
+                summary="结果包中包含或省略的证据文件。",
                 artifact_kinds=(),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 evidence_artifact_ids=attachment_ids,
             ),
             self._report_section(
-                title="Reproduction",
+                title="复现方法",
                 anchor="reproduction",
-                summary="Offline commands and files needed to inspect the package.",
+                summary="离线检查结果包所需的命令和文件。",
                 artifact_kinds=("result_package", "evidence_index"),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
@@ -1657,7 +1739,7 @@ class PackagingRunner:
             status = "fail" if severity == "critical" else "best_effort"
             details.append(
                 {
-                    "label": "Ops alert event",
+                    "label": "运维告警事件",
                     "value": f"{row.get('code') or 'unknown'} / {row.get('serviceRole') or 'global'}",
                     "status": status,
                     "details": {
@@ -1688,8 +1770,8 @@ class PackagingRunner:
             )
             details.append(
                 {
-                    "label": "Build validation",
-                    "value": f"{review_type} attempt {attempt}",
+                    "label": "构建验证",
+                    "value": f"{review_type}，第 {attempt} 次尝试",
                     "status": status,
                     "details": {
                         "artifactId": artifact.id,
@@ -1697,7 +1779,7 @@ class PackagingRunner:
                         "phase": payload.get("phase"),
                         "attempt": attempt,
                         "failureClass": str(payload.get("failureClass") or "unknown"),
-                        "decision": str(payload.get("decision") or "Build validation did not include a decision."),
+                        "decision": str(payload.get("decision") or "构建验证未提供判定。"),
                         "command": self._string_list(payload.get("command")),
                         "commandSource": payload.get("commandSource"),
                         "scriptName": payload.get("scriptName"),
@@ -1737,15 +1819,15 @@ class PackagingRunner:
             )
             details.append(
                 {
-                    "label": "Review run",
-                    "value": f"{review_type} attempt {attempt}",
+                    "label": "审查运行",
+                    "value": f"{review_type}，第 {attempt} 次尝试",
                     "status": status,
                     "details": {
                         "artifactId": artifact.id,
                         "reviewType": review_type,
                         "attempt": attempt,
                         "failureClass": str(payload.get("failureClass") or "unknown"),
-                        "decision": str(payload.get("decision") or "Review did not include a decision."),
+                        "decision": str(payload.get("decision") or "审查未提供判定。"),
                         "logsArtifactId": logs_artifact_id,
                         "repairInstructionIds": repair_instruction_ids,
                         "evidenceRefs": self._compact_evidence_refs(evidence_refs),
@@ -1776,7 +1858,7 @@ class PackagingRunner:
                 evidence_links = self._artifact_evidence_links(artifact.id, *evidence_ids)
             details.append(
                 {
-                    "label": "Review/Fix convergence summary",
+                    "label": "Review/Fix 收敛摘要",
                     "value": str(payload.get("finalOutcome") or "best_effort_with_limitations"),
                     "status": self._report_detail_status(payload.get("status")),
                     "details": {
@@ -1815,10 +1897,10 @@ class PackagingRunner:
             if policy:
                 details.append(
                     {
-                        "label": "Review/Fix policy",
+                        "label": "Review/Fix 策略",
                         "value": (
-                            f"lowRiskAuto={policy.get('allowLowRiskRepairs')} / "
-                            f"actions={', '.join(self._string_list(policy.get('allowedRepairActions'))) or 'default'}"
+                            f"低风险自动修复={policy.get('allowLowRiskRepairs')} / "
+                            f"动作={', '.join(self._string_list(policy.get('allowedRepairActions'))) or '默认'}"
                         ),
                         "status": self._report_detail_status(payload.get("status")),
                         "details": {
@@ -1841,10 +1923,10 @@ class PackagingRunner:
                 audit_actions = self._string_list(mapping.get("auditOnlyActions"))
                 details.append(
                     {
-                        "label": "Review/Fix failure action map",
+                        "label": "Review/Fix 失败动作映射",
                         "value": (
                             f"{mapping.get('failureClass') or 'unknown'} -> "
-                            f"{', '.join(automatic_actions) or 'audit-only'}"
+                            f"{', '.join(automatic_actions) or '仅审计'}"
                         ),
                         "status": status,
                         "details": {
@@ -1864,7 +1946,7 @@ class PackagingRunner:
             for index, step in enumerate(next_steps, start=1):
                 details.append(
                     {
-                        "label": "Review/Fix next step",
+                        "label": "Review/Fix 后续步骤",
                         "value": step,
                         "status": self._report_detail_status(payload.get("status")),
                         "details": {
@@ -1896,7 +1978,7 @@ class PackagingRunner:
                 "kind": kind,
                 "status": "best_effort",
                 "failureClass": "unknown",
-                "decision": f"{kind} artifact could not be read: {error}",
+                "decision": f"无法读取 {kind} Artifact：{error}",
             }
         if not isinstance(payload, dict):
             return {
@@ -1904,7 +1986,7 @@ class PackagingRunner:
                 "kind": kind,
                 "status": "best_effort",
                 "failureClass": "unknown",
-                "decision": f"{kind} artifact did not contain a JSON object.",
+                "decision": f"{kind} Artifact 不包含 JSON 对象。",
             }
         payload.setdefault("artifactId", artifact.id)
         return payload
@@ -2019,7 +2101,7 @@ class PackagingRunner:
             scope = differences.get("comparisonScope") or {}
             viewport = scope.get("viewport") or {}
             viewport_label = self._viewport_label(viewport)
-            scope_label = f"{scope.get('scenarioName') or payload.get('scenarioArtifactId') or 'unknown'} / {viewport_label}"
+            scope_label = f"{scope.get('scenarioName') or payload.get('scenarioArtifactId') or '未知'} / {viewport_label}"
             key = f"{scope.get('scenarioName') or 'unknown'}::{viewport_label}"
             attempt_history = history_by_scope.setdefault(key, [])
             attempt_history.append(
@@ -2040,7 +2122,7 @@ class PackagingRunner:
             network_diff = differences.get("networkDiff") or {}
             console_diff = differences.get("consoleDiff") or {}
             latest_by_scope[key] = {
-                "label": "Runtime compare scope",
+                "label": "运行时对比范围",
                 "value": scope_label,
                 "status": self._report_detail_status(payload.get("status")),
                 "details": {
@@ -2122,12 +2204,12 @@ class PackagingRunner:
             "failureClass": "runtime_error" if status in {"fail", "best_effort", "retry"} else "none",
             "evidenceLinks": self._artifact_evidence_links(*evidence_ids),
         }
-        value = f"matrix {selected if selected is not None else 0}/{requested if requested is not None else 0} selected"
+        value = f"矩阵已选择 {selected if selected is not None else 0}/{requested if requested is not None else 0}"
         if retry_summary:
-            value += f"; attempts {retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')}"
+            value += f"；尝试 {retry_summary.get('attemptsUsed')}/{retry_summary.get('maxAttempts')} 次"
         return [
             {
-                "label": "Runtime compare matrix summary",
+                "label": "运行时对比矩阵摘要",
                 "value": value,
                 "status": status,
                 "details": details,
@@ -2186,12 +2268,12 @@ class PackagingRunner:
 
     def _viewport_label(self, viewport: Any) -> str:
         if not isinstance(viewport, dict):
-            return "default viewport"
+            return "默认视口"
         viewport_name = viewport.get("name")
         viewport_size = ""
         if viewport.get("width") and viewport.get("height"):
             viewport_size = f"{viewport['width']}x{viewport['height']}"
-        return " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "default viewport"
+        return " ".join(str(part) for part in (viewport_name, viewport_size) if part) or "默认视口"
 
     def _dom_diff_summary(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -2236,21 +2318,21 @@ class PackagingRunner:
         store,
     ) -> tuple[bool, str]:
         if policy.include_kinds is not None and artifact.kind not in policy.include_kinds:
-            return False, "Artifact kind is outside configured includeKinds."
+            return False, "Artifact kind 不在已配置的 includeKinds 范围内。"
         if artifact.kind in policy.exclude_kinds:
-            return False, "Artifact kind is excluded by configured excludeKinds."
+            return False, "Artifact kind 已被配置的 excludeKinds 排除。"
         if (
             policy.include_sensitivity_classes is not None
             and artifact.sensitivity_class not in policy.include_sensitivity_classes
         ):
-            return False, "Artifact sensitivityClass is outside configured includeSensitivityClasses."
+            return False, "Artifact 的 sensitivityClass 不在已配置的 includeSensitivityClasses 范围内。"
         if policy.include_retention_classes is not None and artifact.retention_class not in policy.include_retention_classes:
-            return False, "Artifact retentionClass is outside configured includeRetentionClasses."
+            return False, "Artifact 的 retentionClass 不在已配置的 includeRetentionClasses 范围内。"
         if policy.max_bytes_per_artifact is not None and artifact.size > policy.max_bytes_per_artifact:
-            return False, "Artifact exceeds configured maxBytesPerArtifact."
+            return False, "Artifact 大小超过已配置的 maxBytesPerArtifact。"
         if not store.artifact_exists(artifact) or not store.artifact_is_file(artifact):
-            return False, "Artifact content is missing or not a file."
-        return True, "included"
+            return False, "Artifact 内容缺失或不是文件。"
+        return True, "已包含"
 
     def _evidence_attachment_policy(self, job: JobRecord) -> EvidenceAttachmentPolicy:
         config = job.config if isinstance(job.config, dict) else {}
@@ -2326,13 +2408,16 @@ class PackagingRunner:
 
     def _status_table(self, records: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
         if not records:
-            return "No records."
-        header = "| " + " | ".join(columns) + " |"
+            return "无记录。"
+        header = "| " + " | ".join(self._report_column_label(column) for column in columns) + " |"
         divider = "| " + " | ".join("---" for _ in columns) + " |"
         rows = [header, divider]
         for record in records:
             rows.append("| " + " | ".join(self._cell(record.get(column)) for column in columns) + " |")
         return "\n".join(rows)
+
+    def _report_column_label(self, column: str) -> str:
+        return REPORT_COLUMN_LABELS.get(column, column)
 
     def _cell(self, value: Any) -> str:
         if value is None:
@@ -2379,7 +2464,7 @@ class PackagingRunner:
             if generated_project is None:
                 archive.writestr(
                     "generated_project/README.md",
-                    "No generated_project artifact was available when packaging ran.\n",
+                    "打包时没有可用的 generated_project Artifact。\n",
                 )
             else:
                 self._write_artifact_directory(archive, generated_project, "generated_project", store)
@@ -2422,13 +2507,13 @@ class PackagingRunner:
             try:
                 materialized = store.materialize_artifact_directory(artifact, target)
             except Exception as error:
-                archive.writestr(f"{root_name}/README.md", f"Directory artifact was unavailable: {error}\n")
+                archive.writestr(f"{root_name}/README.md", f"目录 Artifact 不可用：{error}\n")
                 return
             self._write_directory(archive, materialized, root_name)
 
     def _write_directory(self, archive: zipfile.ZipFile, source: Path, root_name: str) -> None:
         if not source.exists() or not source.is_dir():
-            archive.writestr(f"{root_name}/README.md", f"Directory artifact was unavailable: {source}\n")
+            archive.writestr(f"{root_name}/README.md", f"目录 Artifact 不可用：{source}\n")
             return
         for file_path in sorted(path for path in source.rglob("*") if path.is_file()):
             archive.write(file_path, f"{root_name}/{file_path.relative_to(source).as_posix()}")

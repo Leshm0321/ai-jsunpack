@@ -317,7 +317,7 @@ class DatabaseStore:
                 current_revision = int(current_row.revision) if current_row is not None else 0
                 if current_revision != expected_revision:
                     raise ValueError(
-                        f"Settings revision conflict: expected {expected_revision}, current revision is {current_revision}"
+                        f"设置修订版本冲突：预期为 {expected_revision}，当前为 {current_revision}"
                     )
                 now = utc_now()
                 row = {
@@ -332,7 +332,7 @@ class DatabaseStore:
                 }
                 connection.execute(insert(settings_revisions_table).values(**row))
         except IntegrityError as error:
-            raise ValueError("Settings revision conflict: another update was committed") from error
+            raise ValueError("设置修订版本冲突：已有其他更新提交") from error
         return self._settings_revision_from_row(row)
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
@@ -376,7 +376,7 @@ class DatabaseStore:
         with self.engine.begin() as connection:
             current_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
             if current_row is None:
-                raise KeyError(f"Job not found: {job_id}")
+                raise KeyError(f"未找到作业：{job_id}")
             current_job = self._job_from_row(current_row)
             if current_job.status in TERMINAL_JOB_STATUSES and status != current_job.status:
                 return current_job
@@ -396,10 +396,10 @@ class DatabaseStore:
 
             result = connection.execute(update(jobs_table).where(jobs_table.c.id == job_id).values(**values))
             if result.rowcount == 0:
-                raise KeyError(f"Job not found: {job_id}")
+                raise KeyError(f"未找到作业：{job_id}")
             row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
         if row is None:
-            raise KeyError(f"Job not found: {job_id}")
+            raise KeyError(f"未找到作业：{job_id}")
         return self._job_from_row(row)
 
     def lease_next_job(
@@ -474,7 +474,7 @@ class DatabaseStore:
         with self.engine.begin() as connection:
             row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
             if row is None:
-                raise KeyError(f"Job not found: {job_id}")
+                raise KeyError(f"未找到作业：{job_id}")
             job = self._job_from_row(row)
             if job.status in TERMINAL_JOB_STATUSES or lease_worker_id(job.worker_lease) != worker_id:
                 return None
@@ -486,13 +486,13 @@ class DatabaseStore:
             renewed_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
         return self._job_from_row(renewed_row) if renewed_row else None
 
-    def request_cancel(self, job_id: str, reason: str = "cancel requested") -> JobRecord:
+    def request_cancel(self, job_id: str, reason: str = "已请求取消") -> JobRecord:
         self.initialize()
         timestamp = utc_now()
         with self.engine.begin() as connection:
             row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
             if row is None:
-                raise KeyError(f"Job not found: {job_id}")
+                raise KeyError(f"未找到作业：{job_id}")
             job = self._job_from_row(row)
             if job.status in TERMINAL_JOB_STATUSES:
                 return job
@@ -509,7 +509,7 @@ class DatabaseStore:
             )
             cancelled_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
         if cancelled_row is None:
-            raise KeyError(f"Job not found: {job_id}")
+            raise KeyError(f"未找到作业：{job_id}")
         return self._job_from_row(cancelled_row)
 
     def requeue_expired_leases(
@@ -536,7 +536,7 @@ class DatabaseStore:
                         "status": "failed",
                         "worker_lease": None,
                         "failure_class": "timeout",
-                        "failure_reason": f"Worker lease expired after {job.run_attempt} attempt(s).",
+                        "failure_reason": f"Worker lease 在第 {job.run_attempt} 次 attempt 后过期。",
                         "updated_at": timestamp,
                     }
                 else:
@@ -544,7 +544,7 @@ class DatabaseStore:
                         "status": "queued",
                         "worker_lease": None,
                         "failure_class": "none",
-                        "failure_reason": "Previous worker lease expired; job returned to queue.",
+                        "failure_reason": "上一个 Worker lease 已过期；Job 已返回 queue。",
                         "updated_at": timestamp,
                     }
                 connection.execute(update(jobs_table).where(jobs_table.c.id == job.id).values(**values))
@@ -599,7 +599,7 @@ class DatabaseStore:
                 )
             ).mappings().first()
         if row is None:
-            raise KeyError(f"Heartbeat not found: {request.service_role}/{request.instance_id}")
+            raise KeyError(f"未找到心跳记录：{request.service_role}/{request.instance_id}")
         return self._ops_heartbeat_from_row(row)
 
     def list_ops_heartbeats(
@@ -652,7 +652,7 @@ class DatabaseStore:
                 select(ops_alert_events_table).where(ops_alert_events_table.c.id == event_payload["id"])
             ).mappings().first()
         if stored is None:
-            raise KeyError(f"Ops alert event not found after insert: {event.id}")
+            raise KeyError(f"插入后未找到运维告警事件：{event.id}")
         return self._ops_alert_event_from_row(stored)
 
     def update_ops_alert_event_delivery(self, event_id: str, delivery: OpsAlertDelivery) -> OpsAlertEvent:
@@ -665,12 +665,12 @@ class DatabaseStore:
                 .values(delivery=delivery.model_dump(by_alias=True), updated_at=timestamp)
             )
             if result.rowcount == 0:
-                raise KeyError(f"Ops alert event not found: {event_id}")
+                raise KeyError(f"未找到运维告警事件：{event_id}")
             row = connection.execute(
                 select(ops_alert_events_table).where(ops_alert_events_table.c.id == event_id)
             ).mappings().first()
         if row is None:
-            raise KeyError(f"Ops alert event not found: {event_id}")
+            raise KeyError(f"未找到运维告警事件：{event_id}")
         return self._ops_alert_event_from_row(row)
 
     def list_ops_alert_events(
@@ -793,7 +793,7 @@ class DatabaseStore:
     def read_artifact(self, job_id: str, artifact_id: str) -> bytes:
         artifact = self.get_artifact(job_id, artifact_id)
         if artifact is None:
-            raise KeyError(f"Artifact not found: {artifact_id}")
+            raise KeyError(f"未找到 Artifact：{artifact_id}")
         return self.read_artifact_record(artifact)
 
     def read_artifact_record(self, artifact: ArtifactRecord) -> bytes:
@@ -841,7 +841,7 @@ class DatabaseStore:
         with self.engine.begin() as connection:
             job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
         if job_row is None:
-            raise KeyError(f"Job not found: {job_id}")
+            raise KeyError(f"未找到作业：{job_id}")
         resolved_retention_class = retention_class or default_retention_class(kind)
         resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
         metadata, tags = artifact_object_metadata(
@@ -912,11 +912,11 @@ class DatabaseStore:
         with self.engine.begin() as connection:
             job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
         if job_row is None:
-            raise KeyError(f"Job not found: {job_id}")
+            raise KeyError(f"未找到作业：{job_id}")
 
         source = Path(source_path)
         if not source.exists():
-            raise FileNotFoundError(f"Artifact source path does not exist: {source}")
+            raise FileNotFoundError(f"Artifact 源路径不存在：{source}")
         resolved_retention_class = retention_class or default_retention_class(kind)
         resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
         metadata, tags = artifact_object_metadata(
@@ -965,7 +965,7 @@ class DatabaseStore:
         self.initialize()
         job = self.get_job(job_id)
         if job is None:
-            raise KeyError(f"Job not found: {job_id}")
+            raise KeyError(f"未找到作业：{job_id}")
 
         requested_at = request.now or utc_now()
         now = parse_timestamp(requested_at)
@@ -1190,10 +1190,10 @@ def normalize_json_string_list(value: Any) -> list[str]:
 def normalize_settings_scope_id(scope: SettingScope, scope_id: str | None) -> str:
     if scope == "system":
         if scope_id not in {None, ""}:
-            raise ValueError("System settings must not include a scope id")
+            raise ValueError("系统设置不得包含作用域 ID")
         return ""
     if not scope_id or not scope_id.strip():
-        raise ValueError("Project settings require a project id")
+        raise ValueError("项目设置需要项目 ID")
     return scope_id.strip()
 
 
@@ -1271,7 +1271,7 @@ def normalize_ops_alert(alert: OpsAlert, service_role: str, instance_id: str, ch
 
 def normalize_cleanup_reason(reason: str) -> str:
     stripped = reason.strip()
-    return stripped or "retention cleanup"
+    return stripped or "保留策略清理"
 
 
 def artifact_object_metadata(
@@ -1314,7 +1314,7 @@ def create_artifact_store(
         bucket = os.getenv(ARTIFACT_S3_BUCKET_ENV, "").strip()
         prefix = os.getenv(ARTIFACT_S3_PREFIX_ENV, "").strip()
         if not bucket:
-            raise ArtifactStoreConfigurationError("S3-compatible artifact store requires a bucket name.")
+            raise ArtifactStoreConfigurationError("S3-compatible Artifact Store 需要指定 bucket 名称。")
         presign_ttl_seconds = parse_positive_int_env(
             ARTIFACT_S3_PRESIGN_TTL_SECONDS_ENV,
             DEFAULT_PRESIGN_TTL_SECONDS,
@@ -1340,10 +1340,10 @@ def create_artifact_store(
 
 def configure_s3_lifecycle(*, client: ObjectStorageClient, bucket: str, prefix: str) -> None:
     if not bucket:
-        raise ArtifactStoreConfigurationError("S3 artifact lifecycle requires a bucket name.")
+        raise ArtifactStoreConfigurationError("S3 Artifact lifecycle 配置需要指定 bucket 名称。")
     configurator = getattr(client, "configure_lifecycle_rules", None)
     if not callable(configurator):
-        raise ArtifactStoreConfigurationError("S3 artifact lifecycle requires a client with lifecycle support.")
+        raise ArtifactStoreConfigurationError("S3 Artifact 生命周期配置需要 client 支持生命周期规则。")
     configurator(bucket, artifact_lifecycle_rules(prefix=prefix, ephemeral_days=EPHEMERAL_RETENTION_DAYS))
 
 
@@ -1361,7 +1361,7 @@ def parse_bool_env(name: str, default: bool) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise ArtifactStoreConfigurationError(f"{name} must be a boolean value.")
+    raise ArtifactStoreConfigurationError(f"环境变量 {name} 必须是布尔值。")
 
 
 def parse_positive_int_env(name: str, default: int) -> int:
@@ -1371,9 +1371,9 @@ def parse_positive_int_env(name: str, default: int) -> int:
     try:
         parsed = int(value)
     except ValueError as error:
-        raise ArtifactStoreConfigurationError(f"{name} must be an integer.") from error
+        raise ArtifactStoreConfigurationError(f"环境变量 {name} 必须是整数。") from error
     if parsed <= 0:
-        raise ArtifactStoreConfigurationError(f"{name} must be greater than zero.")
+        raise ArtifactStoreConfigurationError(f"环境变量 {name} 必须大于零。")
     return parsed
 
 

@@ -25,7 +25,7 @@ class ReleaseReadinessTest(unittest.TestCase):
                     {
                         ("gh", "--version"): _ok("gh version 2.87.3"),
                         ("gh", "auth", "status"): _ok("Logged in to github.com"),
-                        ("gh", "workflow", "list", "--repo", "owner/ai-jsunpack"): _ok("Release Gate active"),
+                        ("gh", "workflow", "list", "--repo", "owner/ai-jsunpack"): _ok("Release Gate enabled"),
                         ("docker", "info", "--format", "{{json .ServerVersion}}"): _ok('"29.1.3"'),
                     }
                 ),
@@ -70,7 +70,7 @@ class ReleaseReadinessTest(unittest.TestCase):
             self.assertIn("github_cli_authenticated", report["blockers"])
             self.assertIn("docker_daemon_available", report["blockers"])
             self.assertIn("release_gate_workflow_visible", report["blockers"])
-            self.assertTrue(any("Configure git remote origin" in action for action in report["nextActions"]))
+            self.assertTrue(any("配置 git remote origin" in action for action in report["nextActions"]))
 
     def test_parse_repository_accepts_github_remote_urls(self):
         self.assertEqual(parse_repository("git@github.com:owner/ai-jsunpack.git"), "owner/ai-jsunpack")

@@ -9,7 +9,7 @@ from .context import JobMemoryContext
 
 
 class JobMemoryService:
-    """Build auditable job and project memory context from deterministic artifacts."""
+    """根据确定性 artifact 构建可审计的任务与项目记忆上下文。"""
 
     def create_context(
         self,
@@ -125,9 +125,9 @@ class JobMemoryService:
         runtime_patterns: list[str],
     ) -> str:
         return (
-            f"Job short-term memory: cloudMode={cloud_mode}; "
-            f"entries={entries}; scripts={scripts}; styles={styles}; "
-            f"symbolCount={len(symbol_names)}; symbolSample={symbol_names[:8]}"
+            f"任务短期记忆：cloudMode={cloud_mode}；"
+            f"entries={entries}；scripts={scripts}；styles={styles}；"
+            f"symbolCount={len(symbol_names)}；symbolSample={symbol_names[:8]}"
         )
 
     def _long_term_content(
@@ -142,13 +142,13 @@ class JobMemoryService:
         symbol_names: list[str],
         runtime_patterns: list[str],
     ) -> str:
-        source_map_state = "present" if source_maps else "missing"
-        bundle_shape = "multi-script" if len(scripts) > 1 else "single-script"
+        source_map_state = "存在" if source_maps else "缺失"
+        bundle_shape = "多脚本" if len(scripts) > 1 else "单脚本"
         return (
-            "Project long-term memory candidate: "
-            f"bundleShape={bundle_shape}; sourceMaps={source_map_state}; "
-            f"runtimePatterns={runtime_patterns}; cloudMode={cloud_mode}; "
-            "retain as project-scoped derived pattern evidence only."
+            "项目长期记忆候选："
+            f"bundleShape={bundle_shape}；sourceMaps={source_map_state}；"
+            f"runtimePatterns={runtime_patterns}；cloudMode={cloud_mode}；"
+            "仅作为项目范围内的派生模式证据保留。"
         )
 
     def _entity_content(
@@ -164,8 +164,8 @@ class JobMemoryService:
         runtime_patterns: list[str],
     ) -> str:
         return (
-            "Project entity memory: "
-            f"entries={entries}; scripts={scripts}; styles={styles}; assets={assets[:5]}; "
+            "项目实体记忆："
+            f"entries={entries}；scripts={scripts}；styles={styles}；assets={assets[:5]}；"
             f"symbolFamilies={symbol_names[:12]}"
         )
 
@@ -183,10 +183,10 @@ class JobMemoryService:
     ) -> str:
         validation_focus = "runtime_compare" if entries else "minimal_host_assumption"
         return (
-            "Project scenario memory: "
-            f"validationFocus={validation_focus}; scriptCount={len(scripts)}; "
-            f"styleCount={len(styles)}; sourceMapCount={len(source_maps)}; "
-            "reuse for similar build artifact analysis and repair triage."
+            "项目场景记忆："
+            f"validationFocus={validation_focus}；scriptCount={len(scripts)}；"
+            f"styleCount={len(styles)}；sourceMapCount={len(source_maps)}；"
+            "可复用于相似构建 artifact 的分析与修复分诊。"
         )
 
     def _list_excerpt(self, value: Any, *, limit: int = 8) -> list[str]:

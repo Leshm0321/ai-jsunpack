@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-test("core CLI emits inventory and AST artifact payloads", async () => {
+test("Core CLI 输出 inventory 和 AST Artifact payload", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -31,7 +31,7 @@ test("core CLI emits inventory and AST artifact payloads", async () => {
   }
 });
 
-test("core CLI analyzes archive input", async () => {
+test("Core CLI 分析归档输入", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-zip-"));
   try {
     const archivePath = path.join(root, "dist.zip");
@@ -51,14 +51,14 @@ test("core CLI analyzes archive input", async () => {
 
     assert.deepEqual(parsed.inventoryArtifactPayload.inventory.entries, ["index.html"]);
     assert.deepEqual(parsed.inventoryArtifactPayload.inventory.scripts, ["assets/app.js"]);
-    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("zip archive")));
+    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("zip 归档")));
     assert.ok(parsed.astIndexArtifactPayload.astIndexes[0].symbols.some((symbol) => symbol.name === "cliZip"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("core CLI analyzes single JavaScript input", async () => {
+test("Core CLI 分析单个 JavaScript 输入", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-single-js-"));
   try {
     const inputPath = path.join(root, "agentApi.js");
@@ -73,7 +73,7 @@ test("core CLI analyzes single JavaScript input", async () => {
     assert.deepEqual(parsed.inventoryArtifactPayload.inventory.entries, ["index.html"]);
     assert.deepEqual(parsed.inventoryArtifactPayload.inventory.scripts, ["agentApi.js"]);
     assert.equal(parsed.inventoryArtifactPayload.inventory.isSingleBundle, true);
-    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("single_script file was wrapped")));
+    assert.ok(parsed.inventoryArtifactPayload.inventory.warnings.some((warning) => warning.includes("single_script 文件已封装")));
     assert.ok(parsed.astIndexArtifactPayload.detectedRuntime.includes("single_bundle_best_effort"));
     assert.ok(parsed.astIndexArtifactPayload.astIndexes[0].symbols.some((symbol) => symbol.name === "cliSingle"));
   } finally {
@@ -81,7 +81,7 @@ test("core CLI analyzes single JavaScript input", async () => {
   }
 });
 
-test("core CLI reconstruct emits plan payload and generated project manifest", async () => {
+test("Core CLI 重建命令输出 plan payload 和 generated project Manifest", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-"));
   try {
     const outputDir = path.join(root, "generated");
@@ -112,7 +112,7 @@ test("core CLI reconstruct emits plan payload and generated project manifest", a
   }
 });
 
-test("core CLI reconstruct accepts archive input", async () => {
+test("Core CLI 重建命令接受归档输入", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-zip-"));
   try {
     const archivePath = path.join(root, "dist.zip");
@@ -132,14 +132,14 @@ test("core CLI reconstruct accepts archive input", async () => {
     const copiedSource = await readFile(path.join(outputDir, "public", "original", "assets", "app.js"), "utf8");
 
     assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
-    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("zip archive")));
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("zip 归档")));
     assert.equal(copiedSource, "function cliReconstructZip(){return 1} export { cliReconstructZip };");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("core CLI reconstruct accepts single JavaScript input", async () => {
+test("Core CLI 重建命令接受单个 JavaScript 输入", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-reconstruct-single-js-"));
   try {
     const inputPath = path.join(root, "agentApi.js");
@@ -155,7 +155,7 @@ test("core CLI reconstruct accepts single JavaScript input", async () => {
 
     assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/agentApi.js"));
     assert.ok(parsed.generatedProjectManifestPayload.manifest.copiedSourceFiles.includes("public/original/index.html"));
-    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("single_script file was wrapped")));
+    assert.ok(parsed.generatedProjectManifestPayload.manifest.limitations.some((limitation) => limitation.includes("single_script 文件已封装")));
     assert.equal(copiedScript, "function cliReconstructSingle(){return 1} const value = cliReconstructSingle();");
     assert.ok(hostHtml.includes('<script src="./agentApi.js"></script>'));
   } finally {
@@ -163,7 +163,7 @@ test("core CLI reconstruct accepts single JavaScript input", async () => {
   }
 });
 
-test("core CLI rejects unsafe archive entries", async () => {
+test("Core CLI 拒绝不安全的归档条目", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-cli-unsafe-"));
   try {
     const archivePath = path.join(root, "unsafe.zip");
@@ -171,7 +171,7 @@ test("core CLI rejects unsafe archive entries", async () => {
 
     await assert.rejects(
       () => runCli(["analyze", archivePath, "--job-id", "job_cli_unsafe"]),
-      /Unsafe archive entry path/
+      /不安全的归档条目路径/
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -200,7 +200,7 @@ function runCli(args: string[]): Promise<string> {
         resolve(stdout);
         return;
       }
-      reject(new Error(stderr || `Core CLI exited with code ${code}`));
+      reject(new Error(stderr || `Core CLI 已退出，退出码 ${code}`));
     });
   });
 }

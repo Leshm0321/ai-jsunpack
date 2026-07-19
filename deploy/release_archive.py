@@ -40,7 +40,7 @@ class ReleaseArchiveConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> ReleaseArchiveConfig:
-    parser = argparse.ArgumentParser(description="Verify a production release evidence archive.")
+    parser = argparse.ArgumentParser(description="验证生产发布证据归档。")
     parser.add_argument("--release-gate-report", type=Path, required=True)
     parser.add_argument("--compose-smoke-report", type=Path, required=True)
     parser.add_argument("--deployment-smoke-report", type=Path, required=True)

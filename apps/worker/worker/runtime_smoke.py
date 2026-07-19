@@ -105,7 +105,7 @@ def _detect_image_format(content: bytes | None) -> str | None:
 
 def _decode_png_rgba(content: bytes) -> PngImage:
     if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise PngDecodeError("Screenshot is not a PNG image.")
+        raise PngDecodeError("截图不是 PNG 图像。")
 
     offset = 8
     width = 0
@@ -122,7 +122,7 @@ def _decode_png_rgba(content: bytes) -> PngImage:
         data_start = offset + 8
         data_end = data_start + length
         if data_end + 4 > len(content):
-            raise PngDecodeError("PNG chunk is truncated.")
+            raise PngDecodeError("PNG 数据块已截断。")
         data = content[data_start:data_end]
         offset = data_end + 4
         if chunk_type == b"IHDR":
@@ -133,9 +133,9 @@ def _decode_png_rgba(content: bytes) -> PngImage:
             break
 
     if width < 1 or height < 1 or not idat_chunks:
-        raise PngDecodeError("PNG is missing image metadata or pixel data.")
+        raise PngDecodeError("PNG 缺少图像元数据或像素数据。")
     if bit_depth != 8 or color_type not in {0, 2, 4, 6} or compression != 0 or filter_method != 0 or interlace != 0:
-        raise PngDecodeError("PNG pixel diff supports only 8-bit non-interlaced grayscale/RGB/RGBA screenshots.")
+        raise PngDecodeError("PNG 像素差异比较仅支持 8 位非隔行扫描的灰度/RGB/RGBA 截图。")
 
     channels_by_color_type = {0: 1, 2: 3, 4: 2, 6: 4}
     channels = channels_by_color_type[color_type]
@@ -143,11 +143,11 @@ def _decode_png_rgba(content: bytes) -> PngImage:
     try:
         raw = zlib.decompress(b"".join(idat_chunks))
     except zlib.error as error:
-        raise PngDecodeError(f"PNG pixel data could not be decompressed: {error}") from error
+        raise PngDecodeError(f"无法解压 PNG 像素数据：{error}") from error
 
     expected = (stride + 1) * height
     if len(raw) < expected:
-        raise PngDecodeError("PNG pixel data is shorter than expected.")
+        raise PngDecodeError("PNG 像素数据短于预期。")
 
     rows: list[bytes] = []
     previous = bytearray(stride)
@@ -200,7 +200,7 @@ def _unfilter_png_scanline(scanline: bytearray, previous: bytearray, bpp: int, f
         elif filter_type == 4:
             scanline[index] = (value + _png_paeth(left, up, up_left)) & 0xFF
         else:
-            raise PngDecodeError(f"Unsupported PNG filter type: {filter_type}.")
+            raise PngDecodeError(f"不支持的 PNG 过滤器类型：{filter_type}。")
 
 
 def _png_paeth(left: int, up: int, up_left: int) -> int:
@@ -217,7 +217,7 @@ def _png_paeth(left: int, up: int, up_left: int) -> int:
 
 def _encode_png_rgba(width: int, height: int, rgba: bytes) -> bytes:
     if len(rgba) != width * height * 4:
-        raise ValueError("RGBA pixel data does not match PNG dimensions.")
+        raise ValueError("RGBA 像素数据与 PNG 尺寸不匹配。")
     raw = bytearray()
     stride = width * 4
     for row in range(height):
@@ -292,7 +292,7 @@ class RuntimeSmokeError(Exception):
 class PolicyDeniedBrowserAdapter:
     def capture(self, request: BrowserSmokeRequest) -> BrowserSmokeCapture:
         raise RuntimeSmokeError(
-            "Local Playwright execution is disabled by the production deployment profile; configure the remote Browser Runner.",
+            "production deployment profile 已禁用本地 Playwright 执行；请配置 remote Browser Runner。",
             "policy_denied",
         )
 
@@ -302,7 +302,7 @@ class PlaywrightBrowserAdapter:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as error:
-            raise RuntimeSmokeError("Playwright is not installed.", "runtime_error") from error
+            raise RuntimeSmokeError("未安装 Playwright。", "runtime_error") from error
 
         console_messages: list[str] = []
         console_errors: list[str] = []
@@ -406,7 +406,7 @@ class PlaywrightBrowserAdapter:
             elif interaction.action == "press":
                 key = interaction.key or interaction.value
                 if not key:
-                    raise RuntimeSmokeError("Runtime scenario press interaction requires key or value.", "invalid_input")
+                    raise RuntimeSmokeError("运行时场景的 press 交互需要 key 或 value。", "invalid_input")
                 if interaction.selector:
                     page.press(interaction.selector, key, timeout=timeout_ms)
                 else:
@@ -425,21 +425,21 @@ class PlaywrightBrowserAdapter:
             if assertion.kind == "selector_visible":
                 selector = assertion.selector
                 if not selector:
-                    failures.append("selector_visible assertion requires selector.")
+                    failures.append("selector_visible 断言需要 selector。")
                 elif not page.locator(selector).first.is_visible():
-                    failures.append(f"Expected selector to be visible: {selector}")
+                    failures.append(f"预期 selector 可见：{selector}")
             elif assertion.kind == "text_contains":
                 text = assertion.text or assertion.value
                 if not text:
-                    failures.append("text_contains assertion requires text or value.")
+                    failures.append("text_contains 断言需要 text 或 value。")
                 elif text not in page.locator("body").inner_text(timeout=1000):
-                    failures.append(f"Expected body text to contain: {text}")
+                    failures.append(f"预期 body 文本包含：{text}")
             elif assertion.kind == "url_contains":
                 value = assertion.value or assertion.text
                 if not value:
-                    failures.append("url_contains assertion requires value or text.")
+                    failures.append("url_contains 断言需要 value 或 text。")
                 elif value not in page.url:
-                    failures.append(f"Expected URL to contain: {value}")
+                    failures.append(f"预期 URL 包含：{value}")
         return failures
 
     def _dom_summary(self, page) -> dict[str, Any]:
@@ -482,10 +482,10 @@ class RemoteBrowserRunnerAdapter:
         self.poll_seconds = poll_seconds if poll_seconds is not None else self._float_env(REMOTE_BROWSER_RUNNER_POLL_SECONDS_ENV, 0.25)
         self.timeout_ms = timeout_ms if timeout_ms is not None else self._int_env(REMOTE_BROWSER_RUNNER_TIMEOUT_MS_ENV, 60_000)
         if not self.base_url:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} is not configured.", "policy_denied")
+            raise RuntimeSmokeError(f"未配置 {REMOTE_BROWSER_RUNNER_URL_ENV}。", "policy_denied")
         if not self.token:
             raise RuntimeSmokeError(
-                f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} or {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is not configured.",
+                f"未配置 {REMOTE_BROWSER_RUNNER_TOKEN_ENV} 或 {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV}。",
                 "policy_denied",
             )
 
@@ -493,11 +493,11 @@ class RemoteBrowserRunnerAdapter:
         base_url = value.strip().rstrip("/")
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"}:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must use http or https.", "policy_denied")
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} 必须使用 http 或 https。", "policy_denied")
         if not parsed.hostname:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must include a hostname.", "policy_denied")
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} 必须包含主机名。", "policy_denied")
         if parsed.username or parsed.password:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} must not include credentials.", "policy_denied")
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_URL_ENV} 不得包含凭据。", "policy_denied")
         return base_url
 
     @classmethod
@@ -522,22 +522,22 @@ class RemoteBrowserRunnerAdapter:
         summary = self._post("/browser-runs", payload)
         run_id = str(summary.get("id") or "")
         if not run_id:
-            raise RuntimeSmokeError("Browser Runner did not return a run id.", "runtime_error")
+            raise RuntimeSmokeError("Browser Runner 未返回运行 ID。", "runtime_error")
         deadline = time.monotonic() + (self.timeout_ms / 1000)
         while True:
             current = BrowserRunSummary.model_validate(self._get(f"/browser-runs/{quote(run_id)}"))
             if current.status in {"pass", "fail", "best_effort"}:
                 if current.result is None:
-                    raise RuntimeSmokeError("Browser Runner completed without a result payload.", "runtime_error")
+                    raise RuntimeSmokeError("Browser Runner 已完成，但未返回结果 payload。", "runtime_error")
                 return self._capture_from_result(request, current)
             if time.monotonic() >= deadline:
-                raise RuntimeSmokeError(f"Browser Runner run timed out while waiting for {run_id}.", "timeout")
+                raise RuntimeSmokeError(f"等待 Browser Runner 运行 {run_id} 时超时。", "timeout")
             time.sleep(max(0.05, self.poll_seconds))
 
     def _capture_from_result(self, request: BrowserSmokeRequest, summary: BrowserRunSummary) -> BrowserSmokeCapture:
         result = summary.result
         if result is None:
-            raise RuntimeSmokeError("Browser Runner result is unavailable.", "runtime_error")
+            raise RuntimeSmokeError("Browser Runner 结果不可用。", "runtime_error")
         if result.screenshot_base64:
             request.screenshot_path.write_bytes(base64.b64decode(result.screenshot_base64.encode("ascii")))
         boundary = dict(result.execution_boundary)
@@ -568,7 +568,7 @@ class RemoteBrowserRunnerAdapter:
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         token = self._authorization_token()
-        request = Request(  # noqa: S310 - base_url is validated in __init__.
+        request = Request(  # noqa: S310 - base_url 已在 __init__ 中验证。
             f"{self.base_url}{path}",
             data=body,
             headers={
@@ -582,7 +582,7 @@ class RemoteBrowserRunnerAdapter:
 
     def _get(self, path: str) -> dict[str, Any]:
         token = self._authorization_token()
-        request = Request(  # noqa: S310 - base_url is validated in __init__.
+        request = Request(  # noqa: S310 - base_url 已在 __init__ 中验证。
             f"{self.base_url}{path}",
             headers={
                 "Authorization": f"Bearer {token}",
@@ -599,13 +599,13 @@ class RemoteBrowserRunnerAdapter:
         except HTTPError as error:
             failure_class: FailureClass = "policy_denied" if error.code in {401, 403} else "runtime_error"
             detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeSmokeError(f"Browser Runner request failed with HTTP {error.code}: {detail}", failure_class) from error
+            raise RuntimeSmokeError(f"Browser Runner 请求失败，HTTP {error.code}：{detail}", failure_class) from error
         except URLError as error:
-            raise RuntimeSmokeError(f"Browser Runner is unreachable: {error.reason}", "runtime_error") from error
+            raise RuntimeSmokeError(f"无法连接 Browser Runner：{error.reason}", "runtime_error") from error
         except TimeoutError as error:
-            raise RuntimeSmokeError("Browser Runner request timed out.", "timeout") from error
+            raise RuntimeSmokeError("Browser Runner 请求超时。", "timeout") from error
         if not isinstance(payload, dict):
-            raise RuntimeSmokeError("Browser Runner returned a non-object JSON payload.", "runtime_error")
+            raise RuntimeSmokeError("Browser Runner 返回了非对象 JSON payload。", "runtime_error")
         return payload
 
     def _int_env(self, name: str, default: int) -> int:
@@ -634,21 +634,21 @@ class RemoteBrowserRunnerAdapter:
         if self.token_file is not None:
             return self._read_token_file()
         if not self.token:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_ENV} is not configured.", "policy_denied")
+            raise RuntimeSmokeError(f"未配置 {REMOTE_BROWSER_RUNNER_TOKEN_ENV}。", "policy_denied")
         return self.token
 
     def _read_token_file(self) -> str:
         if self.token_file is None:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is not configured.", "policy_denied")
+            raise RuntimeSmokeError(f"未配置 {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV}。", "policy_denied")
         try:
             value = self.token_file.read_text(encoding="utf-8").strip()
         except OSError as error:
             raise RuntimeSmokeError(
-                f"Unable to read {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV}: {error}",
+                f"无法读取 {REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV}：{error}",
                 "policy_denied",
             ) from error
         if not value:
-            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} is empty.", "policy_denied")
+            raise RuntimeSmokeError(f"{REMOTE_BROWSER_RUNNER_TOKEN_FILE_ENV} 为空。", "policy_denied")
         return value
 
 
@@ -732,7 +732,7 @@ class RuntimeSmokeRunner:
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
-                    message="Runtime smoke skipped because no HTML entry was found.",
+                    message="运行时冒烟测试已跳过：未找到 HTML 入口。",
             )
 
         with self.sandbox_runner.attempt_workspace() as temp_dir:
@@ -759,7 +759,7 @@ class RuntimeSmokeRunner:
                 screenshot_bytes = screenshot_path.read_bytes() if screenshot_path.exists() else None
                 limitations = [*entry.limitations, *capture.limitations]
                 if screenshot_bytes is None:
-                    limitations.append("Playwright completed without producing a screenshot.")
+                    limitations.append("Playwright 已完成，但未生成截图。")
                 return self._persist_result(
                     job_id=job_id,
                     store=store,
@@ -782,7 +782,7 @@ class RuntimeSmokeRunner:
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
-                    message=f"Runtime smoke completed with status {status}.",
+                    message=f"运行时冒烟测试已完成，状态为 {status}。",
                 )
             except RuntimeSmokeError as error:
                 return self._persist_result(
@@ -799,7 +799,7 @@ class RuntimeSmokeRunner:
                     assertion_failures=[],
                     dom_summary={},
                     screenshot_bytes=None,
-                    limitations=[*entry.limitations, "Playwright runtime smoke could not complete."],
+                    limitations=[*entry.limitations, "Playwright 运行时冒烟测试未能完成。"],
                     failure_class=error.failure_class,
                     scenario=scenario,
                     network_policy=network_policy,
@@ -807,7 +807,7 @@ class RuntimeSmokeRunner:
                     parent_artifact_ids=parents,
                     attempt=attempt,
                     duration_ms=self._duration_ms(started_at),
-                    message=f"Runtime smoke produced best-effort evidence: {error}",
+                    message=f"运行时冒烟测试生成了 best_effort 证据：{error}",
                 )
 
     def _resolve_entry(self, *, input_path: Path | str | None, entry_url: str | None) -> RuntimeEntry:
@@ -819,7 +819,7 @@ class RuntimeSmokeRunner:
                 entry_url=None,
                 serve_root=None,
                 relative_entry=None,
-                limitations=["No input path or explicit entry URL was provided."],
+                limitations=["未提供输入路径或显式入口 URL。"],
             )
 
         path = Path(input_path)
@@ -839,7 +839,7 @@ class RuntimeSmokeRunner:
             entry_url=None,
             serve_root=None,
             relative_entry=None,
-            limitations=[f"No HTML entry was found under {path}."],
+            limitations=[f"在 {path} 下未找到 HTML 入口。"],
         )
 
     @contextmanager
@@ -849,7 +849,7 @@ class RuntimeSmokeRunner:
             return
 
         if entry.serve_root is None or entry.relative_entry is None:
-            raise RuntimeSmokeError("Runtime entry is unavailable.", "invalid_input")
+            raise RuntimeSmokeError("运行时入口不可用。", "invalid_input")
 
         with self._static_server(entry.serve_root) as base_url:
             yield f"{base_url}/{quote(entry.relative_entry)}"
@@ -1043,7 +1043,7 @@ class RuntimeCompareReviewGateResult:
 
 
 class RuntimeCompareReviewGate:
-    """将 runtime comparison 差异转为 review 和 repair evidence。"""
+    """将运行时对比差异转为审查与修复证据。"""
 
     def run(
         self,
@@ -1062,7 +1062,7 @@ class RuntimeCompareReviewGate:
                 triggered=False,
                 review_artifact=None,
                 repair_artifact=None,
-                message="Runtime compare review gate disabled by job configuration.",
+                message="作业配置已禁用运行时对比审查门禁。",
             )
 
         store.update_status(job_id, "reviewing")
@@ -1077,7 +1077,7 @@ class RuntimeCompareReviewGate:
             for observation in self._gate_observations(artifact=artifact, comparison=comparison, policy=policy)
         ]
         if not comparisons:
-            gate_observations.append("No runtime comparison artifacts were available for review gate evaluation.")
+            gate_observations.append("没有可供 review gate 评估的 runtime comparison Artifact。")
         triggered = bool(gate_observations)
         evidence_refs = [
             self._evidence_ref(artifact=artifact, comparison=comparison)
@@ -1098,9 +1098,8 @@ class RuntimeCompareReviewGate:
                 status="planned",
                 risk_level="medium",
                 decision=(
-                    "Runtime comparison differences require Review/Fix handling before the "
-                    "reconstructed project can be treated as behaviorally equivalent. No "
-                    "deterministic runtime repair action was applied in this pass."
+                    "重建项目在视为行为等价之前，必须通过 Review/Fix 流程处理运行时对比差异。"
+                    "本轮未应用确定性的运行时修复动作。"
                 ),
             )
             repair_artifact = store.write_artifact(
@@ -1190,21 +1189,19 @@ class RuntimeCompareReviewGate:
         scope = self._scope_label(comparison)
         observations: list[str] = []
         if comparison.status in {"fail", "retry"}:
-            observations.append(f"{scope}: runtime comparison status is {comparison.status}.")
+            observations.append(f"{scope}：运行时对比状态为 {comparison.status}。")
         if policy["failOnDomChanged"] and differences.dom_changed:
             count = len(differences.dom_differences) or len(differences.changed_dom_fields)
-            observations.append(f"{scope}: DOM changed across {count} field(s).")
+            observations.append(f"{scope}：DOM 在 {count} 个字段中发生变化。")
         if policy["failOnNetworkChanged"] and differences.network_changed:
             observations.append(
-                f"{scope}: network changed with "
-                f"{len(differences.original_only_requests)} original-only and "
-                f"{len(differences.reconstructed_only_requests)} reconstructed-only request(s)."
+                f"{scope}：网络发生变化，原始版本独有请求 {len(differences.original_only_requests)} 个，"
+                f"重建版本独有请求 {len(differences.reconstructed_only_requests)} 个。"
             )
         if policy["failOnConsoleChanged"] and differences.console_changed:
             observations.append(
-                f"{scope}: console changed with "
-                f"{len(differences.original_only_console)} original-only and "
-                f"{len(differences.reconstructed_only_console)} reconstructed-only line(s)."
+                f"{scope}：console 发生变化，原始版本独有内容 {len(differences.original_only_console)} 行，"
+                f"重建版本独有内容 {len(differences.reconstructed_only_console)} 行。"
             )
         screenshot_reason = self._screenshot_gate_reason(differences, policy)
         if screenshot_reason:
@@ -1219,11 +1216,11 @@ class RuntimeCompareReviewGate:
             changed_ratio = screenshot.changed_pixel_ratio or 0.0
             max_ratio = policy["maxChangedPixelRatio"]
             if changed_ratio > max_ratio:
-                return f"screenshot pixel diff ratio {changed_ratio:.6f} exceeded {max_ratio:.6f}."
+                return f"截图像素差异比例 {changed_ratio:.6f} 超过 {max_ratio:.6f}。"
             return None
         if screenshot.changed is True:
-            reason = screenshot.reason or "screenshot hash or size changed while pixel diff was unavailable."
-            return f"screenshot changed without comparable pixel diff ({reason})"
+            reason = screenshot.reason or "像素差异不可用时，截图哈希或尺寸发生了变化。"
+            return f"截图已变化，但没有可比较的像素差异（{reason}）"
         return None
 
     def _decision(
@@ -1234,18 +1231,18 @@ class RuntimeCompareReviewGate:
         policy: dict[str, Any],
     ) -> str:
         if not comparisons:
-            return "Runtime compare review gate could not find comparison evidence to evaluate."
+            return "运行时对比审查门禁未找到可评估的对比证据。"
         if not gate_observations:
             return (
-                "Runtime compare review gate passed across "
-                f"{len(comparisons)} comparison artifact(s); configured thresholds were not exceeded."
+                f"runtime comparison review gate 已通过 {len(comparisons)} 个 comparison Artifact；"
+                "未超过配置阈值。"
             )
         observations = "; ".join(gate_observations[:5])
         if len(gate_observations) > 5:
-            observations += f"; plus {len(gate_observations) - 5} additional observation(s)"
+            observations += f"；另有 {len(gate_observations) - 5} 条观察"
         return (
-            "Runtime compare review gate blocked automatic behavioral equivalence: "
-            f"{observations}. Policy: dom={policy['failOnDomChanged']}, "
+            "运行时对比审查门禁阻止自动判定行为等价："
+            f"{observations}。策略：dom={policy['failOnDomChanged']}, "
             f"network={policy['failOnNetworkChanged']}, console={policy['failOnConsoleChanged']}, "
             f"screenshot={policy['failOnScreenshotChanged']}, "
             f"maxChangedPixelRatio={policy['maxChangedPixelRatio']}."
@@ -1254,7 +1251,7 @@ class RuntimeCompareReviewGate:
     def _evidence_ref(self, *, artifact: ArtifactRecord, comparison: RuntimeComparisonReport) -> EvidenceRef:
         return EvidenceRef(
             artifact_id=artifact.id,
-            label=f"Runtime comparison: {self._scope_label(comparison)}",
+            label=f"运行时对比：{self._scope_label(comparison)}",
             locator=f"artifact://{artifact.id}",
             excerpt=self._comparison_excerpt(comparison),
         )
@@ -1262,15 +1259,15 @@ class RuntimeCompareReviewGate:
     def _comparison_excerpt(self, comparison: RuntimeComparisonReport) -> str:
         differences = comparison.differences
         return (
-            f"status={comparison.status}; dom={differences.dom_changed}; "
-            f"network={differences.network_changed}; console={differences.console_changed}; "
-            f"screenshot={differences.screenshot_changed}"
+            f"状态={comparison.status}；DOM 变化={differences.dom_changed}；"
+            f"网络变化={differences.network_changed}；console 变化={differences.console_changed}；"
+            f"截图变化={differences.screenshot_changed}"
         )
 
     def _scope_label(self, comparison: RuntimeComparisonReport) -> str:
         scope = comparison.differences.comparison_scope
         viewport = scope.viewport
-        viewport_label = f"{viewport.name or 'viewport'} {viewport.width}x{viewport.height}" if viewport else "viewport unknown"
+        viewport_label = f"{viewport.name or '视口'} {viewport.width}x{viewport.height}" if viewport else "视口未知"
         return f"{scope.scenario_name} / {viewport_label}"
 
     def _bool_config(self, value: Any, *, default: bool) -> bool:
@@ -1298,7 +1295,7 @@ class RuntimeCompareRepairResult:
 
 
 class RuntimeCompareRepairRunner:
-    """对生成工程 attempt 应用低风险确定性 runtime repair 动作。"""
+    """对生成工程尝试应用低风险确定性运行时修复动作。"""
 
     PROTECTED_ROOTS = {"src", "scripts", "node_modules", ".git"}
     PROTECTED_FILES = {
@@ -1331,7 +1328,7 @@ class RuntimeCompareRepairRunner:
             return RuntimeCompareRepairResult(
                 repair_artifact=None,
                 applied_project_artifact=None,
-                message="No planned runtime compare repair instruction was available.",
+                message="没有可用的已规划运行时对比修复指令。",
             )
 
         store.update_status(job_id, "repairing")
@@ -1352,12 +1349,12 @@ class RuntimeCompareRepairRunner:
                 actions=[],
                 status="skipped",
                 risk_level="medium",
-                decision="Runtime compare repair skipped because reviewFix policy disabled the low-risk static mirror action.",
+                decision="运行时对比修复已跳过：reviewFix 策略禁用了低风险静态镜像动作。",
             )
             return RuntimeCompareRepairResult(
                 repair_artifact=repair_artifact,
                 applied_project_artifact=None,
-                message="Runtime compare repair skipped by Review/Fix policy.",
+                message="Review/Fix 策略跳过了运行时对比修复。",
             )
 
         if generated_project_artifact is None:
@@ -1371,12 +1368,12 @@ class RuntimeCompareRepairRunner:
                 actions=[],
                 status="skipped",
                 risk_level="medium",
-                decision="Runtime compare repair skipped because no generated_project artifact was available.",
+                decision="runtime comparison repair 已跳过：没有可用的 generated_project Artifact。",
             )
             return RuntimeCompareRepairResult(
                 repair_artifact=repair_artifact,
                 applied_project_artifact=None,
-                message="Runtime compare repair skipped because no generated_project artifact was available.",
+                message="runtime comparison repair 已跳过：没有可用的 generated_project Artifact。",
             )
 
         source_project = store.artifact_local_path(generated_project_artifact)
@@ -1393,12 +1390,12 @@ class RuntimeCompareRepairRunner:
                 actions=[],
                 status="skipped",
                 risk_level="medium",
-                decision="Runtime compare repair skipped because generated_project storage was not a directory.",
+                decision="运行时对比修复已跳过：generated_project 存储不是目录。",
             )
             return RuntimeCompareRepairResult(
                 repair_artifact=repair_artifact,
                 applied_project_artifact=None,
-                message="Runtime compare repair skipped because generated_project storage was not a directory.",
+                message="运行时对比修复已跳过：generated_project 存储不是目录。",
             )
 
         with tempfile.TemporaryDirectory(prefix="ai-jsunpack-runtime-repair-") as temp_dir:
@@ -1509,40 +1506,40 @@ class RuntimeCompareRepairRunner:
             copied += 1
 
         if copied < 1:
-            return [], "Runtime compare repair skipped because no safe static files were available to mirror."
+            return [], "运行时对比修复已跳过：没有可安全镜像的静态文件。"
 
         action = RepairAction(
             action="mirror_original_static_entry",
             path="projectRoot",
             value="public/original",
             reason=(
-                f"Mirrored {copied} static file(s) from public/original into the generated project root "
-                f"for runtime compare retry; skipped {skipped} protected or unsafe file(s)."
+                f"已将 public/original 中的 {copied} 个静态文件镜像到生成项目根目录，"
+                f"用于重试运行时对比；跳过了 {skipped} 个受保护或不安全的文件。"
             ),
         )
         return [action], (
-            "Applied deterministic runtime repair by mirroring the original static entry into a new "
-            f"generated_project attempt ({copied} file(s) copied, {skipped} skipped)."
+            "已通过把原始静态入口镜像到新的 generated_project 尝试来应用确定性运行时修复"
+            f"（复制 {copied} 个文件，跳过 {skipped} 个）。"
         )
 
     def _source_root(self, project_root: Path) -> tuple[Path | None, str]:
         manifest_path = project_root / "src" / "reconstruction-manifest.json"
         if not manifest_path.is_file():
-            return None, "Runtime compare repair skipped because reconstruction manifest was missing."
+            return None, "runtime comparison repair 已跳过：缺少 reconstruction Manifest。"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return None, "Runtime compare repair skipped because reconstruction manifest was not valid JSON."
+            return None, "runtime comparison repair 已跳过：reconstruction Manifest 不是有效的 JSON。"
 
         source_root_value = manifest.get("sourceRoot")
         if not isinstance(source_root_value, str) or not source_root_value:
-            return None, "Runtime compare repair skipped because reconstruction manifest sourceRoot was missing."
+            return None, "runtime comparison repair 已跳过：reconstruction Manifest 缺少 sourceRoot。"
         source_root_relative = Path(source_root_value)
         if source_root_relative.is_absolute() or ".." in source_root_relative.parts:
-            return None, "Runtime compare repair skipped because reconstruction manifest sourceRoot was unsafe."
+            return None, "runtime comparison repair 已跳过：reconstruction Manifest 的 sourceRoot 不安全。"
         source_root = project_root / source_root_relative
         if not source_root.is_dir():
-            return None, f"Runtime compare repair skipped because sourceRoot was unavailable: {source_root_value}."
+            return None, f"运行时对比修复已跳过：sourceRoot 不可用：{source_root_value}。"
         return source_root, ""
 
     def _is_protected_mirror_path(self, relative_path: Path) -> bool:
@@ -1664,8 +1661,8 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             trace_artifacts=trace_artifacts,
             report_artifacts=report_artifacts,
             message=(
-                f"Runtime compare completed {len(results)} scenario/viewport run(s) "
-                f"with aggregate status {aggregate_status}."
+                f"运行时对比已完成 {len(results)} 次场景/视口运行，"
+                f"汇总状态为 {aggregate_status}。"
             ),
         )
 
@@ -1876,7 +1873,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
             comparison_artifacts=[comparison_artifact],
             trace_artifacts=[trace_artifact],
             report_artifacts=[report_artifact],
-            message=f"Runtime compare completed with status {status}.",
+            message=f"运行时对比已完成，状态为 {status}。",
         )
 
     def _scenario_matrix_from_config(
@@ -2080,11 +2077,10 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
         if matrix_plan["omittedRunCount"] <= 0:
             return None
         return (
-            "Runtime compare matrix was pruned from "
-            f"{matrix_plan['requestedRunCount']} to {matrix_plan['selectedRunCount']} run(s) "
-            f"by maxMatrixRuns={matrix_plan['maxMatrixRuns']} using "
-            f"{matrix_plan['matrixSelection']} selection; "
-            f"{matrix_plan['omittedRunCount']} run(s) were omitted."
+            f"运行时对比矩阵从 {matrix_plan['requestedRunCount']} 次运行裁剪为 "
+            f"{matrix_plan['selectedRunCount']} 次，依据 maxMatrixRuns={matrix_plan['maxMatrixRuns']} "
+            f"并使用 {matrix_plan['matrixSelection']} 选择方式；"
+            f"省略了 {matrix_plan['omittedRunCount']} 次运行。"
         )
 
     def _matrix_item_summary(self, item: RuntimeCompareMatrixItem) -> dict[str, Any]:
@@ -2168,12 +2164,12 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 screenshot_bytes = screenshot_path.read_bytes() if screenshot_path.exists() else None
                 limitations.extend(capture.limitations)
                 if screenshot_bytes is None:
-                    limitations.append("Playwright completed without producing a comparison screenshot.")
+                    limitations.append("Playwright 已完成，但未生成对比截图。")
             except RuntimeSmokeError as error:
                 status = "best_effort"
                 failure_class = error.failure_class
                 capture = BrowserSmokeCapture(page_errors=[str(error)])
-                limitations.append("Playwright runtime compare target capture could not complete.")
+                limitations.append("Playwright 未能完成运行时对比目标采集。")
 
         screenshot_artifact = None
         screenshot_hash = None
@@ -2230,7 +2226,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     entry_url=None,
                     serve_root=None,
                     relative_entry=None,
-                    limitations=[f"Runtime scenario entryUrl is not a safe relative path: {scenario.entry_url}."],
+                    limitations=[f"运行时场景的 entryUrl 不是安全的相对路径：{scenario.entry_url}。"],
                 )
             root = Path(input_path)
             if root.is_file():
@@ -2239,7 +2235,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                 entry_url=None,
                 serve_root=root,
                 relative_entry=relative_entry.as_posix(),
-                limitations=[] if (root / relative_entry).exists() else [f"Runtime scenario entry was not found: {scenario.entry_url}."],
+                limitations=[] if (root / relative_entry).exists() else [f"未找到运行时场景入口：{scenario.entry_url}。"],
             )
         return self._resolve_entry(input_path=input_path, entry_url=None)
 
@@ -2371,7 +2367,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     threshold=image_diff_policy.pixel_threshold,
                     threshold_mode=image_diff_policy.threshold_mode,
                     max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
-                    reason="One or both runtime comparison screenshots were unavailable.",
+                    reason="一个或两个运行时对比截图不可用。",
                 ),
                 None,
             )
@@ -2390,9 +2386,9 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     threshold_mode=image_diff_policy.threshold_mode,
                     max_changed_pixel_ratio=image_diff_policy.max_changed_pixel_ratio,
                     reason=(
-                        "Runtime comparison pixel diff currently supports PNG screenshots only; "
-                        f"detected original={original_format or 'missing'} and "
-                        f"reconstructed={reconstructed_format or 'missing'}."
+                        "运行时对比像素差异目前仅支持 PNG 截图；"
+                        f"检测到原始截图格式为 {original_format or '缺失'}，"
+                        f"重建截图格式为 {reconstructed_format or '缺失'}。"
                     ),
                 ),
                 None,
@@ -2437,9 +2433,9 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     width=original_image.width,
                     height=original_image.height,
                     reason=(
-                        "Runtime comparison screenshots have different dimensions: "
-                        f"{original_image.width}x{original_image.height} vs "
-                        f"{reconstructed_image.width}x{reconstructed_image.height}."
+                        "运行时对比截图尺寸不同："
+                        f"{original_image.width}x{original_image.height} 与 "
+                        f"{reconstructed_image.width}x{reconstructed_image.height}。"
                     ),
                 ),
                 None,
@@ -2509,7 +2505,7 @@ class RuntimeCompareRunner(RuntimeSmokeRunner):
                     path=path,
                     original=original_value,
                     reconstructed=reconstructed_value,
-                    summary=f"DOM summary path {path} changed.",
+                    summary=f"DOM 摘要路径 {path} 已变化。",
                 )
             )
         return differences[:80]

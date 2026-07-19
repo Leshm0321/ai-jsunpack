@@ -312,10 +312,10 @@ export function layoutEvidenceGraph(graph: EvidenceGraph): {
   };
 }
 
-export function parseInputInventoryArtifact(text: string): InputInventory {
+export function parseInputInventoryArtifact(text: string, t: (key: string) => string): InputInventory {
   const payload = JSON.parse(text) as { inventory?: unknown; kind?: unknown };
   if (payload.kind !== "input_inventory" || !isRecord(payload.inventory)) {
-    throw new Error("Artifact is not a valid input inventory.");
+    throw new Error(t("parse.inputInventoryInvalid"));
   }
   const inventory = payload.inventory;
   return {
@@ -331,10 +331,10 @@ export function parseInputInventoryArtifact(text: string): InputInventory {
   };
 }
 
-export function parseAstIndexArtifact(text: string): AstIndex[] {
+export function parseAstIndexArtifact(text: string, t: (key: string) => string): AstIndex[] {
   const payload = JSON.parse(text) as { astIndexes?: unknown; kind?: unknown };
   if (payload.kind !== "ast_index" || !Array.isArray(payload.astIndexes)) {
-    throw new Error("Artifact is not a valid AST index.");
+    throw new Error(t("parse.astIndexInvalid"));
   }
   return payload.astIndexes.filter(isRecord).map((index) => ({
     exports: readStringArray(index.exports),

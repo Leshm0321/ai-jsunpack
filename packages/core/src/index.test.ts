@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { deflateRawSync, gzipSync } from "node:zlib";
 import { analyzeInputPackage, planReconstruction, writeProject } from "./index.js";
 
-test("analyzeInputPackage inventories dist assets and indexes bundle symbols", async () => {
+test("analyzeInputPackage 清点 dist 资源并索引 bundle 符号", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -30,7 +30,7 @@ test("analyzeInputPackage inventories dist assets and indexes bundle symbols", a
   }
 });
 
-test("analyzeInputPackage accepts a single JavaScript file as a wrapped static input", async () => {
+test("analyzeInputPackage 接受单个 JavaScript 文件作为封装后的静态输入", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-single-js-"));
   try {
     const inputPath = path.join(root, "agentApi.js");
@@ -41,7 +41,7 @@ test("analyzeInputPackage accepts a single JavaScript file as a wrapped static i
     assert.deepEqual(result.inventory.entries, ["index.html"]);
     assert.deepEqual(result.inventory.scripts, ["agentApi.js"]);
     assert.equal(result.inventory.isSingleBundle, true);
-    assert.ok(result.inventory.warnings.some((warning) => warning.includes("single_script file was wrapped")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("single_script 文件已封装")));
     assert.ok(result.detectedRuntime.includes("single_bundle_best_effort"));
     assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "singleUploadBoot"));
   } finally {
@@ -49,7 +49,7 @@ test("analyzeInputPackage accepts a single JavaScript file as a wrapped static i
   }
 });
 
-test("analyzeInputPackage builds analysis graphs and low-risk transform evidence", async () => {
+test("analyzeInputPackage 构建分析图和低风险转换证据", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-graphs-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -101,7 +101,7 @@ test("analyzeInputPackage builds analysis graphs and low-risk transform evidence
   }
 });
 
-test("analyzeInputPackage statically restores rotated string-array decoder calls", async () => {
+test("analyzeInputPackage 静态恢复轮转字符串数组解码器调用", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-string-decoder-"));
   try {
     const inputPath = path.join(root, "bundle.js");
@@ -146,7 +146,7 @@ test("analyzeInputPackage statically restores rotated string-array decoder calls
   }
 });
 
-test("analyzeInputPackage records webpack runtime wrappers and module table candidates", async () => {
+test("analyzeInputPackage 记录 webpack runtime wrapper 和 module table 候选", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-webpack-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -176,7 +176,7 @@ test("analyzeInputPackage records webpack runtime wrappers and module table cand
   }
 });
 
-test("analyzeInputPackage records UMD and SystemJS wrapper evidence", async () => {
+test("analyzeInputPackage 记录 UMD 和 SystemJS 包装器证据", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-umd-system-"));
   try {
     await writeFile(
@@ -204,7 +204,7 @@ test("analyzeInputPackage records UMD and SystemJS wrapper evidence", async () =
   }
 });
 
-test("analyzeInputPackage records ESM import export candidates and source map recovered modules", async () => {
+test("analyzeInputPackage 记录 ESM 导入导出候选和 source map 恢复模块", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-module-recovery-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -245,7 +245,7 @@ test("analyzeInputPackage records ESM import export candidates and source map re
   }
 });
 
-test("analyzeInputPackage maps bundles to source candidates from source maps", async () => {
+test("analyzeInputPackage 通过 source map 将 bundle 映射到源候选", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-sourcemap-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -276,7 +276,7 @@ test("analyzeInputPackage maps bundles to source candidates from source maps", a
   }
 });
 
-test("analyzeInputPackage records source map sourcesContent gaps", async () => {
+test("analyzeInputPackage 记录 source map 的 sourcesContent 缺口", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-sourcemap-warning-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -297,14 +297,14 @@ test("analyzeInputPackage records source map sourcesContent gaps", async () => {
     const result = await analyzeInputPackage(root);
 
     assert.deepEqual(result.sourceMapAnalysis.bundleAnalyses[0].missingSourcesContent, ["../src/missing.ts"]);
-    assert.ok(result.sourceMapAnalysis.warnings.some((warning) => warning.includes("missing sourcesContent for 1 source")));
-    assert.ok(result.inventory.warnings.some((warning) => warning.includes("missing sourcesContent for 1 source")));
+    assert.ok(result.sourceMapAnalysis.warnings.some((warning) => warning.includes("缺少 1 个源的 sourcesContent")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("缺少 1 个源的 sourcesContent")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("analyzeInputPackage resolves local HTML entry references", async () => {
+test("analyzeInputPackage 解析本地 HTML 入口引用", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-refs-"));
   try {
     await mkdir(path.join(root, "nested", "assets"), { recursive: true });
@@ -355,7 +355,7 @@ test("analyzeInputPackage resolves local HTML entry references", async () => {
   }
 });
 
-test("analyzeInputPackage records missing local HTML entry references", async () => {
+test("analyzeInputPackage 记录缺失的本地 HTML 入口引用", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-missing-"));
   try {
     await writeFile(
@@ -365,7 +365,7 @@ test("analyzeInputPackage records missing local HTML entry references", async ()
 
     const result = await analyzeInputPackage(root);
 
-    assert.ok(result.inventory.warnings.some((warning) => warning.includes("HTML references 2 missing files")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("HTML 引用了 2 个缺失文件")));
     assert.ok(result.inventory.warnings.some((warning) => warning.includes("script:missing.js")));
     assert.ok(result.inventory.warnings.some((warning) => warning.includes("style:missing.css")));
   } finally {
@@ -373,7 +373,7 @@ test("analyzeInputPackage records missing local HTML entry references", async ()
   }
 });
 
-test("analyzeInputPackage continues scanning after self-closing script tags", async () => {
+test("analyzeInputPackage 在自闭合 script 标签后继续扫描", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-html-self-close-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -393,7 +393,7 @@ test("analyzeInputPackage continues scanning after self-closing script tags", as
   }
 });
 
-test("analyzeInputPackage extracts zip archives into a safe inventory root", async () => {
+test("analyzeInputPackage 将 zip 归档解压到安全的 inventory root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-zip-"));
   try {
     const archivePath = path.join(root, "dist.zip");
@@ -422,7 +422,7 @@ test("analyzeInputPackage extracts zip archives into a safe inventory root", asy
     assert.deepEqual(result.inventory.entries, ["index.html"]);
     assert.deepEqual(result.inventory.scripts, ["assets/app.js"]);
     assert.deepEqual(result.inventory.styles, ["assets/app.css"]);
-    assert.ok(result.inventory.warnings.some((warning) => warning.includes("zip archive")));
+    assert.ok(result.inventory.warnings.some((warning) => warning.includes("zip 归档")));
     assert.ok(result.astIndexes[0].symbols.some((symbol) => symbol.name === "fromZip"));
     assert.equal(result.sourceMapAnalysis.bundleAnalyses[0].bundlePath, "assets/app.js");
     assert.ok(result.sourceMapAnalysis.sourceCandidates.includes("src/from-zip.ts"));
@@ -431,7 +431,7 @@ test("analyzeInputPackage extracts zip archives into a safe inventory root", asy
   }
 });
 
-test("analyzeInputPackage extracts tar and compressed tar archives", async () => {
+test("analyzeInputPackage 解压 tar 和压缩 tar 归档", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-tar-"));
   try {
     const entries = [
@@ -452,13 +452,13 @@ test("analyzeInputPackage extracts tar and compressed tar archives", async () =>
     assert.ok(tarResult.astIndexes[0].symbols.some((symbol) => symbol.name === "fromTar"));
     assert.deepEqual(tgzResult.inventory.entries, ["dist/index.html"]);
     assert.deepEqual(tgzResult.inventory.scripts, ["dist/app.js"]);
-    assert.ok(tgzResult.inventory.warnings.some((warning) => warning.includes("tar_gz archive")));
+    assert.ok(tgzResult.inventory.warnings.some((warning) => warning.includes("tar_gz 归档")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("analyzeInputPackage rejects archive paths that escape the extraction root", async () => {
+test("analyzeInputPackage 拒绝逃逸解压根目录的归档路径", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-unsafe-"));
   try {
     const unsafeArchives = [
@@ -472,14 +472,14 @@ test("analyzeInputPackage rejects archive paths that escape the extraction root"
     for (const [index, archive] of unsafeArchives.entries()) {
       const archivePath = path.join(root, `unsafe-${index}${index < 3 ? ".zip" : ".tar"}`);
       await writeFile(archivePath, archive);
-      await assert.rejects(() => analyzeInputPackage(archivePath), /Unsafe archive entry path/);
+      await assert.rejects(() => analyzeInputPackage(archivePath), /不安全的归档条目路径/);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("analyzeInputPackage rejects archive entries that exceed extraction resource limits", async () => {
+test("analyzeInputPackage 拒绝超出解压资源限制的归档条目", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-archive-limits-"));
   try {
     const zipBombPath = path.join(root, "ratio.zip");
@@ -487,25 +487,25 @@ test("analyzeInputPackage rejects archive entries that exceed extraction resourc
       zipBombPath,
       makeZipArchive([{ path: "large.txt", content: Buffer.alloc(1024 * 1024, 0x41), compress: true }])
     );
-    await assert.rejects(analyzeInputPackage(zipBombPath), /resource limit exceeded.*compression ratio/i);
+    await assert.rejects(analyzeInputPackage(zipBombPath), /归档资源限制已超出.*压缩比/i);
 
     const oversizedTarPath = path.join(root, "oversized.tar");
     const oversizedHeader = makeTarArchive([{ path: "large.js", content: "" }]);
     writeTarOctal(oversizedHeader, 124, 12, 64 * 1024 * 1024 + 1);
     await writeFile(oversizedTarPath, oversizedHeader);
-    await assert.rejects(analyzeInputPackage(oversizedTarPath), /resource limit exceeded.*maximum/i);
+    await assert.rejects(analyzeInputPackage(oversizedTarPath), /归档资源限制已超出.*最多/i);
 
     const tooManyZipEntriesPath = path.join(root, "entries.zip");
     const tooManyEntries = makeZipArchive([]);
     tooManyEntries.writeUInt16LE(10_001, tooManyEntries.length - 12);
     await writeFile(tooManyZipEntriesPath, tooManyEntries);
-    await assert.rejects(analyzeInputPackage(tooManyZipEntriesPath), /resource limit exceeded.*entries/i);
+    await assert.rejects(analyzeInputPackage(tooManyZipEntriesPath), /归档资源限制已超出.*条目/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("writeProject emits a buildable generated project shell", async () => {
+test("writeProject 输出可构建的生成项目外壳", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-"));
   try {
     await mkdir(path.join(root, "assets"));
@@ -564,7 +564,7 @@ test("writeProject emits a buildable generated project shell", async () => {
   }
 });
 
-test("writeProject accepts archive input and copies extracted sources", async () => {
+test("writeProject 接受归档输入并复制解压后的源文件", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-zip-"));
   try {
     const archivePath = path.join(root, "dist.zip");
@@ -597,7 +597,7 @@ test("writeProject accepts archive input and copies extracted sources", async ()
   }
 });
 
-test("writeProject accepts single JavaScript input and copies the wrapped static sources", async () => {
+test("writeProject 接受单个 JavaScript 输入并复制封装后的静态源文件", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-single-js-"));
   try {
     const inputPath = path.join(root, "agentApi.js");
@@ -616,7 +616,7 @@ test("writeProject accepts single JavaScript input and copies the wrapped static
     assert.equal(plan.entryHtml, "index.html");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/agentApi.js"));
     assert.ok(manifest.copiedSourceFiles.includes("public/original/index.html"));
-    assert.ok(manifest.limitations.some((limitation) => limitation.includes("single_script file was wrapped")));
+    assert.ok(manifest.limitations.some((limitation) => limitation.includes("single_script 文件已封装")));
     assert.equal(
       await readFile(path.join(outputDir, "public", "original", "agentApi.js"), "utf8"),
       "function singleWriterBoot(){return 1} const value = singleWriterBoot();"
@@ -633,7 +633,7 @@ test("writeProject accepts single JavaScript input and copies the wrapped static
   }
 });
 
-test("writeProject loads single .js inputs with ESM syntax as modules", async () => {
+test("writeProject 将使用 ESM 语法的单个 .js 输入作为模块加载", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-writer-single-js-esm-"));
   try {
     const inputPath = path.join(root, "agentApi.js");
@@ -651,7 +651,7 @@ test("writeProject loads single .js inputs with ESM syntax as modules", async ()
   }
 });
 
-test("missing static relative ESM dependencies produce audited throwing placeholders", async () => {
+test("缺失的静态相对 ESM 依赖生成经过审计且会抛错的占位模块", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-missing-dependency-"));
   try {
     await writeFile(
@@ -684,12 +684,12 @@ test("missing static relative ESM dependencies produce audited throwing placehol
       exportAll: true,
       reason: "missing_static_relative_dependency",
       status: "generated",
-      limitation: "Load-only continuity is provided; the dependency's semantic behavior is unavailable and generated exports throw when called."
+      limitation: "仅提供加载连续性；依赖的语义行为不可用，生成的导出在调用时会抛出异常。"
     });
 
     const plan = planReconstruction(analysis, { jobId: "job_missing_dependency" });
     assert.equal(plan.evidenceSummary.dependencyPlaceholderCount, 1);
-    assert.ok(plan.limitations.some((limitation) => limitation.includes("load-only placeholders")));
+    assert.ok(plan.limitations.some((limitation) => limitation.includes("仅加载占位模块")));
     const outputDir = path.join(root, "generated_project");
     await writeProject(plan, { inputPath: root, outputDir });
 
@@ -727,7 +727,7 @@ test("missing static relative ESM dependencies produce audited throwing placehol
   }
 });
 
-test("existing relative ESM dependencies do not produce placeholders", async () => {
+test("现有相对 ESM 依赖不会生成占位模块", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-existing-dependency-"));
   try {
     await writeFile(path.join(root, "main.js"), "import { helper } from './helper.js'; helper();");
@@ -739,7 +739,7 @@ test("existing relative ESM dependencies do not produce placeholders", async () 
   }
 });
 
-test("relative dependencies that escape the input root remain report-only", async () => {
+test("逃逸输入根目录的相对依赖仅保留在报告中", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-unsafe-dependency-"));
   try {
     const inputPath = path.join(root, "main.js");
@@ -768,7 +768,7 @@ function runScript(cwd: string, args: string[]): Promise<void> {
         resolve();
         return;
       }
-      reject(new Error(stderr || `Generated project script exited with code ${code}`));
+      reject(new Error(stderr || `生成项目脚本已退出，退出码 ${code}`));
     });
   });
 }
@@ -836,7 +836,7 @@ function makeTarArchive(entries: ArchiveEntry[]): Buffer {
   const parts: Buffer[] = [];
   for (const entry of entries) {
     const name = Buffer.from(entry.path, "utf8");
-    assert.ok(name.length <= 100, "test tar helper only supports short names");
+    assert.ok(name.length <= 100, "测试用 tar 辅助函数仅支持短名称");
     const content = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content, "utf8");
     const header = Buffer.alloc(512, 0);
     name.copy(header, 0);

@@ -61,8 +61,8 @@ class AgentContextRedactor:
                 "replacementCount": sum(counts.values()),
                 "replacementCounts": dict(sorted(counts.items())),
                 "limitations": [
-                    "Original artifacts remain unchanged; redaction applies to model context and audit evidence excerpts.",
-                    "Deterministic placeholders preserve stable references without exposing source text or source-derived names.",
+                    "原始 artifact 保持不变；脱敏仅作用于模型上下文和审计证据摘录。",
+                    "确定性占位符会保留稳定引用，同时避免暴露源码文本或由源码派生的名称。",
                 ],
             },
         )
@@ -111,7 +111,7 @@ class AgentContextRedactor:
 
 
 class AgentContextBuilder:
-    """Builds bounded, evidence-linked model context from deterministic artifacts."""
+    """根据确定性 artifact 构建有边界且关联证据的模型上下文。"""
 
     def input_summary(self, request: AgentRuntimeRequest) -> dict[str, Any]:
         inventory = request.inventory_payload.get("inventory", {})
@@ -145,14 +145,14 @@ class AgentContextBuilder:
             ),
             EvidenceRef(
                 artifact_id=request.ast_index_artifact_id,
-                label="Core AST index",
+                label="Core AST 索引",
                 locator="artifact:ast_index",
                 excerpt=self.ast_excerpt(request.ast_index_payload),
             ),
             *[
                 EvidenceRef(
                     artifact_id=artifact.id,
-                    label=f"Memory: {record.memory_type}",
+                    label=f"记忆：{record.memory_type}",
                     locator=f"memory:{record.memory_type}",
                     excerpt=record.content[:240],
                 )
@@ -161,7 +161,7 @@ class AgentContextBuilder:
             *[
                 EvidenceRef(
                     artifact_id=knowledge_artifact.id,
-                    label=f"Knowledge: {hit.label}",
+                    label=f"知识：{hit.label}",
                     locator=hit.locator,
                     excerpt=hit.excerpt,
                 )

@@ -435,7 +435,7 @@ def list_memory_records(
     if requested_memory_type is None:
         return records
     if requested_memory_type not in {"short_term", "long_term", "entity", "scenario"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported memory type: {requested_memory_type}")
+        raise HTTPException(status_code=400, detail=f"不支持的记忆类型：{requested_memory_type}")
     return [record for record in records if record.memory_type == requested_memory_type]
 
 
@@ -448,7 +448,7 @@ def get_latest_runtime_validation(
     artifacts = store.list_artifacts(job_id, kind="runtime_validation")
     validations = [runtime_validation_from_artifact(job_id, artifact) for artifact in artifacts]
     if not validations:
-        raise HTTPException(status_code=404, detail="Runtime validation not found")
+        raise HTTPException(status_code=404, detail="未找到运行时验证记录")
     return validations[-1]
 
 
@@ -502,7 +502,7 @@ def download_latest_report(
     artifact = latest_artifact_or_404(
         job_id,
         normalized_kind,
-        f"{report_kind} report not found",
+        f"未找到 {report_kind} 报告",
         access,
     )
     return file_response_for_artifact(artifact, filename=REPORT_DOWNLOAD_FILENAMES[normalized_kind])
@@ -516,7 +516,7 @@ def download_latest_result_package(
     artifact = latest_artifact_or_404(
         job_id,
         "result_package",
-        "Result package not found",
+        "未找到结果包",
         access,
     )
     return file_response_for_artifact(artifact, filename="result-package.zip")
@@ -529,13 +529,13 @@ def rerun_job(
 ) -> JobSummary:
     source_job = require_job(job_id, access, minimum_role="maintainer")
     if source_job.input_artifact_id is None:
-        raise HTTPException(status_code=400, detail="Job has no source input artifact to rerun")
+        raise HTTPException(status_code=400, detail="作业没有可供重新运行的源输入 Artifact")
 
     source_artifact = store.get_artifact(job_id, source_job.input_artifact_id)
     if source_artifact is None:
-        raise HTTPException(status_code=404, detail="Source input artifact not found")
+        raise HTTPException(status_code=404, detail="未找到源输入 Artifact")
     if not store.artifact_exists(source_artifact) or not store.artifact_is_file(source_artifact):
-        raise HTTPException(status_code=400, detail="Source input artifact is not a downloadable file")
+        raise HTTPException(status_code=400, detail="源输入 Artifact 不是可下载文件")
 
     rerun_config = deepcopy(source_job.config)
     rerun_config["rerunOfJobId"] = source_job.id
@@ -573,7 +573,7 @@ def cancel_job(
     try:
         job = store.request_cancel(job_id, cancel_request.reason)
     except KeyError as error:
-        raise HTTPException(status_code=404, detail="Job not found") from error
+        raise HTTPException(status_code=404, detail="未找到作业") from error
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
 
@@ -589,7 +589,7 @@ def cleanup_retention(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except KeyError as error:
-        raise HTTPException(status_code=404, detail="Job not found") from error
+        raise HTTPException(status_code=404, detail="未找到作业") from error
 
 
 @app.get("/jobs/{job_id}/artifacts/{artifact_id}/download")
@@ -601,7 +601,7 @@ def download_artifact(
     require_job(job_id, access)
     artifact = store.get_artifact(job_id, artifact_id)
     if artifact is None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail="未找到 Artifact")
     return file_response_for_artifact(artifact)
 
 
@@ -615,9 +615,9 @@ def latest_artifact_or_404(job_id: str, kind: str, detail: str, access: AccessCo
 
 def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = None) -> Response:
     if not store.artifact_exists(artifact):
-        raise HTTPException(status_code=404, detail="Artifact content not found")
+        raise HTTPException(status_code=404, detail="未找到 Artifact 内容")
     if store.artifact_is_directory(artifact):
-        raise HTTPException(status_code=400, detail="Directory artifact download requires a result package")
+        raise HTTPException(status_code=400, detail="下载目录 Artifact 需要使用结果包")
     artifact_path = store.artifact_local_path(artifact)
     response_filename = filename or store.artifact_filename(artifact)
     headers = {"Content-Disposition": content_disposition_attachment(response_filename)}
@@ -638,7 +638,7 @@ async def read_upload_content(file: UploadFile) -> bytes:
     limit = configured_max_upload_bytes()
     content = await file.read(limit + 1)
     if len(content) > limit:
-        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum size of {limit} bytes")
+        raise HTTPException(status_code=413, detail=f"上传内容超过 {limit} 字节的大小上限")
     return content
 
 
@@ -676,47 +676,47 @@ def source_filename(source_artifact: ArtifactRecord) -> str:
 def normalize_report_kind(value: str) -> str:
     normalized = REPORT_KIND_ALIASES.get(value.strip().lower())
     if normalized is None:
-        raise HTTPException(status_code=400, detail="Unsupported report kind")
+        raise HTTPException(status_code=400, detail="不支持的报告类型")
     return normalized
 
 
 def normalize_audit_record_category(value: str) -> str:
     normalized = value.strip().lower()
     if normalized not in AUDIT_RECORD_CATEGORIES:
-        raise HTTPException(status_code=400, detail="Unsupported audit record category")
+        raise HTTPException(status_code=400, detail="不支持的审计记录类别")
     return normalized
 
 
 def require_create_access(request: CreateJobRequest, access: AccessContext) -> None:
     require_project_role(access, request.project_id, "maintainer")
     if access.kind == "user" and request.owner_id != access.subject:
-        raise HTTPException(status_code=403, detail="Caller is not allowed to create jobs for this owner")
+        raise HTTPException(status_code=403, detail="当前调用方无权为该所有者创建作业")
 
 
 def require_job(job_id: str, access: AccessContext, *, minimum_role: ProjectRole = "viewer") -> JobRecord:
     job = store.get_job(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="未找到作业")
     require_project_role(access, job.project_id, minimum_role)
     return job
 
 
 def require_project_role(access: AccessContext, project_id: str, minimum_role: ProjectRole) -> None:
     if access.kind == "service" and not access.has_service_role(SERVICE_ROLE_WORKER):
-        raise HTTPException(status_code=403, detail="Service credential is not allowed to access this API")
+        raise HTTPException(status_code=403, detail="该服务凭据无权访问此 API")
     if not access.has_project_role(project_id, minimum_role):
-        raise HTTPException(status_code=403, detail="Caller is not allowed to access this project")
+        raise HTTPException(status_code=403, detail="当前调用方无权访问该项目")
 
 
 def require_authenticated_user(access: AccessContext) -> None:
     if access.kind != "user":
-        raise HTTPException(status_code=403, detail="User credential required")
+        raise HTTPException(status_code=403, detail="需要用户凭据")
 
 
 def require_system_settings_write(access: AccessContext) -> None:
     require_authenticated_user(access)
     if not any(role == "owner" for role in access.projects.values()):
-        raise HTTPException(status_code=403, detail="System settings require an owner role")
+        raise HTTPException(status_code=403, detail="系统设置需要所有者角色")
 
 
 def validated_runtime_settings_patch(settings: dict[str, object]) -> dict[str, object]:
@@ -760,7 +760,7 @@ def rollback_settings(
 ) -> SettingsRevision:
     target = store.get_settings_revision(scope, request.revision, scope_id)  # type: ignore[arg-type]
     if target is None:
-        raise HTTPException(status_code=404, detail="Settings revision not found")
+        raise HTTPException(status_code=404, detail="未找到设置修订版本")
     try:
         revision = store.write_settings_revision(
             scope,  # type: ignore[arg-type]
@@ -782,7 +782,7 @@ def current_application_config():
     try:
         return load_application_config()
     except ConfigurationError as error:
-        raise HTTPException(status_code=503, detail="Application configuration is invalid") from error
+        raise HTTPException(status_code=503, detail="应用配置无效") from error
 
 
 def provider_readiness(mode: str, static_provider: object, runtime_override: dict[str, object]) -> ProviderReadiness:
@@ -838,7 +838,7 @@ def to_snake_key(value: str) -> str:
 
 def require_ops_service(access: AccessContext) -> None:
     if access.kind != "service" or not access.has_service_role(SERVICE_ROLE_WORKER):
-        raise HTTPException(status_code=403, detail="Ops heartbeat ingestion requires a worker service credential")
+        raise HTTPException(status_code=403, detail="接收运维心跳需要 Worker service credential")
 
 
 def require_ops_read_access(access: AccessContext) -> None:
@@ -846,7 +846,7 @@ def require_ops_read_access(access: AccessContext) -> None:
         return
     if access.kind == "user" and any(role in {"maintainer", "owner"} for role in access.projects.values()):
         return
-    raise HTTPException(status_code=403, detail="Caller is not allowed to access ops telemetry")
+    raise HTTPException(status_code=403, detail="当前调用方无权访问运维遥测数据")
 
 
 def refresh_api_heartbeat() -> OpsHeartbeatRecord:
@@ -863,7 +863,7 @@ def refresh_api_heartbeat() -> OpsHeartbeatRecord:
             OpsAlert(
                 code="deployment_profile_warning",
                 severity="warning",
-                message="API deployment profile is not fully ok.",
+                message="API deployment profile 未处于完全正常状态。",
                 field="deploymentProfile",
                 value=profile,
                 threshold="ok",
@@ -905,7 +905,7 @@ def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
                 OpsAlert(
                     code=f"{heartbeat.service_role}_heartbeat_degraded",
                     severity="warning",
-                    message=f"{heartbeat.service_role} heartbeat status is {heartbeat.status}.",
+                    message=f"服务 {heartbeat.service_role} 的心跳状态为 {heartbeat.status}。",
                     field="status",
                     value=heartbeat.status,
                     threshold="ok",
@@ -919,7 +919,7 @@ def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
                 OpsAlert(
                     code="heartbeat_expired",
                     severity="critical",
-                    message=f"{heartbeat.service_role} heartbeat is stale or expired.",
+                    message=f"服务 {heartbeat.service_role} 的心跳已陈旧或过期。",
                     field="expiresAt",
                     value=heartbeat.expires_at,
                     threshold=checked_at,
@@ -981,13 +981,13 @@ def build_ops_metrics_snapshot() -> OpsMetricsSnapshot:
 
 def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
     lines: list[str] = [
-        "# HELP ai_jsunpack_ops_active_heartbeats Active ops heartbeats in the shared metadata store.",
+        "# HELP ai_jsunpack_ops_active_heartbeats 共享元数据存储中的活跃运维心跳数。",
         "# TYPE ai_jsunpack_ops_active_heartbeats gauge",
         f"ai_jsunpack_ops_active_heartbeats {snapshot.active_heartbeat_count}",
-        "# HELP ai_jsunpack_ops_stale_heartbeats Stale or expired ops heartbeats in the shared metadata store.",
+        "# HELP ai_jsunpack_ops_stale_heartbeats 共享元数据存储中已陈旧或过期的运维心跳数。",
         "# TYPE ai_jsunpack_ops_stale_heartbeats gauge",
         f"ai_jsunpack_ops_stale_heartbeats {snapshot.stale_heartbeat_count}",
-        "# HELP ai_jsunpack_ops_service_heartbeats Ops heartbeat records grouped by service role.",
+        "# HELP ai_jsunpack_ops_service_heartbeats 按服务角色分组的运维心跳记录数。",
         "# TYPE ai_jsunpack_ops_service_heartbeats gauge",
     ]
     for service_role, count in sorted(snapshot.service_heartbeat_counts.items()):
@@ -1001,7 +1001,7 @@ def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
 
     lines.extend(
         [
-            "# HELP ai_jsunpack_jobs_by_status Jobs grouped by current lifecycle status.",
+            "# HELP ai_jsunpack_jobs_by_status 按当前生命周期状态分组的作业数。",
             "# TYPE ai_jsunpack_jobs_by_status gauge",
         ]
     )
@@ -1010,7 +1010,7 @@ def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
 
     lines.extend(
         [
-            "# HELP ai_jsunpack_ops_alerts Active ops alerts grouped by severity, code, and service role.",
+            "# HELP ai_jsunpack_ops_alerts 按严重级别、代码和服务角色分组的活跃运维告警数。",
             "# TYPE ai_jsunpack_ops_alerts gauge",
         ]
     )
@@ -1029,7 +1029,7 @@ def render_prometheus_metrics(snapshot: OpsMetricsSnapshot) -> str:
 
     lines.extend(
         [
-            "# HELP ai_jsunpack_ops_heartbeat_metric Numeric heartbeat metrics reported by services.",
+            "# HELP ai_jsunpack_ops_heartbeat_metric 服务上报的心跳数值指标。",
             "# TYPE ai_jsunpack_ops_heartbeat_metric gauge",
         ]
     )
@@ -1173,7 +1173,7 @@ def default_ops_alert_rules() -> list[OpsAlertRule]:
             metric_path="browserRunner.queuedCount",
             operator="gte",
             threshold=10,
-            message="Browser Runner queue backlog exceeded the default threshold.",
+            message="Browser Runner 队列积压已超过默认阈值。",
             service_role="browser-runner",
             enabled=True,
             source="default",
@@ -1184,7 +1184,7 @@ def default_ops_alert_rules() -> list[OpsAlertRule]:
             metric_path="browserRunner.retryRate",
             operator="gte",
             threshold=0.25,
-            message="Browser Runner retry rate exceeded the default threshold.",
+            message="Browser Runner 重试率已超过默认阈值。",
             service_role="browser-runner",
             enabled=True,
             source="default",
@@ -1195,7 +1195,7 @@ def default_ops_alert_rules() -> list[OpsAlertRule]:
             metric_path="browserRunner.expiredRunningCount",
             operator="gt",
             threshold=0,
-            message="Browser Runner has expired running jobs that need lease recovery.",
+            message="Browser Runner 存在租约已过期且需要恢复的运行中作业。",
             service_role="browser-runner",
             enabled=True,
             source="default",
@@ -1206,7 +1206,7 @@ def default_ops_alert_rules() -> list[OpsAlertRule]:
             metric_path="staleHeartbeatCount",
             operator="gt",
             threshold=0,
-            message="One or more service heartbeats are stale or expired.",
+            message="一个或多个服务心跳已陈旧或过期。",
             service_role=None,
             enabled=True,
             source="default",
@@ -1325,7 +1325,7 @@ def deliver_ops_alerts(
         "metrics": metrics,
     }
     timeout_seconds = parse_float_env(OPS_WEBHOOK_TIMEOUT_SECONDS_ENV, 2.0)
-    request = Request(  # noqa: S310 - validate_webhook_url constrains webhook schemes and local targets.
+    request = Request(  # noqa: S310 - validate_webhook_url 已限制 webhook scheme 和本地目标。
         webhook_url,
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
@@ -1358,12 +1358,12 @@ def validate_webhook_url(webhook_url: str) -> str | None:
         return None
     parsed = urlparse(webhook_url)
     if parsed.scheme != "https":
-        return "Webhook URL must use https unless insecure webhook URLs are explicitly allowed."
+        return "Webhook URL 必须使用 https，除非已明确允许不安全的 Webhook URL。"
     hostname = parsed.hostname
     if not hostname:
-        return "Webhook URL must include a hostname."
+        return "Webhook URL 必须包含主机名。"
     if hostname.lower() in {"localhost"} or hostname.endswith(".localhost"):
-        return "Webhook URL must not target localhost unless insecure webhook URLs are explicitly allowed."
+        return "Webhook URL 不得指向 localhost，除非已明确允许不安全的 Webhook URL。"
     try:
         address = ip_address(hostname)
     except ValueError:
@@ -1379,7 +1379,7 @@ def validate_webhook_url(webhook_url: str) -> str | None:
         ip_network("fe80::/10"),
     )
     if any(address in network for network in blocked_networks):
-        return "Webhook URL must not target local or private addresses unless insecure webhook URLs are explicitly allowed."
+        return "Webhook URL 不得指向本地或私有地址，除非已明确允许不安全的 Webhook URL。"
     return None
 
 
@@ -1433,7 +1433,7 @@ def runtime_validation_from_artifact(job_id: str, artifact: ArtifactRecord) -> R
     try:
         return RuntimeValidationRun.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid runtime validation artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"运行时验证 Artifact 无效：{artifact.id}") from error
 
 
 def list_inference_record_payloads(job_id: str) -> list[InferenceRecord]:
@@ -1445,7 +1445,7 @@ def inference_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> Inf
     try:
         return InferenceRecord.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid inference record artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"推理记录 Artifact 无效：{artifact.id}") from error
 
 
 def list_review_run_payloads(job_id: str) -> list[ReviewRun]:
@@ -1457,7 +1457,7 @@ def review_run_from_artifact(job_id: str, artifact: ArtifactRecord) -> ReviewRun
     try:
         return ReviewRun.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid review run artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"审查运行 Artifact 无效：{artifact.id}") from error
 
 
 def list_tool_call_payloads(job_id: str) -> list[ToolCall]:
@@ -1469,7 +1469,7 @@ def tool_call_from_artifact(job_id: str, artifact: ArtifactRecord) -> ToolCall:
     try:
         return ToolCall.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid tool call artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"工具调用 Artifact 无效：{artifact.id}") from error
 
 
 def list_tool_registry_payloads(job_id: str) -> list[ToolRegistryEntry]:
@@ -1485,10 +1485,10 @@ def tool_registry_entries_from_artifact(job_id: str, artifact: ArtifactRecord) -
         payload = json.loads(store.read_artifact(job_id, artifact.id).decode("utf-8"))
         raw_entries = payload.get("entries", []) if isinstance(payload, dict) else []
         if not isinstance(raw_entries, list):
-            raise ValueError("tool registry entries must be a list")
+            raise ValueError("工具注册表的 entries 字段必须是列表")
         return [ToolRegistryEntry.model_validate(entry) for entry in raw_entries]
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid tool registry artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"工具注册表 Artifact 无效：{artifact.id}") from error
 
 
 def list_memory_record_payloads(job_id: str) -> list[MemoryRecord]:
@@ -1500,4 +1500,4 @@ def memory_record_from_artifact(job_id: str, artifact: ArtifactRecord) -> Memory
     try:
         return MemoryRecord.model_validate_json(store.read_artifact(job_id, artifact.id))
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Invalid memory record artifact: {artifact.id}") from error
+        raise HTTPException(status_code=500, detail=f"记忆记录 Artifact 无效：{artifact.id}") from error

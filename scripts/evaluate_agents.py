@@ -21,17 +21,17 @@ from apps.worker.worker.reconstruction import ReconstructionRunner
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run repeatable live-model Agent runtime evaluations.")
-    parser.add_argument("input", type=Path, help="Authorized JavaScript package, archive, or script input.")
+    parser = argparse.ArgumentParser(description="运行可重复的实时模型 Agent 运行时评测。")
+    parser.add_argument("input", type=Path, help="已获授权的 JavaScript 包、归档或脚本输入。")
     parser.add_argument("--iterations", type=int, default=1, choices=range(1, 21))
     parser.add_argument("--cloud-mode", choices=("cloud_allowed", "local_only", "desensitized"), default="local_only")
-    parser.add_argument("--model", help="Cloud/desensitized Agent model name.")
-    parser.add_argument("--provider", default="openai-compatible", help="Cloud Agent provider name.")
-    parser.add_argument("--local-model", help="Local/desensitized Agent model name.")
-    parser.add_argument("--local-provider", default="openai-compatible", help="Local Agent provider name.")
+    parser.add_argument("--model", help="云端或脱敏 Agent 的模型名称。")
+    parser.add_argument("--provider", default="openai-compatible", help="云端 Agent 的 Provider 名称。")
+    parser.add_argument("--local-model", help="本地或脱敏 Agent 的模型名称。")
+    parser.add_argument("--local-provider", default="openai-compatible", help="本地 Agent 的 Provider 名称。")
     parser.add_argument("--max-parallel", type=int, default=5, choices=range(1, 11))
     parser.add_argument("--context-budget", type=int, default=16_000)
-    parser.add_argument("--output", type=Path, help="Optional JSON report path; stdout is always written.")
+    parser.add_argument("--output", type=Path, help="可选的 JSON 报告路径；报告始终也会写入标准输出。")
     return parser.parse_args()
 
 
@@ -156,13 +156,13 @@ def evaluate_once(*, store, input_path: Path, analysis, args: argparse.Namespace
 def main() -> int:
     args = parse_args()
     if not args.input.exists():
-        raise SystemExit(f"Input does not exist: {args.input}")
+        raise SystemExit(f"输入不存在：{args.input}")
     if args.cloud_mode == "cloud_allowed" and not args.model:
-        raise SystemExit("--model is required for cloud_allowed evaluation.")
+        raise SystemExit("进行 cloud_allowed 评测时必须提供 --model。")
     if args.cloud_mode == "local_only" and not args.local_model:
-        raise SystemExit("--local-model is required for local_only evaluation.")
+        raise SystemExit("进行 local_only 评测时必须提供 --local-model。")
     if args.context_budget < 1_000 or args.context_budget > 1_000_000:
-        raise SystemExit("--context-budget must be between 1000 and 1000000.")
+        raise SystemExit("--context-budget 必须介于 1000 和 1000000 之间。")
 
     analysis = CoreBridge().analyze_input_package(job_id="agent-evaluation-input", input_path=args.input)
     with tempfile.TemporaryDirectory(prefix="ai-jsunpack-agent-evaluation-") as temp_dir:

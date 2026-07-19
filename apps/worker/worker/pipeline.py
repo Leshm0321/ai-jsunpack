@@ -98,7 +98,7 @@ class PipelineContext:
 
 
 class WorkerPipeline:
-    """确定性 pipeline 外壳，用于承载 Core、Agent 和 sandbox 调用。"""
+    """确定性 pipeline shell，用于承载 Core、Agent 和 Sandbox 调用。"""
 
     def __init__(
         self,
@@ -165,7 +165,7 @@ class WorkerPipeline:
     def _run_core_and_agent(self, context: PipelineContext) -> None:
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
         context.store.update_status(context.job_id, "intake")
-        context.run.transition("intake", "Core input inventory generation started.")
+        context.run.transition("intake", "Core input inventory 生成已开始。")
         result = self.core_bridge.analyze_input_package(job_id=context.job_id, input_path=context.input_path)
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
         inventory_artifact = context.store.write_artifact(
@@ -179,7 +179,7 @@ class WorkerPipeline:
         )
 
         context.store.update_status(context.job_id, "indexing")
-        context.run.transition("indexing", "Core AST index generation completed.")
+        context.run.transition("indexing", "Core AST 索引生成已完成。")
         ast_artifact = context.store.write_artifact(
             context.job_id,
             kind="ast_index",
@@ -193,7 +193,7 @@ class WorkerPipeline:
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
         context.job = context.store.get_job(context.job_id)
         if context.job is None:
-            raise AgentRuntimeError(f"Job not found during Agent runtime setup: {context.job_id}")
+            raise AgentRuntimeError(f"设置 Agent runtime 时未找到 Job：{context.job_id}")
         agent_request = AgentRuntimeRequest(
             job_id=context.job_id,
             project_id=context.job.project_id,
@@ -205,7 +205,7 @@ class WorkerPipeline:
             ast_index_payload=result.ast_index_artifact_payload,
         )
         context.agent_result = self.agent_runtime.run(job_id=context.job_id, store=context.store, request=agent_request)
-        context.run.transition("agent_planning", "CrewAI planner context and evidence persisted.")
+        context.run.transition("agent_planning", "CrewAI 规划上下文和证据已持久化。")
         context.run.transition("agent_pass", context.agent_result.message)
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
 
@@ -244,7 +244,7 @@ class WorkerPipeline:
         context.run.transition("building", context.build_validation_result.build.message)
         context.run.transition("typechecking", context.build_validation_result.typecheck.message)
         if context.build_validation_result.repair_artifacts:
-            context.run.transition("repairing", "Build/typecheck review produced repair evidence for validation retry.")
+            context.run.transition("repairing", "构建和类型检查审查已生成用于验证重试的修复证据。")
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
 
         context.current_project_artifact = (
@@ -321,7 +321,7 @@ class WorkerPipeline:
         )
         context.packaging_parent_ids = self._unique_ids([*context.packaging_parent_ids, retry_summary_artifact.id])
         if context.build_validation_result is None or context.agent_result is None:
-            raise PackagingError("Review/Fix convergence summary is missing upstream stage results.")
+            raise PackagingError("Review/Fix 收敛摘要缺少上游阶段结果。")
         convergence_summary_artifact = self._write_review_fix_convergence_summary(
             job_id=context.job_id,
             store=context.store,
@@ -403,7 +403,7 @@ class WorkerPipeline:
                 if runtime_compare_gate_result.triggered and runtime_attempt + 1 < context.runtime_compare_max_attempts:
                     context.run.transition(
                         "repairing",
-                        "Runtime compare review produced repair evidence for follow-up Review/Fix.",
+                        "运行时对比审查已生成用于后续 Review/Fix 流程的修复证据。",
                     )
             attempt_summary.update(
                 {
@@ -714,7 +714,7 @@ class WorkerPipeline:
                 "reviewGate": runtime_compare.get("reviewGate") if isinstance(runtime_compare.get("reviewGate"), dict) else {},
             },
             "auditOnlyRiskLevels": ["medium", "high"],
-            "consumptionPolicy": "Only low-risk supported repair actions are applied automatically; medium and high risk actions remain audit-only next-step guidance.",
+            "consumptionPolicy": "仅自动应用受支持的低风险修复动作；中高风险动作仍作为仅供审计的后续指导。",
         }
 
     def _review_fix_allowed_actions(self, *configs: dict) -> list[str]:
@@ -735,7 +735,7 @@ class WorkerPipeline:
                 "failureClass": "build_error",
                 "targetStage": "building",
                 "automaticActions": ["add_package_script", "replace_package_script"],
-                "auditOnlyActions": ["inspect build log, generated package.json, and deterministic build shim output"],
+                "auditOnlyActions": ["检查构建日志、生成的 package.json 和确定性构建垫片输出"],
                 "status": "active" if "build_error" in build_summary.get("failureClasses", []) else "available",
                 "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
             },
@@ -743,7 +743,7 @@ class WorkerPipeline:
                 "failureClass": "type_error",
                 "targetStage": "typechecking",
                 "automaticActions": ["add_package_script", "replace_package_script"],
-                "auditOnlyActions": ["inspect TypeScript diagnostics and generated typecheck shim output"],
+                "auditOnlyActions": ["检查 TypeScript 诊断和生成的类型检查垫片输出"],
                 "status": "active" if "type_error" in build_summary.get("failureClasses", []) else "available",
                 "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
             },
@@ -751,7 +751,7 @@ class WorkerPipeline:
                 "failureClass": "dependency_missing",
                 "targetStage": "building",
                 "automaticActions": [],
-                "auditOnlyActions": ["enable buildValidation.installDependencies only in an approved isolated runner"],
+                "auditOnlyActions": ["仅在获准的隔离运行器中启用 buildValidation.installDependencies"],
                 "status": "active" if "dependency_missing" in build_summary.get("failureClasses", []) else "available",
                 "evidenceArtifactIds": build_summary.get("evidenceArtifactIds", []),
             },
@@ -759,7 +759,7 @@ class WorkerPipeline:
                 "failureClass": "runtime_error",
                 "targetStage": "runtime_compare",
                 "automaticActions": ["mirror_original_static_entry"],
-                "auditOnlyActions": ["review DOM, network, console, and screenshot diffs by scenario/viewport"],
+                "auditOnlyActions": ["按场景和 viewport 审查 DOM、网络、Console 和截图差异"],
                 "status": "active" if runtime_summary.get("triggeredReviewCount", 0) else "available",
                 "evidenceArtifactIds": runtime_summary.get("evidenceArtifactIds", []),
             },
@@ -767,7 +767,7 @@ class WorkerPipeline:
                 "failureClass": "invalid_input",
                 "targetStage": "runtime_smoke",
                 "automaticActions": [],
-                "auditOnlyActions": ["provide an HTML entry or configure a runtime scenario entry"],
+                "auditOnlyActions": ["提供 HTML 入口或配置运行时场景入口"],
                 "status": "available",
                 "evidenceArtifactIds": [],
             },
@@ -783,29 +783,29 @@ class WorkerPipeline:
         failure_mapping: list[dict],
     ) -> list[str]:
         if final_outcome in {"passed_without_repair", "repaired_passed"}:
-            return ["No user action is required; retain the review-fix summary with the result package for audit."]
+            return ["无需用户操作；请随结果包保留 Review/Fix 摘要以供审计。"]
         steps: list[str] = []
         if runtime_summary.get("budgetExhausted"):
             steps.append(
-                "Runtime compare retry budget was exhausted; inspect the last scenario/viewport diff and raise runtimeCompare.maxAttempts only after confirming the repair is converging."
+                "运行时对比重试预算已耗尽；请检查最后一次场景和 viewport 差异，并仅在确认修复正在收敛后提高 runtimeCompare.maxAttempts。"
             )
         if runtime_summary.get("stoppedReason") == "repair_not_applied":
             steps.append(
-                "No low-risk runtime repair was applied; review planned repair instructions and keep medium/high risk changes manual."
+                "未应用低风险运行时修复；请审查已规划的修复指令，并继续手动处理中高风险改动。"
             )
         if build_summary.get("needsAttention"):
             steps.append(
-                "Build/typecheck still needs attention; inspect build_artifact diagnostics and repair instructions before rerun."
+                "构建和类型检查仍需处理；重新运行前请检查 build_artifact 诊断和修复指令。"
             )
         active_mappings = [item for item in failure_mapping if item.get("status") == "active"]
         for mapping in active_mappings[:3]:
             automatic_actions = mapping.get("automaticActions") if isinstance(mapping.get("automaticActions"), list) else []
             audit_actions = mapping.get("auditOnlyActions") if isinstance(mapping.get("auditOnlyActions"), list) else []
             steps.append(
-                f"{mapping.get('failureClass')} at {mapping.get('targetStage')}: automatic={', '.join(automatic_actions) or 'none'}; next={'; '.join(audit_actions) or 'review evidence'}."
+                f"{mapping.get('failureClass')} 位于 {mapping.get('targetStage')}：自动动作={', '.join(automatic_actions) or '无'}；后续={'; '.join(audit_actions) or '审查证据'}。"
             )
         if not steps:
-            steps.append("Review best-effort limitations in the evidence index before treating the result as complete.")
+            steps.append("将结果视为完成前，请审查证据索引中的尽力而为限制。")
         return steps
 
     def _bool_config(self, value, *, default: bool) -> bool:
@@ -853,7 +853,7 @@ class WorkerPipeline:
     def _raise_if_cancelled(self, *, job_id: str, store) -> None:
         job = store.get_job(job_id)
         if job is not None and job.status == "cancelled":
-            raise PipelineCancelled(job.failure_reason or "Job cancelled.")
+            raise PipelineCancelled(job.failure_reason or "任务已取消。")
 
     def _latest_artifact(self, *, store, job_id: str, kind: str):
         artifacts = store.list_artifacts(job_id, kind=kind)
@@ -876,22 +876,22 @@ class WorkerPipeline:
 
     def _message_for(self, status: PipelineStatus) -> str:
         messages = {
-            "leased": "Worker lease acquired.",
-            "intake": "Input inventory and sensitivity classification prepared.",
-            "planning": "Task plan prepared from product and runtime constraints.",
-            "parsing": "HTML, JS, CSS, source map, and manifest parsing scheduled.",
-            "indexing": "AST, symbol, source range, and resource indexes scheduled.",
-            "analyzing": "Runtime and bundle pattern analysis scheduled.",
-            "agent_planning": "CrewAI planner context and evidence prepared.",
-            "agent_pass": "Semantic inference pass scheduled.",
-            "reconstructing": "Deterministic writer scheduled.",
-            "building": "Sandbox build scheduled.",
-            "typechecking": "TypeScript check scheduled.",
-            "runtime_smoke": "Playwright runtime smoke scheduled.",
-            "runtime_compare": "Original vs reconstructed runtime comparison scheduled.",
-            "reviewing": "Review Agent scheduled.",
-            "packaging": "Result package and audit report scheduled.",
-            "completed": "Pipeline completed.",
-            "completed_best_effort": "Pipeline completed with best-effort limitations.",
+            "leased": "已获取 Worker 租约。",
+            "intake": "input inventory 和敏感度分类已准备完成。",
+            "planning": "已根据产品和运行时约束准备任务计划。",
+            "parsing": "已安排 HTML、JS、CSS、source map 和 manifest 解析。",
+            "indexing": "已安排 AST、符号、源码范围和资源索引。",
+            "analyzing": "已安排运行时和 bundle 模式分析。",
+            "agent_planning": "CrewAI 规划上下文和证据已准备完成。",
+            "agent_pass": "已安排语义推断流程。",
+            "reconstructing": "已安排 deterministic writer。",
+            "building": "已安排沙箱构建。",
+            "typechecking": "已安排 TypeScript 检查。",
+            "runtime_smoke": "已安排 Playwright 运行时冒烟测试。",
+            "runtime_compare": "已安排原始版本与重建版本的运行时对比。",
+            "reviewing": "已安排 Review Agent。",
+            "packaging": "已安排结果包和审计报告。",
+            "completed": "流水线已完成。",
+            "completed_best_effort": "流水线已完成，但存在尽力而为限制。",
         }
         return messages.get(status, status)

@@ -299,16 +299,16 @@ def redact_secrets(value: Any) -> Any:
 
 def _load_config_file(path: Path) -> dict[str, Any]:
     if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
-        raise ConfigurationError("Configuration file must use .json, .yaml, or .yml")
+        raise ConfigurationError("配置文件必须使用 .json、.yaml 或 .yml 扩展名")
     try:
         raw = path.read_text(encoding="utf-8")
         parsed = json.loads(raw) if path.suffix.lower() == ".json" else yaml.safe_load(raw)
     except (OSError, json.JSONDecodeError, yaml.YAMLError) as error:
-        raise ConfigurationError(f"Unable to load configuration file {path}: {error}") from error
+        raise ConfigurationError(f"无法加载配置文件 {path}：{error}") from error
     if parsed is None:
         return {}
     if not isinstance(parsed, dict):
-        raise ConfigurationError("Configuration file root must be an object")
+        raise ConfigurationError("配置文件根节点必须是对象")
     return parsed
 
 
@@ -317,9 +317,9 @@ def _validated_base_url(value: str | None) -> str | None:
         return None
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("baseUrl must be an absolute HTTP(S) URL")
+        raise ValueError("baseUrl 必须是绝对 HTTP(S) URL")
     if parsed.username or parsed.password:
-        raise ValueError("baseUrl must not contain user information")
+        raise ValueError("baseUrl 不得包含用户信息")
     return value.rstrip("/")
 
 
@@ -334,7 +334,7 @@ def _environment_payload(environ: Mapping[str, str]) -> dict[str, Any]:
             try:
                 value = int(value)
             except ValueError as error:
-                raise ConfigurationError(f"{name} must be an integer") from error
+                raise ConfigurationError(f"{name} 必须是整数") from error
         elif name == "AI_JSUNPACK_CORS_ORIGINS":
             value = [item.strip() for item in value.split(",") if item.strip()]
         _set_path(payload, path, value)

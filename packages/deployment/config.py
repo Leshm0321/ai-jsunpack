@@ -11,26 +11,26 @@ SERVICE_ROLE_ENV = "AI_JSUNPACK_SERVICE_ROLE"
 _VALID_ROLES: set[str] = {"api", "worker", "browser-runner", "web", "db", "artifact-store"}
 
 _API_FORBIDDEN_EXACT: dict[str, tuple[str, str]] = {
-    "AI_JSUNPACK_AGENT_MODEL": ("worker", "cloud model selection belongs to the Worker/Agent runtime"),
-    "AI_JSUNPACK_AGENT_PROVIDER": ("worker", "cloud model provider selection belongs to the Worker/Agent runtime"),
-    "AI_JSUNPACK_LOCAL_AGENT_MODEL": ("worker", "local model selection belongs to the Worker/Agent runtime"),
-    "AI_JSUNPACK_LOCAL_AGENT_PROVIDER": ("worker", "local model provider selection belongs to the Worker/Agent runtime"),
-    "AI_JSUNPACK_CORE_CLI_PATH": ("worker", "Core CLI execution belongs to the Worker"),
-    "AI_JSUNPACK_NODE_BINARY": ("worker", "Node/Core execution belongs to the Worker"),
-    "AI_JSUNPACK_CREWAI_DATA_ROOT": ("worker", "CrewAI storage belongs to the Worker/Agent runtime"),
-    "CREWAI_STORAGE_DIR": ("worker", "CrewAI storage belongs to the Worker/Agent runtime"),
-    "OPENAI_API_KEY": ("worker", "model provider credentials must not be present in the API service"),
-    "ANTHROPIC_API_KEY": ("worker", "model provider credentials must not be present in the API service"),
-    "GOOGLE_API_KEY": ("worker", "model provider credentials must not be present in the API service"),
-    "AZURE_OPENAI_API_KEY": ("worker", "model provider credentials must not be present in the API service"),
-    "OLLAMA_ENDPOINT": ("worker", "model provider endpoints belong to the Worker/Agent runtime"),
+    "AI_JSUNPACK_AGENT_MODEL": ("worker", "云端模型选择应由 Worker/Agent runtime 负责"),
+    "AI_JSUNPACK_AGENT_PROVIDER": ("worker", "云端 model provider 选择应由 Worker/Agent runtime 负责"),
+    "AI_JSUNPACK_LOCAL_AGENT_MODEL": ("worker", "本地模型选择应由 Worker/Agent runtime 负责"),
+    "AI_JSUNPACK_LOCAL_AGENT_PROVIDER": ("worker", "本地 model provider 选择应由 Worker/Agent runtime 负责"),
+    "AI_JSUNPACK_CORE_CLI_PATH": ("worker", "Core CLI 执行应由 Worker 负责"),
+    "AI_JSUNPACK_NODE_BINARY": ("worker", "Node/Core 执行应由 Worker 负责"),
+    "AI_JSUNPACK_CREWAI_DATA_ROOT": ("worker", "CrewAI storage 应由 Worker/Agent runtime 负责"),
+    "CREWAI_STORAGE_DIR": ("worker", "CrewAI storage 应由 Worker/Agent runtime 负责"),
+    "OPENAI_API_KEY": ("worker", "API service 中不得存在 model provider credentials"),
+    "ANTHROPIC_API_KEY": ("worker", "API service 中不得存在 model provider credentials"),
+    "GOOGLE_API_KEY": ("worker", "API service 中不得存在 model provider credentials"),
+    "AZURE_OPENAI_API_KEY": ("worker", "API service 中不得存在 model provider credentials"),
+    "OLLAMA_ENDPOINT": ("worker", "model provider endpoint 应由 Worker/Agent runtime 负责"),
 }
 
 _API_FORBIDDEN_PREFIXES: dict[str, tuple[str, str]] = {
-    "AI_JSUNPACK_SANDBOX_": ("worker", "sandbox execution configuration belongs to the Worker or Browser Runner"),
-    "AI_JSUNPACK_BROWSER_RUNNER_": ("browser-runner", "browser execution configuration belongs to the Browser Runner"),
-    "AI_JSUNPACK_AGENT_": ("worker", "Agent endpoint configuration belongs to the Worker/Agent runtime"),
-    "AI_JSUNPACK_LOCAL_AGENT_": ("worker", "local Agent endpoint configuration belongs to the Worker/Agent runtime"),
+    "AI_JSUNPACK_SANDBOX_": ("worker", "sandbox execution 配置应由 Worker 或 Browser Runner 负责"),
+    "AI_JSUNPACK_BROWSER_RUNNER_": ("browser-runner", "browser execution 配置应由 Browser Runner 负责"),
+    "AI_JSUNPACK_AGENT_": ("worker", "Agent endpoint 配置应由 Worker/Agent runtime 负责"),
+    "AI_JSUNPACK_LOCAL_AGENT_": ("worker", "local Agent endpoint 配置应由 Worker/Agent runtime 负责"),
 }
 
 _WORKER_EXECUTION_PREFIXES: tuple[str, ...] = (
@@ -70,12 +70,12 @@ class DeploymentProfile:
 
     def summary(self) -> str:
         if not self.violations:
-            return f"{self.role} deployment profile is {self.status}."
+            return f"{self.role} deployment profile 状态为 {self.status}。"
         details = "; ".join(
-            f"{violation.name} is owned by {violation.owner_role}: {violation.reason}"
+            f"{violation.name} 归属 {violation.owner_role}：{violation.reason}"
             for violation in self.violations
         )
-        return f"{self.role} deployment profile is invalid: {details}"
+        return f"{self.role} deployment profile 无效：{details}"
 
 
 def validate_current_environment(
@@ -96,7 +96,7 @@ def validate_current_environment(
             DeploymentViolation(
                 name=SERVICE_ROLE_ENV,
                 owner_role=expected_role,
-                reason=f"expected {expected_role!r}, got {configured_role!r}",
+                reason=f"预期为 {expected_role!r}，实际为 {configured_role!r}",
             ),
         )
 
@@ -123,7 +123,7 @@ def validate_service_environment(
             DeploymentViolation(
                 name=SERVICE_ROLE_ENV,
                 owner_role="deployment",
-                reason=f"unknown service role {role!r}",
+                reason=f"未知的服务角色 {role!r}",
             )
         )
         return DeploymentProfile(
@@ -167,7 +167,7 @@ def _worker_warnings(active_names: set[str]) -> list[str]:
         name.startswith(prefix) for prefix in _WORKER_EXECUTION_PREFIXES for name in active_names
     )
     if not sandbox_runner and execution_configured:
-        return ["Worker execution configuration is present without AI_JSUNPACK_SANDBOX_RUNNER; local runner remains the default."]
+        return ["已提供 Worker 执行配置，但未设置 AI_JSUNPACK_SANDBOX_RUNNER；仍将默认使用 local runner。"]
     return []
 
 

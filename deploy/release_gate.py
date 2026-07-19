@@ -75,21 +75,21 @@ class ReleaseGateConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
-    parser = argparse.ArgumentParser(description="Plan or execute an auditable image release gate.")
-    parser.add_argument("--registry", required=True, help="Container registry host, for example registry.example.com.")
+    parser = argparse.ArgumentParser(description="规划或执行可审计的镜像发布门禁。")
+    parser.add_argument("--registry", required=True, help="容器注册表主机，例如 registry.example.com。")
     parser.add_argument(
         "--repository-prefix",
         required=True,
-        help="Repository namespace under the registry, for example ai-jsunpack.",
+        help="注册表中的仓库命名空间，例如 ai-jsunpack。",
     )
-    parser.add_argument("--version", required=True, help="Immutable release version or tag.")
-    parser.add_argument("--git-sha", default="", help="Commit SHA to pin as an auxiliary image tag.")
-    parser.add_argument("--previous-version", default="", help="Previous known-good image version for rollback evidence.")
+    parser.add_argument("--version", required=True, help="不可变的发布版本或标签。")
+    parser.add_argument("--git-sha", default="", help="作为辅助镜像标签固定的提交 SHA。")
+    parser.add_argument("--previous-version", default="", help="用于回滚证据的上一已知良好镜像版本。")
     parser.add_argument(
         "--ci-platform",
         choices=("generic", "github_actions"),
         default="generic",
-        help="CI platform metadata to include in the release report.",
+        help="要写入发布报告的 CI 平台元数据。",
     )
     parser.add_argument("--output", dest="output_path", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--sbom-output-dir", type=Path, default=DEFAULT_SBOM_DIR)
@@ -101,10 +101,10 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
     parser.add_argument(
         "--secret-environment",
         default="",
-        help="Secret manager environment name, for example a GitHub Environment.",
+        help="secret manager environment 名称，例如 GitHub Environment。",
     )
-    parser.add_argument("--sbom-tool", default="syft", help="SBOM tool command, or 'none' to skip.")
-    parser.add_argument("--scan-tool", default="trivy", help="Image scanner command, or 'none' to skip.")
+    parser.add_argument("--sbom-tool", default="syft", help="SBOM 工具命令；使用 'none' 可跳过。")
+    parser.add_argument("--scan-tool", default="trivy", help="镜像扫描器命令；使用 'none' 可跳过。")
     parser.add_argument("--scan-severity", default="HIGH,CRITICAL")
     parser.add_argument("--soak-instances", type=int, default=2)
     parser.add_argument("--soak-workers-per-instance", type=int, default=1)
@@ -112,7 +112,7 @@ def parse_args(argv: list[str] | None = None) -> ReleaseGateConfig:
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--dry-run", dest="execute", action="store_false", default=False)
     execution.add_argument("--execute", dest="execute", action="store_true")
-    parser.add_argument("--push", action="store_true", help="Push image tags after successful local build.")
+    parser.add_argument("--push", action="store_true", help="本地构建成功后推送镜像标签。")
     args = parser.parse_args(argv)
     git_sha = args.git_sha or discover_git_sha()
     config = ReleaseGateConfig(
@@ -162,13 +162,13 @@ def discover_git_sha() -> str:
 
 def validate_config(config: ReleaseGateConfig) -> None:
     if not VERSION_PATTERN.match(config.version):
-        raise ValueError("--version must be a Docker-tag-compatible value.")
+        raise ValueError("--version 必须是与 Docker 标签兼容的值。")
     if config.previous_version and not VERSION_PATTERN.match(config.previous_version):
-        raise ValueError("--previous-version must be a Docker-tag-compatible value.")
+        raise ValueError("--previous-version 必须是与 Docker 标签兼容的值。")
     if not config.registry.strip("/"):
-        raise ValueError("--registry cannot be empty.")
+        raise ValueError("--registry 不能为空。")
     if not config.repository_prefix.strip("/"):
-        raise ValueError("--repository-prefix cannot be empty.")
+        raise ValueError("--repository-prefix 不能为空。")
 
 
 def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
@@ -219,7 +219,7 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
             },
         )
         if not dockerfiles_present:
-            raise FileNotFoundError("One or more service Dockerfiles are missing.")
+            raise FileNotFoundError("缺少一个或多个服务 Dockerfile。")
 
         if config.execute:
             config.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +231,7 @@ def run_release_gate(config: ReleaseGateConfig) -> dict[str, Any]:
             if config.push:
                 run_commands("image_push", plan["push"], checks)
             else:
-                add_check(checks, "image_push_skipped", True, evidence={"reason": "--push was not set"})
+                add_check(checks, "image_push_skipped", True, evidence={"reason": "未设置 --push"})
             run_commands(
                 "compose_smoke_gate",
                 [plan["composeSmokeGate"]["command"]],
@@ -329,10 +329,10 @@ def command_plan(config: ReleaseGateConfig, images: list[dict[str, Any]]) -> dic
             },
         },
         "postReleaseChecks": [
-            "GET /health for API and Browser Runner",
-            "GET /ops/metrics with ops-read Bearer token",
-            "GET /ops/prometheus with ops-read Bearer token",
-            "GET /ops/alert-events after smoke gate",
+            "对 API 和 Browser Runner 执行 GET /health",
+            "使用 ops-read Bearer token 执行 GET /ops/metrics",
+            "使用 ops-read Bearer token 执行 GET /ops/prometheus",
+            "冒烟门禁后执行 GET /ops/alert-events",
         ],
     }
 
@@ -385,32 +385,32 @@ def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
         {
             "name": "AI_JSUNPACK_AUTH_SECRET",
             "scope": "api,worker,browser-runner",
-            "injection": "secret manager or sealed CI variable",
+            "injection": "secret manager 或 sealed CI variable",
         },
         {
             "name": "AI_JSUNPACK_ARTIFACT_S3_SECRET_ACCESS_KEY",
             "scope": "api,worker,browser-runner",
-            "injection": "object-store credential scoped to the artifact bucket",
+            "injection": "作用域限定为 artifact bucket 的 object-store credential",
         },
         {
             "name": "AI_JSUNPACK_BROWSER_RUNNER_TOKEN",
             "scope": "worker",
-            "injection": "HMAC Bearer token with serviceRoles=[\"worker\"]",
+            "injection": "包含 serviceRoles=[\"worker\"] 的 HMAC Bearer token",
         },
         {
             "name": "VITE_API_AUTH_TOKEN",
             "scope": "web",
-            "injection": "runtime/session token, not baked as a long-lived production secret",
+            "injection": "runtime/session token，不作为长期 production secret 烘焙进镜像",
         },
         {
             "name": "AI_JSUNPACK_ALERT_WEBHOOK_URL",
             "scope": "api",
-            "injection": "optional ops webhook endpoint",
+            "injection": "可选的 ops webhook endpoint",
         },
         {
             "name": "model provider credentials",
             "scope": "worker",
-            "injection": "only when cloud_allowed mode is enabled for the deployment",
+            "injection": "仅在部署启用 cloud_allowed 模式时注入",
         },
     ]
     if config.ci_platform == "github_actions":
@@ -421,8 +421,8 @@ def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
             0,
             {
                 "name": "GITHUB_TOKEN",
-                "scope": "release workflow",
-                "injection": "GitHub Actions automatic token with contents:read and packages:write permissions",
+                "scope": "发布工作流",
+                "injection": "具有 contents:read 和 packages:write 权限的 GitHub Actions 自动 token",
                 "githubActions": "${{ github.token }}",
                 "githubEnvironment": config.secret_environment or "<workflow>",
             },
@@ -432,7 +432,7 @@ def required_secret_template(config: ReleaseGateConfig) -> list[dict[str, str]]:
 
 def github_secret_mapping(name: str) -> str:
     if name == "model provider credentials":
-        return "repository/environment secrets for the selected provider, injected only into Worker release jobs"
+        return "所选 provider 的仓库/环境 secret，仅注入 Worker 发布任务"
     return "${{ secrets." + name + " }}"
 
 
@@ -441,22 +441,22 @@ def ci_platform_summary(config: ReleaseGateConfig) -> dict[str, Any]:
         return {
             "name": "github_actions",
             "registry": config.registry,
-            "registryLogin": "docker login using github.actor and GITHUB_TOKEN",
+            "registryLogin": "使用 github.actor 和 GITHUB_TOKEN 执行 docker login",
             "permissions": {
                 "contents": "read",
                 "packages": "write",
             },
             "workflow": ".github/workflows/release-gate.yml",
-            "secretStore": "GitHub repository or environment secrets",
+            "secretStore": "GitHub repository 或 environment secrets",
             "secretEnvironment": config.secret_environment or "<github-environment>",
-            "artifactStore": "GitHub Actions run artifacts plus retained production DB/Artifact Store snapshots",
+            "artifactStore": "GitHub Actions Artifact，以及保留的 production DB/Artifact Store snapshot",
             "runContext": github_actions_run_context(config),
         }
     return {
         "name": "generic",
         "registry": config.registry,
-        "secretStore": "external CI secret store, deployment secret manager, or sealed variables",
-        "artifactStore": "release system artifact archive plus retained production DB/Artifact Store snapshots",
+        "secretStore": "外部 CI secret store、deployment secret manager 或 sealed variable",
+        "artifactStore": "发布系统 Artifact archive，以及保留的 production DB/Artifact Store snapshot",
     }
 
 
@@ -470,11 +470,11 @@ def archive_plan(config: ReleaseGateConfig, images: list[dict[str, Any]]) -> dic
             str(config.scan_output_dir),
         ],
         "externalEvidence": [
-            "container registry image digests for each pushed tag",
-            "PostgreSQL dump or volume snapshot retained outside the CI workspace",
-            "Artifact Store bucket or prefix export retained outside the CI workspace",
-            "compose logs captured before rollback or teardown",
-            "secret manager revision or deployment environment record without secret values",
+            "每个已推送 tag 对应的 container registry digest",
+            "保留在 CI 工作区之外的 PostgreSQL 转储或卷快照",
+            "保留在 CI workspace 之外的 Artifact Store bucket 或 prefix export",
+            "回滚或拆除前捕获的 Compose 日志",
+            "不含 secret values 的 secret manager revision 或 deployment environment record",
         ],
         "githubActionsArtifacts": github_actions_artifacts(config) if config.ci_platform == "github_actions" else [],
         "ciRun": ci_run_context(config),
@@ -531,7 +531,7 @@ def registry_digest_evidence(images: list[dict[str, Any]]) -> list[dict[str, str
             "service": image["service"],
             "tag": image["versionTag"],
             "digestReference": f"{image['repository']}@sha256:<registry-digest>",
-            "source": "container registry package digest after push_images=true",
+            "source": "push_images=true 后的 container registry digest",
         }
         for image in images
     ]
@@ -543,9 +543,9 @@ def secret_manager_evidence(config: ReleaseGateConfig) -> dict[str, Any]:
             "provider": "github_environments",
             "environment": config.secret_environment or os.getenv("GITHUB_ENVIRONMENT_NAME", "<github-environment>"),
             "requiredEvidence": [
-                "environment secret revision or configuration change record without values",
-                "workflow environment approval or deployment protection record when enabled",
-                "repository or environment secret names matching requiredSecrets[].githubActions",
+                "不含值的 environment secret revision 或配置变更记录",
+                "启用时的工作流环境审批记录或部署保护记录",
+                "与 requiredSecrets[].githubActions 匹配的 repository/environment secret names",
             ],
             "containsSecretValues": False,
         }
@@ -553,9 +553,9 @@ def secret_manager_evidence(config: ReleaseGateConfig) -> dict[str, Any]:
         "provider": "external_secret_manager",
         "environment": config.secret_environment or "<deployment-environment>",
         "requiredEvidence": [
-            "secret manager revision or sealed variable revision without values",
-            "deployment approval record when the target platform supports approvals",
-            "secret names matching requiredSecrets[].name",
+            "不含值的 secret manager revision 或 sealed variable revision",
+            "目标平台支持审批时的部署审批记录",
+            "与 requiredSecrets[].name 匹配的 secret names",
         ],
         "containsSecretValues": False,
     }
@@ -589,14 +589,14 @@ def production_archive_checklist(config: ReleaseGateConfig, images: list[dict[st
             "name": "database_snapshot",
             "required": True,
             "status": "external_required",
-            "evidenceRef": "PostgreSQL dump or volume snapshot retained outside CI workspace",
+            "evidenceRef": "保留在 CI 工作区之外的 PostgreSQL 转储或卷快照",
             "containsSecretValues": False,
         },
         {
             "name": "artifact_store_export",
             "required": True,
             "status": "external_required",
-            "evidenceRef": "Artifact Store bucket or prefix export retained outside CI workspace",
+            "evidenceRef": "保留在 CI workspace 之外的 Artifact Store bucket 或 prefix export",
             "containsSecretValues": False,
         },
         {
@@ -670,14 +670,14 @@ def rollback_summary(config: ReleaseGateConfig, images: list[dict[str, Any]]) ->
             str(config.output_path),
             str(config.compose_smoke_output),
             str(config.deployment_smoke_output),
-            "retained PostgreSQL export or volume snapshot",
-            "retained Artifact Store bucket export or prefix snapshot",
-            "compose logs captured before rollback",
+            "已保留的 PostgreSQL 导出或卷快照",
+            "已保留的 Artifact Store bucket export 或 prefix snapshot",
+            "回滚前捕获的 Compose 日志",
         ],
         "procedure": [
-            "Preserve release gate, compose smoke, deployment smoke, DB, Artifact Store, and service logs.",
-            "Set compose image environment variables back to rollback tags.",
-            "Re-run deploy.compose_smoke with --skip-build and compare archive_manifest retained evidence.",
+            "保留 release gate、Compose smoke、deployment smoke、DB、Artifact Store 和 service logs。",
+            "将 Compose 镜像环境变量恢复为回滚标签。",
+            "使用 --skip-build 重新运行 deploy.compose_smoke，并比较 archive_manifest 中保留的证据。",
         ],
     }
 
@@ -691,7 +691,7 @@ def run_commands(
     allow_empty: bool = False,
 ) -> None:
     if not commands and allow_empty:
-        add_check(checks, f"{check_prefix}_skipped", True, evidence={"reason": "tool disabled"})
+        add_check(checks, f"{check_prefix}_skipped", True, evidence={"reason": "工具已禁用"})
         return
     for index, command in enumerate(commands, start=1):
         merged_env = dict(os.environ)
@@ -712,7 +712,7 @@ def run_commands(
             },
         )
         if not passed:
-            raise RuntimeError(f"{check_prefix}_{index} failed with exit code {result.returncode}")
+            raise RuntimeError(f"{check_prefix}_{index} 失败，退出码为 {result.returncode}")
 
 
 def add_check(

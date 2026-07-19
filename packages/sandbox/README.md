@@ -1,6 +1,6 @@
 # Sandbox 包
 
-该包承载 Worker 在 build、typecheck、install 和 runtime validation 阶段使用的本地受控 runner 接口。
+该包承载 Worker 在 build、typecheck、install 和 runtime validation 阶段使用的受控 Sandbox Runner 接口。
 
 runner 必须具备的行为：
 
@@ -12,6 +12,6 @@ runner 必须具备的行为：
 
 当前实现：
 
-- `LocalSandboxRunner` 提供每次 attempt 独立的临时 workspace 和仅 argv 形式的子进程执行。
+- `LocalSandboxRunner` 提供 Local Sandbox Runner：每次 attempt 使用独立临时 workspace，并仅以 argv 形式执行子进程。
 - `SandboxPolicy` 定义命令 allowlist、超时、输出限制、环境变量 allowlist 和 `network_policy`。
-- 本地 runner 会记录网络策略契约，但暂不提供 OS 级网络隔离。
+- Local Sandbox Runner 会记录网络策略契约，但暂不提供 OS 级网络隔离。

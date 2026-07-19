@@ -693,8 +693,8 @@ def expired_record_update(record: BrowserRunRecord, *, timestamp: str, execution
         result = BrowserRunResult(
             status="best_effort",
             failure_class="timeout",
-            page_errors=[f"Browser Runner lease expired after {record.attempt} attempt(s)."],
-            limitations=["Remote Browser Runner run expired before capture evidence could be completed."],
+            page_errors=[f"Browser Runner 租约在第 {record.attempt} 次尝试后过期。"],
+            limitations=["Remote Browser Runner 任务在完成采集证据前已过期。"],
             execution_boundary=execution_boundary(record, lease_recovered=True),
         )
         return replace(
@@ -715,7 +715,7 @@ def expired_record_update(record: BrowserRunRecord, *, timestamp: str, execution
         lease_owner=None,
         lease_expires_at=None,
         next_run_at=timestamp,
-        error="Previous Browser Runner lease expired; run returned to queue.",
+        error="上一个 Browser Runner 租约已过期；运行任务已返回队列。",
         lease_recovered=True,
     )
 
@@ -923,7 +923,7 @@ class BrowserRunnerQueue:
                 status="best_effort",
                 failure_class=failure_class,
                 page_errors=[str(error)],
-                limitations=["Browser Runner queue execution failed before capture evidence could be completed."],
+                limitations=["Browser Runner 队列任务在完成采集证据前执行失败。"],
                 execution_boundary=self._execution_boundary(current),
             )
             self._update(
@@ -972,13 +972,13 @@ class BrowserRunnerQueue:
                     capture = BrowserSmokeCapture(page_errors=[str(error)])
                     status = "best_effort"
                     failure_class = error.failure_class
-                    limitations.append("Remote Browser Runner capture could not complete.")
+                    limitations.append("Remote Browser Runner 未能完成采集。")
 
             screenshot_base64 = None
             if screenshot_path.exists():
                 screenshot_base64 = base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
             else:
-                limitations.append("Remote Browser Runner completed without producing a screenshot.")
+                limitations.append("Remote Browser Runner 已完成，但未生成截图。")
 
         return BrowserRunResult(
             status=status,
@@ -991,7 +991,7 @@ class BrowserRunnerQueue:
             assertion_failures=capture.assertion_failures,
             dom_summary=capture.dom_summary,
             screenshot_base64=screenshot_base64,
-            limitations=[*limitations, "Browser execution ran in the remote browser-runner service boundary."],
+            limitations=[*limitations, "浏览器执行位于 Remote Browser Runner 服务边界内。"],
             execution_boundary=self._execution_boundary(record),
         )
 
@@ -1056,7 +1056,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="backend_unhealthy",
                     severity="critical",
-                    message="Browser Runner queue backend health check failed.",
+                    message="Browser Runner 队列后端健康检查失败。",
                     field="backendStatus",
                     value=metrics.backend_status,
                     threshold="ok",
@@ -1067,7 +1067,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="queue_backlog",
                     severity="warning",
-                    message="Browser Runner queued run count exceeds local worker concurrency.",
+                    message="Browser Runner 的 queued run 数超过本地 Worker concurrency。",
                     field="queuedCount",
                     value=metrics.queued_count,
                     threshold=self.max_workers,
@@ -1078,7 +1078,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="queue_age_high",
                     severity="warning",
-                    message="Oldest queued Browser Runner request exceeds the configured age threshold.",
+                    message="最早排队的 Browser Runner 请求已超过配置的等待时长阈值。",
                     field="oldestQueuedAgeMs",
                     value=metrics.oldest_queued_age_ms,
                     threshold=self.max_queue_age_ms,
@@ -1089,7 +1089,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="claim_latency_high",
                     severity="warning",
-                    message="Browser Runner queue claim latency exceeds the configured threshold.",
+                    message="Browser Runner 队列的领取延迟已超过配置阈值。",
                     field="claimLatencyMs",
                     value=metrics.claim_latency_ms,
                     threshold=self.max_claim_latency_ms,
@@ -1100,7 +1100,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="expired_running_leases",
                     severity="critical",
-                    message="Browser Runner has running requests with expired leases.",
+                    message="Browser Runner 存在租约已过期的运行中请求。",
                     field="expiredRunningCount",
                     value=metrics.expired_running_count,
                     threshold=self.max_expired_running,
@@ -1111,7 +1111,7 @@ class BrowserRunnerQueue:
                 BrowserRunnerQueueAlert(
                     code="retry_rate_high",
                     severity="warning",
-                    message="Browser Runner retry rate exceeds the configured threshold.",
+                    message="Browser Runner 重试率已超过配置阈值。",
                     field="retryRate",
                     value=metrics.retry_rate,
                     threshold=self.max_retry_rate,
@@ -1266,7 +1266,7 @@ def create_app(*, queue: BrowserRunnerQueue | None = None, adapter: BrowserSmoke
         require_worker_service(access)
         summary = app.state.browser_runner_queue.get(run_id)
         if summary is None:
-            raise HTTPException(status_code=404, detail="Browser run not found")
+            raise HTTPException(status_code=404, detail="未找到浏览器运行记录")
         return summary
 
     return app
@@ -1274,7 +1274,7 @@ def create_app(*, queue: BrowserRunnerQueue | None = None, adapter: BrowserSmoke
 
 def require_worker_service(access: AccessContext) -> None:
     if access.kind != "service" or not access.has_service_role(SERVICE_ROLE_WORKER):
-        raise HTTPException(status_code=403, detail="Browser Runner requires a worker service credential")
+        raise HTTPException(status_code=403, detail="Browser Runner 需要 Worker service credential")
 
 
 def _extract_source_archive(source_archive: BrowserRunSourceArchive, target_root: Path) -> None:
@@ -1323,13 +1323,13 @@ def _status_for_capture(capture: BrowserSmokeCapture) -> RunStatus:
 
 def _safe_source_relative_path(file_path: str) -> PurePosixPath:
     if not file_path or "\0" in file_path:
-        raise ValueError(f"Unsafe source archive member path: {file_path}")
+        raise ValueError(f"源归档成员路径不安全：{file_path}")
     normalized = file_path.replace("\\", "/")
     if normalized.startswith("/") or normalized.startswith("//") or _has_windows_drive_prefix(normalized):
-        raise ValueError(f"Unsafe source archive member path: {file_path}")
+        raise ValueError(f"源归档成员路径不安全：{file_path}")
     parts = [part for part in normalized.split("/") if part and part != "."]
     if not parts or any(part == ".." for part in parts):
-        raise ValueError(f"Unsafe source archive member path: {file_path}")
+        raise ValueError(f"源归档成员路径不安全：{file_path}")
     return PurePosixPath(*parts)
 
 

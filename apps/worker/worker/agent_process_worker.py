@@ -35,9 +35,9 @@ def run_request(payload: Any, *, backend_factory: Callable[[], AgentBackend] = C
         policy_payload = payload["policy"]
         prompt_context = payload["promptContext"]
         if not isinstance(spec_payload, dict) or not isinstance(policy_payload, dict):
-            raise TypeError("Invalid structured request.")
+            raise TypeError("结构化请求无效。")
         if not isinstance(prompt_context, dict):
-            raise TypeError("Invalid prompt context.")
+            raise TypeError("提示上下文无效。")
         spec = CrewAgentSpec(**spec_payload)
         policy = AgentModelPolicy(**policy_payload)
     except (KeyError, TypeError, ValueError):
@@ -45,8 +45,8 @@ def run_request(payload: Any, *, backend_factory: Callable[[], AgentBackend] = C
 
     previous_environment = _configure_isolated_environment(data_root)
     try:
-        # CrewAI and provider libraries may write diagnostic text. The protocol deliberately
-        # discards it so stdout remains JSON-only and secrets cannot enter parent artifacts.
+        # CrewAI 和 provider 库可能写入诊断文本。协议会主动丢弃这些内容，
+        # 以确保 stdout 只包含 JSON，并避免密钥进入父级 artifact。
         with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(
             sink
         ), contextlib.redirect_stderr(sink):
@@ -58,7 +58,7 @@ def run_request(payload: Any, *, backend_factory: Callable[[], AgentBackend] = C
         }
     except (ValidationError, json.JSONDecodeError, ValueError):
         return _error_response("schema_error")
-    except Exception:  # noqa: BLE001 - child boundary must translate every backend failure.
+    except Exception:  # noqa: BLE001 - 子进程边界必须转换所有后端失败。
         return _error_response("backend_error")
     finally:
         _restore_environment(previous_environment)
@@ -88,7 +88,7 @@ def _error_response(kind: str) -> dict[str, Any]:
         "protocolVersion": AGENT_PROCESS_PROTOCOL_VERSION,
         "status": "error",
         "errorKind": kind,
-        "message": "CrewAI child invocation failed.",
+        "message": "CrewAI 子进程调用失败。",
     }
 
 
