@@ -146,6 +146,34 @@ test("analyzeInputPackage 静态恢复轮转字符串数组解码器调用", asy
   }
 });
 
+test("analyzeInputPackage decodes the real agentApi fixture with reversible transform evidence", async () => {
+  const inputPath = path.resolve("tests/js_test/agentApi.js");
+  const original = await readFile(inputPath, "utf8");
+
+  const result = await analyzeInputPackage(inputPath, { jobId: "job_real_agent_api_acceptance" });
+  const transformed = result.transformAnalysis.scriptTransforms[0];
+  const appliedTransforms = result.transformAnalysis.transformLog.filter(
+    (entry) => entry.status === "applied" && entry.kind !== "wrapper_mark"
+  );
+  const decoderCallPattern = /(?:a13_0x4d5ce7|a13_0x9b60)\(0x[0-9a-f]+\)/gi;
+  const decoderCallsBefore = original.match(decoderCallPattern)?.length ?? 0;
+  const decoderCallsAfter = transformed.transformedSource.match(decoderCallPattern)?.length ?? 0;
+
+  assert.ok(result.inventory.isSingleBundle);
+  assert.equal(result.astIndexes.flatMap((index) => index.warnings).length, 0);
+  assert.ok(transformed.transforms.includes("string_array_decoder_restore"));
+  assert.ok(transformed.transforms.includes("string_array_decoder_cleanup"));
+  assert.ok(appliedTransforms.length >= 25);
+  assert.equal(result.transformAnalysis.rollbackMap.length, appliedTransforms.length);
+  assert.notEqual(transformed.originalHash, transformed.transformedHash);
+  assert.ok(decoderCallsBefore >= 25);
+  assert.ok(decoderCallsAfter < decoderCallsBefore / 5);
+  assert.ok(!transformed.transformedSource.includes("a13_0x41a2"));
+  assert.ok(transformed.transformedSource.split("\n").length > 100);
+  assert.equal(result.dependencyPlaceholders.length, 1);
+  assert.equal(result.dependencyPlaceholders[0].specifier, "./aiTextApi.js");
+});
+
 test("analyzeInputPackage 记录 webpack runtime wrapper 和 module table 候选", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-webpack-"));
   try {
@@ -651,6 +679,94 @@ test("writeProject 将使用 ESM 语法的单个 .js 输入作为模块加载", 
   }
 });
 
+test("writeProject applies a reviewed symbol rename map to a known transformed script", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-agent-rename-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(
+      inputPath,
+      "const a13_0x4d5ce7 = (_0x123abc) => _0x123abc + 1; export const result = a13_0x4d5ce7(2);"
+    );
+    const analysis = await analyzeInputPackage(inputPath, { jobId: "job_agent_rename" });
+    const plan = planReconstruction(analysis, { jobId: "job_agent_rename" });
+    const outputDir = path.join(root, "generated_project");
+    const result = await writeProject(plan, {
+      inputPath,
+      outputDir,
+      agentFeedback: {
+        kind: "agent_feedback",
+        protocolVersion: 1,
+        sourceReviewArtifactIds: ["artifact_review_pass"],
+        approvedActions: [
+          {
+            sourceArtifactId: "artifact_repair_rename",
+            repairInstructionId: "repair_rename_1",
+            action: "apply_symbol_rename_map",
+            path: "src/transformed/agentApi.js",
+            value: JSON.stringify({
+              a13_0x4d5ce7: "incrementValue",
+              _0x123abc: "inputValue"
+            }),
+            reason: "NamingAgent and ReviewAgent approved high-confidence binding names."
+          }
+        ],
+        rejectedActions: []
+      }
+    });
+
+    const transformed = await readFile(path.join(outputDir, "src", "transformed", "agentApi.js"), "utf8");
+    assert.ok(transformed.includes("incrementValue"));
+    assert.ok(transformed.includes("inputValue"));
+    assert.ok(!transformed.includes("a13_0x4d5ce7"));
+    assert.ok(!transformed.includes("_0x123abc"));
+    assert.deepEqual(result.manifest.agentFeedback?.appliedActions.map((action) => action.action), [
+      "apply_symbol_rename_map"
+    ]);
+    assert.equal(result.manifest.agentFeedback?.appliedActions[0].changed, true);
+    await runSyntaxCheck(path.join(outputDir, "src", "transformed", "agentApi.js"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("writeProject rejects symbol rename maps that target readable or unknown bindings", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-agent-rename-reject-"));
+  try {
+    const inputPath = path.join(root, "agentApi.js");
+    await writeFile(inputPath, "export const readableName = 1; const _0x123abc = readableName;");
+    const analysis = await analyzeInputPackage(inputPath, { jobId: "job_agent_rename_reject" });
+    const plan = planReconstruction(analysis, { jobId: "job_agent_rename_reject" });
+    const outputDir = path.join(root, "generated_project");
+    const result = await writeProject(plan, {
+      inputPath,
+      outputDir,
+      agentFeedback: {
+        kind: "agent_feedback",
+        protocolVersion: 1,
+        sourceReviewArtifactIds: ["artifact_review_pass"],
+        approvedActions: [
+          {
+            sourceArtifactId: "artifact_repair_rename",
+            action: "apply_symbol_rename_map",
+            path: "src/transformed/agentApi.js",
+            value: JSON.stringify({ readableName: "renamedReadable", _0x999999: "missingBinding" }),
+            reason: "Invalid rename map fixture."
+          }
+        ],
+        rejectedActions: []
+      }
+    });
+
+    const transformed = await readFile(path.join(outputDir, "src", "transformed", "agentApi.js"), "utf8");
+    assert.ok(transformed.includes("readableName"));
+    assert.ok(transformed.includes("_0x123abc"));
+    assert.equal(result.manifest.agentFeedback?.appliedActions.length, 0);
+    assert.ok(result.manifest.agentFeedback?.rejectedActions.some((action) => action.action === "apply_symbol_rename_map"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("缺失的静态相对 ESM 依赖生成经过审计且会抛错的占位模块", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ai-jsunpack-missing-dependency-"));
   try {
@@ -769,6 +885,25 @@ function runScript(cwd: string, args: string[]): Promise<void> {
         return;
       }
       reject(new Error(stderr || `生成项目脚本已退出，退出码 ${code}`));
+    });
+  });
+}
+
+function runSyntaxCheck(filePath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--check", filePath], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr || `node --check exited with code ${code}`));
     });
   });
 }

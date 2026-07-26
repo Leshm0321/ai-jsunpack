@@ -17,6 +17,10 @@ test("Core CLI 输出 inventory 和 AST Artifact payload", async () => {
     const parsed = JSON.parse(output) as {
       jobId: string;
       inventoryArtifactPayload: { kind: string; inventory: { entries: string[]; scripts: string[] } };
+      sourceIndexArtifactPayload: {
+        kind: string;
+        scripts: Array<{ targetPath: string; transformedSource: string; obfuscatedBindings: unknown[] }>;
+      };
       astIndexArtifactPayload: { kind: string; astIndexes: Array<{ symbols: Array<{ name: string }> }> };
     };
 
@@ -24,6 +28,10 @@ test("Core CLI 输出 inventory 和 AST Artifact payload", async () => {
     assert.equal(parsed.inventoryArtifactPayload.kind, "input_inventory");
     assert.equal(parsed.inventoryArtifactPayload.inventory.entries.length, 1);
     assert.equal(parsed.inventoryArtifactPayload.inventory.scripts.length, 1);
+    assert.equal(parsed.sourceIndexArtifactPayload.kind, "source_index");
+    assert.equal(parsed.sourceIndexArtifactPayload.scripts[0].targetPath, "src/transformed/assets/app.js");
+    assert.ok(parsed.sourceIndexArtifactPayload.scripts[0].transformedSource.includes("function boot"));
+    assert.deepEqual(parsed.sourceIndexArtifactPayload.scripts[0].obfuscatedBindings, []);
     assert.equal(parsed.astIndexArtifactPayload.kind, "ast_index");
     assert.ok(parsed.astIndexArtifactPayload.astIndexes[0].symbols.some((symbol) => symbol.name === "boot"));
   } finally {

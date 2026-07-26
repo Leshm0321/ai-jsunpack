@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { CONTRACT_SCHEMA_VERSION } from "@ai-jsunpack/shared";
-import { analyzeInputPackage, normalizeInputPackage, planReconstruction, writeProject } from "./index.js";
+import { analyzeInputPackage, collectObfuscatedBindings, normalizeInputPackage, planReconstruction, writeProject } from "./index.js";
 import { readFile } from "node:fs/promises";
 
 interface CliOptions {
@@ -14,7 +14,7 @@ interface CliOptions {
 interface ArtifactPayload {
   schemaVersion: string;
   jobId: string;
-  kind: "input_inventory" | "ast_index" | "reconstruction_plan" | "generated_project";
+  kind: "input_inventory" | "source_index" | "ast_index" | "reconstruction_plan" | "generated_project";
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -139,6 +139,50 @@ async function main(): Promise<void> {
       astIndexes: result.astIndexes,
       detectedRuntime: result.detectedRuntime
     };
+    const sourceIndexArtifactPayload: ArtifactPayload & {
+      scripts: Array<{
+        filePath: string;
+        targetPath: string;
+        originalHash: string;
+        transformedHash: string;
+        transforms: string[];
+        transformedSource: string;
+        obfuscatedBindings: Array<{
+          name: string;
+          kind: string;
+          loc?: string;
+          references: number;
+          fallbackName: string;
+        }>;
+      }>;
+    } = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      jobId: options.jobId,
+      kind: "source_index",
+      scripts: result.transformAnalysis.scriptTransforms.map((transform) => {
+        let fallbackIndex = 0;
+        const obfuscatedBindings = collectObfuscatedBindings(transform.transformedSource)
+          .map((symbol) => {
+            fallbackIndex += 1;
+            return {
+              name: symbol.name,
+              kind: symbol.kind,
+              loc: symbol.loc,
+              references: symbol.references,
+              fallbackName: `recovered${symbol.kind === "function" ? "Function" : symbol.kind === "parameter" ? "Parameter" : "Value"}${fallbackIndex}`
+            };
+          });
+        return {
+          filePath: transform.filePath,
+          targetPath: `src/transformed/${transform.filePath.replaceAll("\\", "/")}`,
+          originalHash: transform.originalHash,
+          transformedHash: transform.transformedHash,
+          transforms: transform.transforms,
+          transformedSource: transform.transformedSource,
+          obfuscatedBindings
+        };
+      })
+    };
 
     process.stdout.write(
       JSON.stringify(
@@ -146,6 +190,7 @@ async function main(): Promise<void> {
           jobId: options.jobId,
           schemaVersion: CONTRACT_SCHEMA_VERSION,
           inventoryArtifactPayload,
+          sourceIndexArtifactPayload,
           astIndexArtifactPayload
         },
         null,

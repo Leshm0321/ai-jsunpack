@@ -158,6 +158,8 @@ export interface InferenceRecord {
   id: string;
   jobId: string;
   type: "naming" | "module_split" | "type_inference" | "framework" | "dead_code" | "runtime" | "repair";
+  target?: string;
+  value?: string;
   agentName: string;
   modelProvider: string;
   modelName: string;
@@ -699,7 +701,11 @@ export interface RetentionCleanupResult {
 }
 
 export interface RepairAction {
-  action: "add_package_script" | "replace_package_script" | "mirror_original_static_entry";
+  action:
+    | "add_package_script"
+    | "replace_package_script"
+    | "mirror_original_static_entry"
+    | "apply_symbol_rename_map";
   path: string;
   value: string;
   reason: string;
@@ -709,7 +715,7 @@ export interface RepairInstruction {
   id: string;
   jobId: string;
   attempt: number;
-  targetStage: "building" | "typechecking" | "runtime_smoke" | "runtime_compare";
+  targetStage: "reconstructing" | "building" | "typechecking" | "runtime_smoke" | "runtime_compare";
   failureClass: FailureClass;
   inputArtifactIds: string[];
   evidenceRefs: EvidenceRef[];
@@ -823,7 +829,15 @@ const repairActionsSchema = {
   items: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add_package_script", "replace_package_script", "mirror_original_static_entry"] },
+      action: {
+        type: "string",
+        enum: [
+          "add_package_script",
+          "replace_package_script",
+          "mirror_original_static_entry",
+          "apply_symbol_rename_map"
+        ]
+      },
       path: stringSchema,
       value: stringSchema,
       reason: stringSchema
@@ -1470,6 +1484,8 @@ export const SHARED_JSON_SCHEMAS = {
         type: "string",
         enum: ["naming", "module_split", "type_inference", "framework", "dead_code", "runtime", "repair"]
       },
+      target: stringSchema,
+      value: stringSchema,
       agentName: stringSchema,
       modelProvider: stringSchema,
       modelName: stringSchema,
@@ -2067,7 +2083,10 @@ export const SHARED_JSON_SCHEMAS = {
       id: stringSchema,
       jobId: stringSchema,
       attempt: { type: "integer", minimum: 0 },
-      targetStage: { type: "string", enum: ["building", "typechecking", "runtime_smoke", "runtime_compare"] },
+      targetStage: {
+        type: "string",
+        enum: ["reconstructing", "building", "typechecking", "runtime_smoke", "runtime_compare"]
+      },
       failureClass: { type: "string", enum: FAILURE_CLASSES },
       inputArtifactIds: stringArraySchema,
       evidenceRefs: evidenceRefsSchema,
@@ -2149,6 +2168,8 @@ export const EXAMPLE_INFERENCE_RECORD = {
   id: "inference_contract_example",
   jobId: EXAMPLE_JOB.id,
   type: "naming",
+  target: "symbols.minified.a",
+  value: "initializeApplication",
   agentName: "NamingAgent",
   modelProvider: "stub",
   modelName: "stub-contract-model",
@@ -2784,21 +2805,21 @@ export const EXAMPLE_REPAIR_INSTRUCTION = {
   id: "repair_contract_example",
   jobId: EXAMPLE_JOB.id,
   attempt: 1,
-  targetStage: "building",
+  targetStage: "reconstructing",
   failureClass: "build_error",
   inputArtifactIds: [EXAMPLE_ARTIFACT.id],
   evidenceRefs: [EXAMPLE_EVIDENCE_REF],
   actions: [
     {
-      action: "add_package_script",
-      path: "package.json:scripts.build",
-      value: "node scripts/build.mjs",
-      reason: "A generated validation shim exists and the package script is missing."
+      action: "apply_symbol_rename_map",
+      path: "src/main.js",
+      value: "{\"a\":\"initializeApplication\"}",
+      reason: "The accepted naming inference maps a minified symbol to a stable reconstructed identifier."
     }
   ],
   status: "applied",
   riskLevel: "low",
-  decision: "Added a deterministic package script for the generated project validation shim."
+  decision: "Applied the accepted symbol rename map before build validation."
 } as const satisfies RepairInstruction;
 
 export const SHARED_CONTRACT_EXAMPLES = {

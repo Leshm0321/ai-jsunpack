@@ -7,7 +7,7 @@ import generate from "@babel/generator";
 import { TraceMap, sourceContentFor } from "@jridgewell/trace-mapping";
 import type { SourceMapInput } from "@jridgewell/trace-mapping";
 import { parse } from "@babel/parser";
-import traverseModule, { type NodePath, type TraverseOptions } from "@babel/traverse";
+import traverseModule, { type NodePath, type Scope, type TraverseOptions } from "@babel/traverse";
 import * as t from "@babel/types";
 import type { AstIndex, HeadlessAnalysisResult, InputFileRecord, InputInventory } from "@ai-jsunpack/shared";
 
@@ -23,6 +23,13 @@ export interface CoreAnalysisResult extends HeadlessAnalysisResult {
   transformAnalysis: TransformAnalysis;
   moduleRecoveryAnalysis: ModuleRecoveryAnalysis;
   dependencyPlaceholders: DependencyPlaceholderRecord[];
+}
+
+export interface ObfuscatedBindingCandidate {
+  name: string;
+  kind: "function" | "parameter" | "variable";
+  loc?: string;
+  references: number;
 }
 
 export interface NormalizedInputPackage {
@@ -87,7 +94,8 @@ export interface WriteProjectConfig {
 export type AgentFeedbackActionName =
   | "add_package_script"
   | "replace_package_script"
-  | "mirror_original_static_entry";
+  | "mirror_original_static_entry"
+  | "apply_symbol_rename_map";
 
 export interface AgentFeedbackAction {
   sourceArtifactId: string;
@@ -1545,7 +1553,7 @@ function transformScriptSource(
     }
   });
 
-  const transformedSource = generate.default(ast, { comments: true, retainLines: true }, source).code;
+  const transformedSource = generate.default(ast, { comments: true }, source).code;
 
   return {
     record: {
@@ -1561,6 +1569,44 @@ function transformScriptSource(
   };
 }
 
+export function collectObfuscatedBindings(source: string): ObfuscatedBindingCandidate[] {
+  let ast: ReturnType<typeof parse>;
+  try {
+    ast = parse(source, {
+      sourceType: "unambiguous",
+      plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+      errorRecovery: false
+    });
+  } catch {
+    return [];
+  }
+  const scopes = new Set<Scope>();
+  getTraverse()(ast, {
+    Scopable(scopePath) {
+      scopes.add(scopePath.scope);
+    }
+  });
+  const candidates = new Map<string, ObfuscatedBindingCandidate>();
+  for (const scope of scopes) {
+    for (const [name, binding] of Object.entries(scope.bindings)) {
+      if (!OBFUSCATED_IDENTIFIER_PATTERN.test(name)) continue;
+      const existing = candidates.get(name);
+      const kind: ObfuscatedBindingCandidate["kind"] = binding.kind === "param"
+        ? "parameter"
+        : binding.path.isFunctionDeclaration()
+          ? "function"
+          : "variable";
+      candidates.set(name, {
+        name,
+        kind: existing?.kind === "function" ? "function" : kind,
+        loc: existing?.loc ?? formatNodeLoc(binding.identifier),
+        references: (existing?.references ?? 0) + binding.referencePaths.length
+      });
+    }
+  }
+  return [...candidates.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
 interface StaticStringArrayProvider {
   name: string;
   node: t.FunctionDeclaration;
@@ -1569,6 +1615,7 @@ interface StaticStringArrayProvider {
 
 interface StaticStringDecoderCandidate {
   decoderName: string;
+  providerName: string;
   infrastructureNodes: Set<t.Node>;
   offset: number;
   values: string[];
@@ -1599,6 +1646,7 @@ function restoreStaticStringArrayDecoders(
     if (!rotation) continue;
     candidates.push({
       decoderName: decoder.decoderName,
+      providerName: decoder.providerName,
       infrastructureNodes: new Set([statement, decoder.providerNode, rotation.node]),
       offset: decoder.offset,
       values: rotation.values
@@ -1640,6 +1688,117 @@ function restoreStaticStringArrayDecoders(
       }
     }
   });
+  removeDecodedStringInfrastructure(filePath, ast, candidates, transforms, transformLog, rollbackMap);
+}
+
+function removeDecodedStringInfrastructure(
+  filePath: string,
+  ast: ReturnType<typeof parse>,
+  candidates: StaticStringDecoderCandidate[],
+  transforms: Set<string>,
+  transformLog: TransformLogEntry[],
+  rollbackMap: RollbackMapEntry[]
+): void {
+  const traverseAst = getTraverse();
+  let programPath: NodePath<t.Program> | null = null;
+  traverseAst(ast, {
+    Program(path: NodePath<t.Program>) {
+      programPath = path;
+      path.stop();
+    }
+  });
+  if (!programPath) return;
+  const resolvedProgramPath = programPath as NodePath<t.Program>;
+  resolvedProgramPath.scope.crawl();
+
+  for (const candidate of candidates) {
+    removeUnusedDecoderAliases(filePath, ast, candidate, transforms, transformLog, rollbackMap);
+    resolvedProgramPath.scope.crawl();
+    const decoderBinding = resolvedProgramPath.scope.getBinding(candidate.decoderName);
+    const providerBinding = resolvedProgramPath.scope.getBinding(candidate.providerName);
+    const decoderReferencesAreInfrastructure = Boolean(
+      decoderBinding &&
+        decoderBinding.referencePaths.every(
+          (reference) =>
+            Boolean(reference.findParent((parent) => candidate.infrastructureNodes.has(parent.node)))
+        )
+    );
+    const providerReferencesAreInfrastructure = Boolean(
+      providerBinding &&
+        providerBinding.referencePaths.every((reference) =>
+          Boolean(reference.findParent((parent) => candidate.infrastructureNodes.has(parent.node)))
+        )
+    );
+    if (!decoderReferencesAreInfrastructure || !providerReferencesAreInfrastructure) continue;
+
+    const removedNodes = ast.program.body.filter((statement) => candidate.infrastructureNodes.has(statement));
+    ast.program.body = ast.program.body.filter(
+      (statement) =>
+        !candidate.infrastructureNodes.has(statement) &&
+        (!t.isVariableDeclaration(statement) || statement.declarations.length > 0)
+    );
+    for (const node of removedNodes) {
+      transforms.add("string_array_decoder_cleanup");
+      logAppliedTransform(
+        filePath,
+        "string_array_decoder_cleanup",
+        formatNodeLoc(node),
+        codeForNode(node),
+        "",
+        transformLog,
+        rollbackMap
+      );
+    }
+  }
+}
+
+function removeUnusedDecoderAliases(
+  filePath: string,
+  ast: ReturnType<typeof parse>,
+  candidate: StaticStringDecoderCandidate,
+  transforms: Set<string>,
+  transformLog: TransformLogEntry[],
+  rollbackMap: RollbackMapEntry[]
+): void {
+  const traverseAst = getTraverse();
+  let removedInPass = true;
+  while (removedInPass) {
+    removedInPass = false;
+    traverseAst(ast, {
+      Program(programPath: NodePath<t.Program>) {
+        programPath.scope.crawl();
+      },
+      VariableDeclarator(declaratorPath: NodePath<t.VariableDeclarator>) {
+        if (!t.isIdentifier(declaratorPath.node.id) || !t.isIdentifier(declaratorPath.node.init)) return;
+        if (declaratorPath.findParent((parent) => candidate.infrastructureNodes.has(parent.node))) return;
+        const binding = declaratorPath.scope.getBinding(declaratorPath.node.id.name);
+        if (!binding || binding.path.node !== declaratorPath.node || binding.referencePaths.length > 0) return;
+        const initPath = declaratorPath.get("init");
+        if (Array.isArray(initPath) || !initPath.isIdentifier()) return;
+        if (!identifierResolvesToDecoder(initPath as NodePath<t.Identifier>, candidate.decoderName)) return;
+
+        const originalSnippet = codeForNode(declaratorPath.node);
+        const originalLoc = formatNodeLoc(declaratorPath.node);
+        const declarationPath = declaratorPath.parentPath;
+        if (declarationPath.isVariableDeclaration() && declarationPath.node.declarations.length === 1) {
+          declarationPath.remove();
+        } else {
+          declaratorPath.remove();
+        }
+        transforms.add("string_array_decoder_cleanup");
+        logAppliedTransform(
+          filePath,
+          "string_array_decoder_cleanup",
+          originalLoc,
+          originalSnippet,
+          "",
+          transformLog,
+          rollbackMap
+        );
+        removedInPass = true;
+      }
+    });
+  }
 }
 
 function extractStaticStringArrayProvider(node: t.FunctionDeclaration): StaticStringArrayProvider | null {
@@ -2658,8 +2817,11 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
 const SUPPORTED_AGENT_FEEDBACK_ACTIONS = new Set<AgentFeedbackActionName>([
   "add_package_script",
   "replace_package_script",
-  "mirror_original_static_entry"
+  "mirror_original_static_entry",
+  "apply_symbol_rename_map"
 ]);
+const OBFUSCATED_IDENTIFIER_PATTERN = /(?:^|_)0x[0-9a-f]+$/i;
+const MAX_AGENT_SYMBOL_RENAMES = 128;
 const SAFE_PACKAGE_SCRIPTS: Record<string, string> = {
   build: "node scripts/build.mjs",
   typecheck: "node scripts/typecheck.mjs",
@@ -2812,6 +2974,33 @@ async function applyAgentFeedback(
       continue;
     }
 
+    if (action.action === "apply_symbol_rename_map") {
+      const target = transformedScriptTarget(plan, action.path);
+      if (!target) {
+        rejectedActions.push(
+          rejectedFeedbackAction(action, "Symbol rename maps must target a known src/transformed JavaScript file.")
+        );
+        continue;
+      }
+      const renameMap = parseAgentSymbolRenameMap(action.value);
+      if (renameMap instanceof Error) {
+        rejectedActions.push(rejectedFeedbackAction(action, renameMap.message));
+        continue;
+      }
+      const targetPath = path.join(projectRoot, ...action.path.split("/"));
+      const renameResult = await applyAgentSymbolRenameMap(targetPath, renameMap);
+      if (renameResult instanceof Error) {
+        rejectedActions.push(rejectedFeedbackAction(action, renameResult.message));
+        continue;
+      }
+      appliedActions.push({
+        ...action,
+        changed: renameResult.renamedBindings > 0,
+        detail: `Renamed ${renameResult.renamedBindings} bindings across ${renameResult.renamedSymbols.length} approved symbols: ${renameResult.renamedSymbols.join(", ")}.`
+      });
+      continue;
+    }
+
     const scriptName = packageScriptName(action.path);
     if (!scriptName || SAFE_PACKAGE_SCRIPTS[scriptName] !== action.value) {
       rejectedActions.push(
@@ -2850,6 +3039,104 @@ async function applyAgentFeedback(
     appliedActions,
     rejectedActions
   };
+}
+
+function transformedScriptTarget(plan: ReconstructionPlan, actionPath: string): ScriptTransformRecord | null {
+  if (!actionPath.startsWith("src/transformed/") || path.posix.normalize(actionPath) !== actionPath) {
+    return null;
+  }
+  for (const transform of plan.scriptTransforms) {
+    const safeRelative = toPosix(safeRelativePath(transform.filePath));
+    if (`src/transformed/${safeRelative}` === actionPath) {
+      return transform;
+    }
+  }
+  return null;
+}
+
+function parseAgentSymbolRenameMap(value: string): Record<string, string> | Error {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(value) as unknown;
+  } catch {
+    return new Error("Symbol rename map value must be a strict JSON object string.");
+  }
+  if (!isJsonObject(payload)) {
+    return new Error("Symbol rename map value must decode to an object.");
+  }
+  const entries = Object.entries(payload);
+  if (entries.length < 1 || entries.length > MAX_AGENT_SYMBOL_RENAMES) {
+    return new Error(`Symbol rename maps must contain between 1 and ${MAX_AGENT_SYMBOL_RENAMES} entries.`);
+  }
+  const result: Record<string, string> = {};
+  const replacementNames = new Set<string>();
+  for (const [originalName, replacementValue] of entries) {
+    if (!OBFUSCATED_IDENTIFIER_PATTERN.test(originalName)) {
+      return new Error(`Symbol rename source is not an obfuscated identifier: ${originalName}.`);
+    }
+    if (typeof replacementValue !== "string" || !t.isValidIdentifier(replacementValue)) {
+      return new Error(`Symbol rename destination is not a valid JavaScript identifier: ${String(replacementValue)}.`);
+    }
+    if (OBFUSCATED_IDENTIFIER_PATTERN.test(replacementValue) || originalName === replacementValue) {
+      return new Error(`Symbol rename destination must be a distinct readable identifier: ${replacementValue}.`);
+    }
+    if (replacementNames.has(replacementValue)) {
+      return new Error(`Symbol rename destinations must be unique: ${replacementValue}.`);
+    }
+    replacementNames.add(replacementValue);
+    result[originalName] = replacementValue;
+  }
+  return result;
+}
+
+async function applyAgentSymbolRenameMap(
+  targetPath: string,
+  renameMap: Record<string, string>
+): Promise<{ renamedBindings: number; renamedSymbols: string[] } | Error> {
+  const source = await fs.readFile(targetPath, "utf8");
+  let ast: ReturnType<typeof parse>;
+  try {
+    ast = parse(source, {
+      sourceType: "unambiguous",
+      plugins: ["jsx", "typescript", "dynamicImport", "classProperties", "optionalChaining", "nullishCoalescingOperator"],
+      errorRecovery: false
+    });
+  } catch (error) {
+    return new Error(`Cannot parse transformed script before applying symbol renames: ${error instanceof Error ? error.message : "unknown parse error"}`);
+  }
+
+  const traverseAst = getTraverse();
+  const scopes = new Set<Scope>();
+  traverseAst(ast, {
+    Scopable(scopePath) {
+      scopes.add(scopePath.scope);
+    }
+  });
+
+  const renameScopes = new Map<string, Scope[]>();
+  for (const [originalName, replacementName] of Object.entries(renameMap)) {
+    const matchingScopes = [...scopes].filter((scope) => scope.hasOwnBinding(originalName));
+    if (matchingScopes.length === 0) {
+      return new Error(`Approved symbol rename does not match a binding in the transformed script: ${originalName}.`);
+    }
+    for (const scope of matchingScopes) {
+      if (scope.hasOwnBinding(replacementName)) {
+        return new Error(`Approved symbol rename collides with an existing binding: ${replacementName}.`);
+      }
+    }
+    renameScopes.set(originalName, matchingScopes);
+  }
+
+  let renamedBindings = 0;
+  for (const [originalName, replacementName] of Object.entries(renameMap)) {
+    for (const scope of renameScopes.get(originalName) ?? []) {
+      scope.rename(originalName, replacementName);
+      renamedBindings += 1;
+    }
+  }
+  const transformedSource = generate.default(ast, { comments: true, retainLines: true }, source).code;
+  await fs.writeFile(targetPath, transformedSource, "utf8");
+  return { renamedBindings, renamedSymbols: Object.keys(renameMap).sort() };
 }
 
 function conflictingFeedbackActionIndexes(actions: AgentFeedbackAction[]): Set<number> {

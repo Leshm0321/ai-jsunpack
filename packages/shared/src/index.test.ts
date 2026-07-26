@@ -25,6 +25,22 @@ test("共享 schema 复用规范枚举常量", () => {
   );
 });
 
+test("shared repair and inference contract extensions stay exposed in JSON schemas", () => {
+  const inferenceRequired = SHARED_JSON_SCHEMAS.inferenceRecord.required as readonly string[];
+
+  assert.ok(SHARED_JSON_SCHEMAS.inferenceRecord.properties?.target);
+  assert.ok(SHARED_JSON_SCHEMAS.inferenceRecord.properties?.value);
+  assert.ok(!inferenceRequired.includes("target"));
+  assert.ok(!inferenceRequired.includes("value"));
+
+  assert.ok(SHARED_JSON_SCHEMAS.repairInstruction.properties?.targetStage?.enum?.includes("reconstructing"));
+  assert.ok(
+    SHARED_JSON_SCHEMAS.repairInstruction.properties?.actions?.items?.properties?.action?.enum?.includes(
+      "apply_symbol_rename_map"
+    )
+  );
+});
+
 test("共享示例覆盖每个 schema 的必填字段且不含额外键", () => {
   const examples = SHARED_CONTRACT_EXAMPLES as unknown as Record<string, Record<string, unknown>>;
 
