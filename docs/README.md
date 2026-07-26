@@ -19,7 +19,7 @@
 - `README.md` 是项目概览和最快启动入口。
 - `docs/` 是产品、开发、API 和运维的中心文档，中文为当前事实源。
 - `deploy/README.md` 与 `deploy/firecracker/README.md` 是部署实现的局部操作参考。
-- `packages/*/README.md` 描述单个包的职责，不替代架构与开发文档。
+- `packages/README.md` 说明包的语言分类与依赖方式，`packages/*/README.md` 描述单个包的职责，均不替代架构与开发文档。
 - `dev_docs/` 是被忽略的本地资料，不得从公开文档引用。
 
 ## 事实来源
