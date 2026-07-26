@@ -2,6 +2,7 @@ node_modules/
 package-lock.json
 .venv/
 dist/
+dist-i18n/
 build/
 .vite/
 .codegraph/
