@@ -57,6 +57,8 @@ test("Web 服务代理 /api 并提供运行时配置", async () => {
       headers: { Authorization: "Bearer browser-token" },
     }).then((response) => response.json());
     assert.deepEqual(proxied, { authorization: "Bearer browser-token", path: "/health?full=1" });
+    const serverAuthenticated = await fetch(`http://127.0.0.1:${webAddress.port}/api/download`).then((response) => response.json());
+    assert.deepEqual(serverAuthenticated, { authorization: "Bearer runtime-token", path: "/download" });
   } finally {
     await Promise.all([
       new Promise((resolve) => web.close(resolve)),

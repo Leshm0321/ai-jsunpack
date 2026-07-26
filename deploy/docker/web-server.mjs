@@ -27,6 +27,7 @@ const contentTypes = {
 
 export function createWebServer({ root = resolve("dist"), environment = process.env } = {}) {
   const apiUpstream = validatedUpstream(environment.AI_JSUNPACK_WEB_API_UPSTREAM || "http://api:8000");
+  const runtimeConfig = runtimeConfigFromEnvironment(environment);
   return createServer((request, response) => {
     const requestUrl = new URL(request.url || "/", "http://web.local");
     if (requestUrl.pathname === "/runtime-config.js") {
@@ -45,7 +46,7 @@ export function createWebServer({ root = resolve("dist"), environment = process.
       return;
     }
     if (requestUrl.pathname === "/api" || requestUrl.pathname.startsWith("/api/")) {
-      proxyApiRequest(request, response, requestUrl, apiUpstream);
+      proxyApiRequest(request, response, requestUrl, apiUpstream, runtimeConfig.authToken);
       return;
     }
     serveStatic(response, requestUrl.pathname, root);
@@ -95,9 +96,12 @@ function validatedUpstream(value) {
   return upstream;
 }
 
-function proxyApiRequest(clientRequest, clientResponse, requestUrl, upstream) {
+function proxyApiRequest(clientRequest, clientResponse, requestUrl, upstream, authToken) {
   const upstreamPath = `${requestUrl.pathname.slice(4) || "/"}${requestUrl.search}`;
   const headers = filteredHeaders(clientRequest.headers);
+  if (!headers.authorization && authToken) {
+    headers.authorization = `Bearer ${authToken}`;
+  }
   headers.host = upstream.host;
   const transport = upstream.protocol === "https:" ? httpsRequest : httpRequest;
   const proxyRequest = transport(
