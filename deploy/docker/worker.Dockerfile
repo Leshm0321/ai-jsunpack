@@ -40,7 +40,6 @@ COPY --from=node-deps /app/packages/core ./packages/core
 COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
 COPY apps/browser_runner ./apps/browser_runner
-COPY packages/audit ./packages/audit
 COPY packages/configuration ./packages/configuration
 COPY packages/deployment ./packages/deployment
 COPY packages/knowledge ./packages/knowledge

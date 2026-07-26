@@ -46,7 +46,6 @@ graph TD
 - `packages/sandbox`：local、container、gVisor、Firecracker 和远程浏览器执行策略。
 - `packages/memory`：任务内、项目级、实体和场景记忆证据。
 - `packages/knowledge`：框架、运行时、混淆模式和历史修复的确定性检索。
-- `packages/audit`：审计概念、回滚映射、报告与 lineage 的包级边界。
 - `packages/deployment`：服务角色和部署配置校验，阻止 API 携带 Worker 执行权限。
 - `deploy/`：Compose、镜像、smoke、release gate、归档校验和 Firecracker launcher 模板。
 
