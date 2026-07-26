@@ -1,5 +1,6 @@
 import type { Artifact, CloudMode, InferenceRecord, Job, ReviewRun, RuntimeValidationRun, ToolCall } from "@ai-jsunpack/shared";
 import type { EffectiveConfigResponse, ProviderReadinessResponse, RuntimeSettingsResponse } from "./settings-types";
+import type { JobHistoryResponse, JobResultResponse } from "./workbench-types";
 
 export interface JobSummary {
   job: Job;
@@ -47,6 +48,91 @@ export async function uploadSource(jobId: string, file: File): Promise<JobSummar
   });
 }
 
+export async function uploadDirectory(jobId: string, files: File[]): Promise<JobSummary> {
+  const body = new FormData();
+  for (const file of files) {
+    body.append("files", file, file.name);
+    body.append("paths", file.webkitRelativePath || file.name);
+  }
+  return requestJson<JobSummary>(`/jobs/${encodeURIComponent(jobId)}/upload-directory`, {
+    method: "POST",
+    headers: accessHeaders(),
+    body
+  });
+}
+
+export async function fetchJobs({
+  limit = 20,
+  offset = 0,
+  projectId,
+  status
+}: {
+  limit?: number;
+  offset?: number;
+  projectId?: string;
+  status?: string;
+} = {}): Promise<JobHistoryResponse> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (projectId) query.set("projectId", projectId);
+  if (status) query.set("status", status);
+  return requestJson<JobHistoryResponse>(`/jobs?${query.toString()}`);
+}
+
+export async function fetchJobResult(jobId: string): Promise<JobResultResponse> {
+  return requestJson<JobResultResponse>(`/jobs/${encodeURIComponent(jobId)}/result`);
+}
+
+export async function deleteJob(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: accessHeaders()
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+}
+
+export async function downloadJobResult(jobId: string, fallbackFilename: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/result/download`, {
+    headers: accessHeaders()
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
+  const filename = encoded ? decodeURIComponent(encoded) : quoted || fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+export async function downloadArtifactFile(jobId: string, artifactId: string, fallbackFilename: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+    { headers: accessHeaders() }
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
+  const filename = encoded ? decodeURIComponent(encoded) : quoted || fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export async function fetchJobSummary(jobId: string): Promise<JobSummary> {
   return requestJson<JobSummary>(`/jobs/${encodeURIComponent(jobId)}`);
 }
@@ -77,6 +163,18 @@ export async function fetchProviderReadiness(): Promise<ProviderReadinessRespons
 
 export async function fetchSystemSettings(): Promise<RuntimeSettingsResponse> {
   return requestJson<RuntimeSettingsResponse>("/v1/settings/system");
+}
+
+export async function fetchAccountSettings(): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>("/v1/settings/account");
+}
+
+export async function updateAccountSettings(settings: Record<string, unknown>, expectedRevision = 0): Promise<RuntimeSettingsResponse> {
+  return requestJson<RuntimeSettingsResponse>("/v1/settings/account", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, expectedRevision, reason: "Update account file retention from the web settings center" })
+  });
 }
 
 export async function updateSystemSettings(settings: Record<string, unknown>, expectedRevision = 0): Promise<RuntimeSettingsResponse> {

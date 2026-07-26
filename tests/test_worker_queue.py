@@ -14,9 +14,11 @@ class RecordingPipeline:
         self.raise_error = raise_error
         self.cancel = cancel
         self.runs: list[tuple[str, bytes]] = []
+        self.input_names: list[str] = []
 
     def run(self, job_id: str, input_path: Path, store) -> PipelineRun:
         self.runs.append((job_id, Path(input_path).read_bytes()))
+        self.input_names.append(Path(input_path).name)
         if self.cancel:
             store.request_cancel(job_id, "cancelled during pipeline")
             store.update_status(job_id, "building")
@@ -73,6 +75,7 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 self.assertEqual(result.job_id, queued.id)
                 self.assertEqual(result.status, "completed")
                 self.assertEqual(pipeline.runs, [(queued.id, b"queued-source")])
+                self.assertEqual(pipeline.input_names, ["input.bin"])
                 persisted = store.get_job(queued.id)
                 self.assertEqual(persisted.status, "completed")
                 self.assertEqual(persisted.run_attempt, 1)
@@ -124,7 +127,13 @@ class WorkerQueueRunnerTest(unittest.TestCase):
                 artifact_kinds = {artifact.kind for artifact in store.list_artifacts(job.id)}
                 self.assertIn("reconstruction_plan", artifact_kinds)
                 self.assertIn("generated_project", artifact_kinds)
-                self.assertIn("result_package", artifact_kinds)
+                self.assertIn("result_file", artifact_kinds)
+                self.assertIn("result_summary", artifact_kinds)
+                self.assertIn("evidence_package", artifact_kinds)
+                self.assertEqual(persisted.delivery_kind, "single_file")
+                primary = store.get_artifact(job.id, persisted.primary_result_artifact_id)
+                self.assertIsNotNone(primary)
+                self.assertEqual(primary.filename, "agentApi.js")
             finally:
                 store.close()
 

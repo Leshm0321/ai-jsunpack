@@ -58,11 +58,16 @@ ArtifactKind = Literal[
     "runtime_diagnosis",
     "report_section",
     "ops_alert_event",
+    "result_file",
+    "result_summary",
+    "evidence_package",
     "result_package",
     "audit_report",
     "html_report",
     "evidence_index",
 ]
+InputKind = Literal["single_script", "archive", "folder"]
+DeliveryKind = Literal["single_file", "project_package"]
 FailureClass = Literal[
     "none",
     "invalid_input",
@@ -156,7 +161,7 @@ class ContractModel(BaseModel):
     )
 
 
-SettingScope = Literal["system", "project"]
+SettingScope = Literal["system", "project", "account"]
 ProviderReadinessStatus = Literal["ready", "misconfigured", "unavailable"]
 
 
@@ -245,6 +250,13 @@ class JobRecord(ContractModel):
     owner_id: str
     project_id: str
     input_artifact_id: str | None = None
+    input_name: str | None = None
+    input_kind: InputKind | None = None
+    delivery_kind: DeliveryKind | None = None
+    primary_result_artifact_id: str | None = None
+    result_summary_artifact_id: str | None = None
+    files_expires_at: str | None = None
+    deleted_at: str | None = None
     config: dict[str, Any]
     cloud_mode: CloudMode
     review_attempt: int = Field(ge=0)
@@ -267,6 +279,7 @@ class ArtifactRecord(ContractModel):
     hash: str
     size: int = Field(ge=0)
     storage_uri: str
+    filename: str
     parent_artifact_ids: list[str]
     producer: str
     sensitivity_class: SensitivityClass
@@ -861,3 +874,24 @@ class AuditRecordCollection(ContractModel):
 class JobSummary(ContractModel):
     job: JobRecord
     artifacts: list[ArtifactRecord]
+
+
+class JobHistoryItem(ContractModel):
+    job: JobRecord
+    primary_result: ArtifactRecord | None = None
+
+
+class JobHistoryPage(ContractModel):
+    items: list[JobHistoryItem]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class JobResultResponse(ContractModel):
+    job: JobRecord
+    primary_result: ArtifactRecord | None = None
+    summary: dict[str, Any] | None = None
+    report_artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    download_url: str | None = None
+    compatibility_package_url: str | None = None

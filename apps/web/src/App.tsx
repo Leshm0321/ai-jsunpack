@@ -49,14 +49,13 @@ export function AppContainer() {
       const element = transitionRef.current;
       if (!element) return;
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        gsap.set(element, { autoAlpha: 0, scaleX: 0 });
+        gsap.set(element, { autoAlpha: 0 });
         return;
       }
       const timeline = gsap.timeline();
       timeline
-        .set(element, { autoAlpha: 1, scaleX: 1, transformOrigin: "right center" })
-        .to(element, { scaleX: 0, duration: 0.72, ease: "power4.inOut" })
-        .set(element, { autoAlpha: 0 });
+        .set(element, { autoAlpha: 1 })
+        .to(element, { autoAlpha: 0, duration: 0.36, ease: "power2.out" });
       return () => timeline.kill();
     },
     { dependencies: [routePath], revertOnUpdate: true }
@@ -68,7 +67,7 @@ export function AppContainer() {
       {route.kind === "marketing" ? (
         <MarketingPage key={route.path} route={route.path} onNavigate={handleNavigate} />
       ) : null}
-      {route.kind === "workbench" || route.kind === "workbench-new" ? (
+      {route.kind === "workbench" || route.kind === "workbench-new" || route.kind === "workbench-history" ? (
         <WorkbenchContainer route={route} onNavigate={handleNavigate} />
       ) : null}
       {route.kind === "settings" ? <SettingsCenter route={route} onNavigate={handleNavigate} /> : null}

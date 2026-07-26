@@ -1,5 +1,43 @@
 import type { Artifact, AstIndex, CloudMode, EvidenceRef, InferenceRecord, InputInventory, Job, JobStatus, ReviewRun, RuntimeComparisonReport, RuntimeValidationRun, ToolCall } from "@ai-jsunpack/shared";
 
+export type ProductInputKind = "single_script" | "archive" | "folder" | string;
+export type ProductDeliveryKind = "single_file" | "project_package" | string;
+
+export type ProductJob = Omit<Job, "deliveryKind" | "inputKind"> & {
+  deletedAt?: string | null;
+  deliveryKind?: ProductDeliveryKind | null;
+  filesExpiresAt?: string | null;
+  inputKind?: ProductInputKind | null;
+  inputName?: string | null;
+  primaryResultArtifactId?: string | null;
+  resultSummaryArtifactId?: string | null;
+};
+
+export type ProductArtifact = Omit<Artifact, "filename"> & {
+  filename?: string | null;
+};
+
+export interface JobHistoryItem {
+  job: ProductJob;
+  primaryResult: ProductArtifact | null;
+}
+
+export interface JobHistoryResponse {
+  items: JobHistoryItem[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+export interface JobResultResponse {
+  compatibilityPackageUrl?: string | null;
+  downloadUrl?: string | null;
+  job: ProductJob;
+  primaryResult: ProductArtifact | null;
+  reportArtifacts: ProductArtifact[];
+  summary: unknown;
+}
+
 export type StageState = "done" | "active" | "pending" | "warning" | "fail";
 export type MetricStatus = "pass" | "warn" | "fail";
 

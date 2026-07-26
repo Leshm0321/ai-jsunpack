@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleAlert,
   FileCog,
+  HardDrive,
   LockKeyhole,
   RefreshCw,
   Save,
@@ -17,11 +18,13 @@ import {
 } from "lucide-react";
 import {
   API_PROJECT_ID,
+  fetchAccountSettings,
   fetchEffectiveConfig,
   fetchProjectSettings,
   fetchProviderReadiness,
   fetchSystemSettings,
   updateProjectSettings,
+  updateAccountSettings,
   updateSystemSettings
 } from "./api";
 import { useLocalization } from "./i18n";
@@ -67,6 +70,10 @@ export function SettingsCenter({ onNavigate, route }: SettingsCenterProps) {
   const [effective, setEffective] = useState<EffectiveConfigResponse | null>(null);
   const [settings, setSettings] = useState<RuntimeSettingsResponse | null>(null);
   const [readiness, setReadiness] = useState<ProviderReadinessResponse | null>(null);
+  const [accountSettings, setAccountSettings] = useState<RuntimeSettingsResponse | null>(null);
+  const [retentionDays, setRetentionDays] = useState(90);
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [retentionStatus, setRetentionStatus] = useState<string | null>(null);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -79,10 +86,11 @@ export function SettingsCenter({ onNavigate, route }: SettingsCenterProps) {
     setLoading(true);
     setLoadError(null);
     const settingsRequest = projectId ? fetchProjectSettings(projectId) : fetchSystemSettings();
-    const [effectiveResult, settingsResult, readinessResult] = await Promise.allSettled([
+    const [effectiveResult, settingsResult, readinessResult, accountResult] = await Promise.allSettled([
       fetchEffectiveConfig(),
       settingsRequest,
-      fetchProviderReadiness()
+      fetchProviderReadiness(),
+      fetchAccountSettings()
     ]);
     if (effectiveResult.status === "fulfilled") {
       setEffective(effectiveResult.value);
@@ -94,7 +102,12 @@ export function SettingsCenter({ onNavigate, route }: SettingsCenterProps) {
     if (readinessResult.status === "fulfilled") {
       setReadiness(readinessResult.value);
     }
-    const failures = [effectiveResult, settingsResult, readinessResult]
+    if (accountResult.status === "fulfilled") {
+      setAccountSettings(accountResult.value);
+      const value = settingsValues(accountResult.value).fileRetentionDays;
+      setRetentionDays(typeof value === "number" && Number.isFinite(value) ? value : 90);
+    }
+    const failures = [effectiveResult, settingsResult, readinessResult, accountResult]
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
     setLoadError(failures.length ? failures.join(" | ") : null);
@@ -120,6 +133,23 @@ export function SettingsCenter({ onNavigate, route }: SettingsCenterProps) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRetentionSave = async () => {
+    setSavingRetention(true);
+    setRetentionStatus(null);
+    try {
+      const normalized = Math.max(1, Math.min(3650, Math.round(retentionDays || 90)));
+      const updated = await updateAccountSettings({ fileRetentionDays: normalized }, accountSettings?.revision ?? 0);
+      setAccountSettings(updated);
+      const value = settingsValues(updated).fileRetentionDays;
+      setRetentionDays(typeof value === "number" && Number.isFinite(value) ? value : normalized);
+      setRetentionStatus(t("settings.retention.saved"));
+    } catch (error) {
+      setRetentionStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingRetention(false);
     }
   };
 
@@ -213,6 +243,21 @@ export function SettingsCenter({ onNavigate, route }: SettingsCenterProps) {
           {saveStatus ? <div className="settings-notice" role="status"><CheckCircle2 size={18} aria-hidden="true" /><span>{saveStatus}</span></div> : null}
 
           {route.section === "ai" ? <ProviderReadiness providers={providers} loading={loading} /> : null}
+
+          {!projectId && route.section === "general" ? (
+            <section className="settings-section account-retention-section" aria-labelledby="account-retention-title">
+              <div className="settings-section-heading">
+                <div><h2 id="account-retention-title">{t("settings.retention.title")}</h2><p>{t("settings.retention.description")}</p></div>
+                <span className="source-badge"><HardDrive size={13} aria-hidden="true" />{t("settings.accountScope")}</span>
+              </div>
+              <div className="account-retention-control">
+                <label htmlFor="account-retention-days"><span>{t("settings.retention.days")}</span><small>{t("settings.retention.daysDetail")}</small></label>
+                <div><input id="account-retention-days" max={3650} min={1} type="number" value={retentionDays} onChange={(event) => setRetentionDays(event.currentTarget.valueAsNumber)} /><span>{t("settings.retention.unit")}</span><button className="primary-action compact" type="button" disabled={savingRetention} onClick={() => void handleRetentionSave()}><Save size={15} aria-hidden="true" />{savingRetention ? t("settings.saving") : t("settings.retention.save")}</button></div>
+              </div>
+              {retentionStatus ? <div className="settings-notice" role="status"><CheckCircle2 size={17} aria-hidden="true" /><span>{retentionStatus}</span></div> : null}
+              <p className="account-retention-note">{t("settings.retention.historyNote")}</p>
+            </section>
+          ) : null}
 
           {fields.length ? <section className="settings-section" aria-labelledby="runtime-settings-title">
             <div className="settings-section-heading">
@@ -367,6 +412,7 @@ function localizeProviderStatus(status: string, t: (key: TranslationKey) => stri
 function localizeSource(source: string | undefined, t: (key: TranslationKey) => string, fallbackKey: TranslationKey): string {
   const keys: Partial<Record<string, TranslationKey>> = {
     "built-in": "settings.defaultSource",
+    account: "settings.accountScope",
     system: "settings.system",
     project: "settings.projectScope"
   };

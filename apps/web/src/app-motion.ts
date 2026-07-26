@@ -31,15 +31,12 @@ export function useApplicationMotion(
       const mm = gsap.matchMedia();
       mm.add(
         {
-          desktop: "(min-width: 761px)",
-          mobile: "(max-width: 760px)",
           reduceMotion: "(prefers-reduced-motion: reduce)"
         },
         (context) => {
           const rootElement = root.current;
           if (!rootElement) return;
           const reduceMotion = Boolean(context.conditions?.reduceMotion);
-          const desktop = Boolean(context.conditions?.desktop);
           const topbar = rootElement.querySelector<HTMLElement>(".application-topbar");
           const sidebar = rootElement.querySelector<HTMLElement>(".application-sidebar");
           const heading = rootElement.querySelector<HTMLElement>(".page-heading");
@@ -61,16 +58,16 @@ export function useApplicationMotion(
             defaults: { duration: appMotion.duration.normal, ease: appMotion.ease.enter }
           });
           if (topbar) {
-            timeline.from(topbar, { y: -14, autoAlpha: 0, duration: appMotion.duration.fast }, 0);
+            timeline.from(topbar, { autoAlpha: 0, duration: appMotion.duration.fast }, 0);
           }
           if (sidebar) {
-            timeline.from(sidebar, { x: desktop ? -22 : 0, y: desktop ? 0 : -10, autoAlpha: 0 }, 0.04);
+            timeline.from(sidebar, { autoAlpha: 0 }, 0.04);
           }
           if (heading) {
-            timeline.from(heading, { y: 22, autoAlpha: 0 }, 0.08);
+            timeline.from(heading, { autoAlpha: 0 }, 0.08);
           }
           if (panels.length > 0) {
-            timeline.from(panels, { y: 26, autoAlpha: 0, stagger: appMotion.stagger.normal }, 0.1);
+            timeline.from(panels, { autoAlpha: 0, stagger: appMotion.stagger.normal }, 0.1);
           }
 
           return () => timeline.kill();
@@ -144,20 +141,7 @@ export function useActiveNavMotion(
   useGSAP(
     () => {
       const indicator = root.current?.querySelector<HTMLElement>(".sidebar-active-indicator");
-      const active = root.current?.querySelector<HTMLElement>(".sidebar-link.active");
-      if (!indicator || !active) {
-        if (indicator) gsap.set(indicator, { autoAlpha: 0 });
-        return;
-      }
-      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      gsap.to(indicator, {
-        y: active.offsetTop,
-        height: active.offsetHeight,
-        autoAlpha: 1,
-        duration: reduceMotion ? 0 : appMotion.duration.normal,
-        ease: appMotion.ease.move,
-        overwrite: "auto"
-      });
+      if (indicator) gsap.set(indicator, { autoAlpha: 0 });
     },
     { dependencies: [activeKey], scope: root }
   );

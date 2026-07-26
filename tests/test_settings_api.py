@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,6 +153,52 @@ class SettingsApiTest(unittest.TestCase):
         self.assertEqual(cloud["status"], "ready")
         self.assertTrue(cloud["credentialConfigured"])
         self.assertEqual(cloud["endpointType"], "remote_https")
+
+    def test_account_file_retention_settings_are_private_revisioned_and_applied_to_new_jobs(self):
+        default_snapshot = self.client.get("/v1/settings/account", headers=self.owner_headers)
+        updated = self.client.put(
+            "/v1/settings/account",
+            json={
+                "settings": {"fileRetentionDays": 30},
+                "expectedRevision": 0,
+                "reason": "shorter source retention",
+            },
+            headers=self.owner_headers,
+        )
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.owner_headers,
+        )
+        viewer_snapshot = self.client.get("/v1/settings/account", headers=self.viewer_headers)
+        revisions = self.client.get("/v1/settings/account/revisions", headers=self.owner_headers)
+        rolled_back = self.client.post(
+            "/v1/settings/account/rollback",
+            json={"revision": 1, "expectedRevision": 1, "reason": "reapply revision"},
+            headers=self.owner_headers,
+        )
+
+        self.assertEqual(default_snapshot.status_code, 200, default_snapshot.text)
+        self.assertEqual(default_snapshot.json()["settings"], {"fileRetentionDays": 90})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["scope"], "account")
+        self.assertEqual(updated.json()["scopeId"], "owner")
+        self.assertEqual(created.status_code, 200, created.text)
+        created_job = created.json()["job"]
+        created_at = datetime.fromisoformat(created_job["createdAt"])
+        expires_at = datetime.fromisoformat(created_job["filesExpiresAt"])
+        self.assertEqual((expires_at - created_at).days, 30)
+        self.assertEqual(viewer_snapshot.json()["settings"], {"fileRetentionDays": 90})
+        self.assertEqual([item["revision"] for item in revisions.json()], [1])
+        self.assertEqual(rolled_back.status_code, 200, rolled_back.text)
+        self.assertEqual(rolled_back.json()["revision"], 2)
+
+        invalid = self.client.put(
+            "/v1/settings/account",
+            json={"settings": {"fileRetentionDays": 0}, "expectedRevision": 2},
+            headers=self.owner_headers,
+        )
+        self.assertEqual(invalid.status_code, 422)
 
 
 if __name__ == "__main__":

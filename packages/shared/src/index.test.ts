@@ -87,6 +87,7 @@ test("任务和产物 schema 暴露契约要求的预期字段", () => {
     "hash",
     "size",
     "storageUri",
+    "filename",
     "parentArtifactIds",
     "producer",
     "sensitivityClass",

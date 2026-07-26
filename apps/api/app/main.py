@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from io import BytesIO
 import json
 import os
 from ipaddress import ip_address, ip_network
 from datetime import datetime, timezone
-from pathlib import PurePath
+from pathlib import PurePath, PurePosixPath
 from urllib.error import URLError
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
+import zipfile
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import ValidationError
@@ -50,7 +52,12 @@ from .models import (
     OpsHeartbeatRequest,
     OpsMetricsSnapshot,
     InferenceRecord,
+    InputKind,
+    JobHistoryItem,
+    JobHistoryPage,
     JobRecord,
+    JobResultResponse,
+    JobStatus,
     JobSummary,
     MemoryRecord,
     RetentionCleanupRequest,
@@ -65,7 +72,7 @@ from .models import (
     ToolCall,
     ToolRegistryEntry,
 )
-from .store import store
+from .store import ArtifactDeletionError, artifact_is_expired, store
 
 REPORT_ARTIFACT_KINDS = ("audit_report", "html_report", "evidence_index")
 REPORT_KIND_ALIASES = {
@@ -92,6 +99,9 @@ OPS_HEARTBEAT_TTL_SECONDS_ENV = "AI_JSUNPACK_OPS_HEARTBEAT_TTL_SECONDS"
 OPS_INSTANCE_ID_ENV = "AI_JSUNPACK_INSTANCE_ID"
 MAX_UPLOAD_BYTES_ENV = "AI_JSUNPACK_MAX_UPLOAD_BYTES"
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_DIRECTORY_FILES_ENV = "AI_JSUNPACK_MAX_DIRECTORY_FILES"
+MAX_DIRECTORY_FILE_BYTES_ENV = "AI_JSUNPACK_MAX_DIRECTORY_FILE_BYTES"
+DEFAULT_MAX_DIRECTORY_FILES = 2000
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 try:
@@ -116,7 +126,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_cors_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -263,6 +273,54 @@ def rollback_project_settings(
     return rollback_settings("project", project_id, request, access.subject)
 
 
+@app.get("/v1/settings/account", response_model=SettingsSnapshot)
+def get_account_settings(access: AccessContext = Depends(require_access)) -> SettingsSnapshot:
+    require_authenticated_user(access)
+    return sanitized_settings_snapshot(store.get_settings("account", access.subject))
+
+
+@app.put("/v1/settings/account", response_model=SettingsRevision)
+def update_account_settings(
+    request: SettingsUpdateRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_authenticated_user(access)
+    settings = validated_account_settings(request.settings)
+    try:
+        revision = store.write_settings_revision(
+            "account",
+            settings,
+            scope_id=access.subject,
+            actor_id=access.subject,
+            reason=request.reason,
+            expected_revision=request.expected_revision,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return sanitized_settings_revision(revision)
+
+
+@app.get("/v1/settings/account/revisions", response_model=list[SettingsRevision])
+def list_account_settings_revisions(
+    limit: int = 100,
+    access: AccessContext = Depends(require_access),
+) -> list[SettingsRevision]:
+    require_authenticated_user(access)
+    return [
+        sanitized_settings_revision(item)
+        for item in store.list_settings_revisions("account", access.subject, limit=limit)
+    ]
+
+
+@app.post("/v1/settings/account/rollback", response_model=SettingsRevision)
+def rollback_account_settings(
+    request: SettingsRollbackRequest,
+    access: AccessContext = Depends(require_access),
+) -> SettingsRevision:
+    require_authenticated_user(access)
+    return rollback_settings("account", access.subject, request, access.subject)
+
+
 @app.get("/v1/providers/readiness", response_model=list[ProviderReadiness])
 def providers_readiness(access: AccessContext = Depends(require_access)) -> list[ProviderReadiness]:
     require_authenticated_user(access)
@@ -345,6 +403,33 @@ def create_job(
     return JobSummary(job=job, artifacts=[])
 
 
+@app.get("/jobs", response_model=JobHistoryPage)
+def list_job_history(
+    project_id: str | None = Query(default=None, alias="projectId"),
+    status: JobStatus | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    access: AccessContext = Depends(require_access),
+) -> JobHistoryPage:
+    require_authenticated_user(access)
+    if project_id is not None:
+        require_project_role(access, project_id, "viewer")
+    jobs, total = store.list_jobs(
+        owner_id=access.subject,
+        project_ids=tuple(access.projects),
+        project_id=project_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return JobHistoryPage(
+        items=[JobHistoryItem(job=job, primary_result=primary_result_for_job(job, include_deleted=True)) for job in jobs],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @app.post("/jobs/{job_id}/upload", response_model=JobSummary)
 async def upload_source(
     job_id: str,
@@ -363,6 +448,65 @@ async def upload_source(
         content_type=file.content_type or "application/octet-stream",
         producer="api.upload",
     )
+    store.update_job_input_metadata(
+        job_id,
+        input_name=safe_download_filename(file.filename or "input.bin"),
+        input_kind=input_kind_for_upload(file.filename, file.content_type),
+    )
+    job = store.update_status(job_id, "intake")
+    return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
+
+
+@app.post("/jobs/{job_id}/upload-directory", response_model=JobSummary)
+async def upload_source_directory(
+    job_id: str,
+    files: list[UploadFile] = File(...),
+    paths: list[str] = Form(...),
+    directory_name: str | None = Form(default=None, alias="directoryName"),
+    access: AccessContext = Depends(require_access),
+) -> JobSummary:
+    require_job(job_id, access, minimum_role="maintainer")
+    if not files:
+        raise HTTPException(status_code=400, detail="Directory upload must contain at least one file")
+    max_files = configured_positive_int(MAX_DIRECTORY_FILES_ENV, DEFAULT_MAX_DIRECTORY_FILES)
+    if len(files) > max_files:
+        raise HTTPException(status_code=413, detail=f"Directory upload exceeds the {max_files} file limit")
+    if len(files) != len(paths):
+        raise HTTPException(status_code=400, detail="Each uploaded file must have one matching relative path")
+
+    normalized_paths = [normalize_directory_upload_path(path) for path in paths]
+    if len(set(normalized_paths)) != len(normalized_paths):
+        raise HTTPException(status_code=400, detail="Directory upload contains duplicate relative paths")
+
+    per_file_limit = configured_positive_int(MAX_DIRECTORY_FILE_BYTES_ENV, configured_max_upload_bytes())
+    total_limit = configured_max_upload_bytes()
+    total_size = 0
+    contents: list[bytes] = []
+    for upload in files:
+        content = await upload.read(per_file_limit + 1)
+        if len(content) > per_file_limit:
+            raise HTTPException(status_code=413, detail=f"A directory file exceeds the {per_file_limit} byte limit")
+        total_size += len(content)
+        if total_size > total_limit:
+            raise HTTPException(status_code=413, detail=f"Directory upload exceeds the {total_limit} byte total limit")
+        contents.append(content)
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for relative_path, content in zip(normalized_paths, contents, strict=True):
+            archive.writestr(relative_path, content)
+    input_name = safe_download_filename(directory_name or inferred_directory_name(normalized_paths))
+    artifact_filename = f"{input_name}.zip" if not input_name.lower().endswith(".zip") else input_name
+    store.write_artifact(
+        job_id,
+        kind="source_input",
+        stage="intake",
+        filename=artifact_filename,
+        content=buffer.getvalue(),
+        content_type="application/zip",
+        producer="api.upload-directory",
+    )
+    store.update_job_input_metadata(job_id, input_name=input_name, input_kind="folder")
     job = store.update_status(job_id, "intake")
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
 
@@ -374,6 +518,44 @@ def get_job(
 ) -> JobSummary:
     job = require_job(job_id, access)
     return JobSummary(job=job, artifacts=store.list_artifacts(job_id))
+
+
+@app.get("/jobs/{job_id}/result", response_model=JobResultResponse)
+def get_job_result(
+    job_id: str,
+    access: AccessContext = Depends(require_access),
+) -> JobResultResponse:
+    job = require_job(job_id, access)
+    require_job_owner(job, access)
+    primary_result = primary_result_for_job(job, include_deleted=True)
+    summary = result_summary_for_job(job)
+    report_artifacts: list[ArtifactRecord] = []
+    for report_kind in REPORT_ARTIFACT_KINDS:
+        report_artifacts.extend(store.list_artifacts(job_id, kind=report_kind))
+    compatibility_package = latest_artifact(job_id, "result_package", include_deleted=True)
+    return JobResultResponse(
+        job=job,
+        primary_result=primary_result,
+        summary=summary,
+        report_artifacts=sorted(report_artifacts, key=lambda artifact: (artifact.created_at, artifact.id)),
+        download_url=f"/jobs/{job_id}/result/download" if artifact_download_available(primary_result) else None,
+        compatibility_package_url=(
+            f"/jobs/{job_id}/result-package" if artifact_download_available(compatibility_package) else None
+        ),
+    )
+
+
+@app.get("/jobs/{job_id}/result/download")
+def download_job_result(
+    job_id: str,
+    access: AccessContext = Depends(require_access),
+) -> Response:
+    job = require_job(job_id, access)
+    require_job_owner(job, access)
+    artifact = primary_result_for_job(job, include_deleted=True)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="No downloadable result is available for this job")
+    return file_response_for_artifact(artifact)
 
 
 @app.get("/jobs/{job_id}/runtime-validations", response_model=list[RuntimeValidationRun])
@@ -497,7 +679,8 @@ def download_latest_report(
     report_kind: str,
     access: AccessContext = Depends(require_access),
 ) -> Response:
-    require_job(job_id, access)
+    job = require_job(job_id, access)
+    require_job_owner(job, access)
     normalized_kind = normalize_report_kind(report_kind)
     artifact = latest_artifact_or_404(
         job_id,
@@ -513,6 +696,8 @@ def download_latest_result_package(
     job_id: str,
     access: AccessContext = Depends(require_access),
 ) -> FileResponse:
+    job = require_job(job_id, access)
+    require_job_owner(job, access)
     artifact = latest_artifact_or_404(
         job_id,
         "result_package",
@@ -520,6 +705,26 @@ def download_latest_result_package(
         access,
     )
     return file_response_for_artifact(artifact, filename="result-package.zip")
+
+
+@app.delete("/jobs/{job_id}", response_model=JobRecord)
+def delete_job(
+    job_id: str,
+    access: AccessContext = Depends(require_access),
+) -> JobRecord:
+    job = require_job(job_id, access, minimum_role="maintainer")
+    require_authenticated_user(access)
+    if job.owner_id != access.subject:
+        raise HTTPException(status_code=403, detail="Only the job owner can delete this job")
+    try:
+        return store.soft_delete_job(job_id, reason="user_deleted")
+    except ArtifactDeletionError as error:
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Failed to delete one or more job artifacts", "errors": error.errors},
+        ) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Job not found") from error
 
 
 @app.post("/jobs/{job_id}/rerun", response_model=JobSummary)
@@ -534,6 +739,8 @@ def rerun_job(
     source_artifact = store.get_artifact(job_id, source_job.input_artifact_id)
     if source_artifact is None:
         raise HTTPException(status_code=404, detail="未找到源输入 Artifact")
+    if source_artifact.deleted_at is not None or artifact_is_expired(source_artifact, datetime.now(timezone.utc)):
+        raise HTTPException(status_code=410, detail="The source input file is no longer available")
     if not store.artifact_exists(source_artifact) or not store.artifact_is_file(source_artifact):
         raise HTTPException(status_code=400, detail="源输入 Artifact 不是可下载文件")
 
@@ -557,6 +764,11 @@ def rerun_job(
         content=store.read_artifact_record(source_artifact),
         content_type=source_artifact.content_type,
         producer="api.rerun",
+    )
+    store.update_job_input_metadata(
+        created.id,
+        input_name=source_job.input_name or source_artifact.filename,
+        input_kind=source_job.input_kind or input_kind_for_upload(source_artifact.filename, source_artifact.content_type),
     )
     job = store.update_status(created.id, "intake")
     return JobSummary(job=job, artifacts=store.list_artifacts(created.id))
@@ -598,7 +810,8 @@ def download_artifact(
     artifact_id: str,
     access: AccessContext = Depends(require_access),
 ) -> FileResponse:
-    require_job(job_id, access)
+    job = require_job(job_id, access)
+    require_job_owner(job, access)
     artifact = store.get_artifact(job_id, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="未找到 Artifact")
@@ -613,13 +826,58 @@ def latest_artifact_or_404(job_id: str, kind: str, detail: str, access: AccessCo
     return artifacts[-1]
 
 
+def latest_artifact(job_id: str, kind: str, *, include_deleted: bool = False) -> ArtifactRecord | None:
+    artifacts = store.list_artifacts(job_id, kind=kind, include_deleted=include_deleted)
+    return artifacts[-1] if artifacts else None
+
+
+def primary_result_for_job(job: JobRecord, *, include_deleted: bool = False) -> ArtifactRecord | None:
+    if job.primary_result_artifact_id:
+        artifact = store.get_artifact(job.id, job.primary_result_artifact_id, include_deleted=include_deleted)
+        if artifact is not None:
+            return artifact
+    return latest_artifact(job.id, "result_file", include_deleted=include_deleted) or latest_artifact(
+        job.id,
+        "result_package",
+        include_deleted=include_deleted,
+    )
+
+
+def result_summary_for_job(job: JobRecord) -> dict[str, object] | None:
+    artifact = None
+    if job.result_summary_artifact_id:
+        artifact = store.get_artifact(job.id, job.result_summary_artifact_id)
+    artifact = artifact or latest_artifact(job.id, "result_summary")
+    if artifact is None or artifact_is_expired(artifact, datetime.now(timezone.utc)):
+        return None
+    try:
+        payload = json.loads(store.read_artifact_record(artifact).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def artifact_download_available(artifact: ArtifactRecord | None) -> bool:
+    return bool(
+        artifact is not None
+        and artifact.deleted_at is None
+        and not artifact_is_expired(artifact, datetime.now(timezone.utc))
+        and store.artifact_exists(artifact)
+        and store.artifact_is_file(artifact)
+    )
+
+
 def file_response_for_artifact(artifact: ArtifactRecord, filename: str | None = None) -> Response:
+    if artifact.deleted_at is not None:
+        raise HTTPException(status_code=410, detail="The requested file has been deleted")
+    if artifact_is_expired(artifact, datetime.now(timezone.utc)):
+        raise HTTPException(status_code=410, detail="The requested file has expired")
     if not store.artifact_exists(artifact):
         raise HTTPException(status_code=404, detail="未找到 Artifact 内容")
     if store.artifact_is_directory(artifact):
         raise HTTPException(status_code=400, detail="下载目录 Artifact 需要使用结果包")
     artifact_path = store.artifact_local_path(artifact)
-    response_filename = filename or store.artifact_filename(artifact)
+    response_filename = filename or artifact.filename
     headers = {"Content-Disposition": content_disposition_attachment(response_filename)}
     if artifact_path is None:
         return Response(
@@ -642,6 +900,38 @@ async def read_upload_content(file: UploadFile) -> bytes:
     return content
 
 
+def input_kind_for_upload(filename: str | None, content_type: str | None) -> InputKind:
+    normalized_name = (filename or "").lower()
+    normalized_type = (content_type or "").lower()
+    archive_suffixes = (".zip", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tbz2")
+    archive_types = {
+        "application/zip",
+        "application/x-tar",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-bzip2",
+    }
+    return "archive" if normalized_name.endswith(archive_suffixes) or normalized_type in archive_types else "single_script"
+
+
+def normalize_directory_upload_path(value: str) -> str:
+    raw = value.replace("\\", "/")
+    if not raw or raw.startswith("/") or "\x00" in raw or len(raw) > 1024:
+        raise HTTPException(status_code=400, detail="Directory upload contains an invalid relative path")
+    parts = raw.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or ":" in parts[0]:
+        raise HTTPException(status_code=400, detail="Directory upload paths must stay within the uploaded folder")
+    normalized = PurePosixPath(*parts)
+    if normalized.is_absolute():
+        raise HTTPException(status_code=400, detail="Directory upload paths must be relative")
+    return normalized.as_posix()
+
+
+def inferred_directory_name(paths: list[str]) -> str:
+    first_parts = {path.split("/", 1)[0] for path in paths if "/" in path}
+    return first_parts.pop() if len(first_parts) == 1 else "uploaded-project"
+
+
 def configured_max_upload_bytes() -> int:
     raw_value = os.getenv(MAX_UPLOAD_BYTES_ENV)
     if raw_value is None or not raw_value.strip():
@@ -650,6 +940,17 @@ def configured_max_upload_bytes() -> int:
         parsed = int(raw_value)
     except ValueError:
         return DEFAULT_MAX_UPLOAD_BYTES
+    return max(1, parsed)
+
+
+def configured_positive_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
     return max(1, parsed)
 
 
@@ -669,8 +970,7 @@ def safe_download_filename(filename: str | None) -> str:
 
 
 def source_filename(source_artifact: ArtifactRecord) -> str:
-    suffix = store.artifact_suffix(source_artifact)
-    return f"rerun-source-input{suffix}" if suffix else "rerun-source-input"
+    return source_artifact.filename
 
 
 def normalize_report_kind(value: str) -> str:
@@ -701,6 +1001,11 @@ def require_job(job_id: str, access: AccessContext, *, minimum_role: ProjectRole
     return job
 
 
+def require_job_owner(job: JobRecord, access: AccessContext) -> None:
+    if access.kind != "user" or job.owner_id != access.subject:
+        raise HTTPException(status_code=403, detail="Only the job owner can access this artifact")
+
+
 def require_project_role(access: AccessContext, project_id: str, minimum_role: ProjectRole) -> None:
     if access.kind == "service" and not access.has_service_role(SERVICE_ROLE_WORKER):
         raise HTTPException(status_code=403, detail="该服务凭据无权访问此 API")
@@ -725,6 +1030,16 @@ def validated_runtime_settings_patch(settings: dict[str, object]) -> dict[str, o
     except ValidationError as error:
         raise HTTPException(status_code=422, detail=error.errors()) from error
     return patch.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+def validated_account_settings(settings: dict[str, object]) -> dict[str, object]:
+    unexpected = set(settings) - {"fileRetentionDays"}
+    if unexpected:
+        raise HTTPException(status_code=422, detail=f"Unsupported account settings: {', '.join(sorted(unexpected))}")
+    raw_days = settings.get("fileRetentionDays", 90)
+    if isinstance(raw_days, bool) or not isinstance(raw_days, int) or not 1 <= raw_days <= 3650:
+        raise HTTPException(status_code=422, detail="fileRetentionDays must be an integer between 1 and 3650")
+    return {"fileRetentionDays": raw_days}
 
 
 def job_config_with_runtime_settings(request: CreateJobRequest) -> dict[str, object]:

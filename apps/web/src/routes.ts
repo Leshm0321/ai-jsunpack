@@ -1,17 +1,18 @@
 export const marketingRoutes = ["/", "/workflow", "/evidence", "/runtime"] as const;
-export const workbenchSections = ["overview", "artifacts", "evidence", "agents", "runtime", "audit"] as const;
+export const workbenchSections = ["result", "overview", "artifacts", "evidence", "agents", "runtime", "audit"] as const;
 export const settingsSections = ["general", "ai", "agents", "security", "validation"] as const;
 
 export type MarketingRoute = (typeof marketingRoutes)[number];
 export type WorkbenchSection = (typeof workbenchSections)[number];
 export type SettingsSection = (typeof settingsSections)[number];
-export type WorkbenchRoute = "/workbench/new" | `/workbench/${string}/${WorkbenchSection}`;
+export type WorkbenchRoute = "/workbench/new" | "/workbench/history" | `/workbench/${string}/${WorkbenchSection}`;
 export type SettingsRoute = `/settings/${SettingsSection}` | `/projects/${string}/settings`;
 export type AppRoute = MarketingRoute | WorkbenchRoute | SettingsRoute;
 
 export type ParsedAppRoute =
   | { kind: "marketing"; path: MarketingRoute }
   | { kind: "workbench-new"; path: "/workbench/new" }
+  | { kind: "workbench-history"; path: "/workbench/history" }
   | { kind: "workbench"; jobId: string; path: WorkbenchRoute; section: WorkbenchSection }
   | { kind: "settings"; path: SettingsRoute; projectId: string | null; section: SettingsSection };
 
@@ -23,6 +24,9 @@ export function toAppRoute(pathname: string): AppRoute {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   if (normalized === "/workbench" || normalized === "/workbench/new") {
     return "/workbench/new";
+  }
+  if (normalized === "/workbench/history") {
+    return "/workbench/history";
   }
   if (marketingRouteSet.has(normalized)) {
     return normalized as MarketingRoute;
@@ -51,6 +55,9 @@ export function parseAppRoute(pathname: string): ParsedAppRoute {
   }
   if (path === "/workbench/new") {
     return { kind: "workbench-new", path };
+  }
+  if (path === "/workbench/history") {
+    return { kind: "workbench-history", path };
   }
 
   const workbenchMatch = path.match(/^\/workbench\/([^/]+)\/([^/]+)$/);
@@ -84,6 +91,6 @@ export function workbenchPath(jobId: string, section: WorkbenchSection): Workben
   return `/workbench/${encodeURIComponent(jobId)}/${section}`;
 }
 
-export function isWorkbenchRoute(route: ParsedAppRoute): route is Extract<ParsedAppRoute, { kind: "workbench" | "workbench-new" }> {
-  return route.kind === "workbench" || route.kind === "workbench-new";
+export function isWorkbenchRoute(route: ParsedAppRoute): route is Extract<ParsedAppRoute, { kind: "workbench" | "workbench-new" | "workbench-history" }> {
+  return route.kind === "workbench" || route.kind === "workbench-new" || route.kind === "workbench-history";
 }

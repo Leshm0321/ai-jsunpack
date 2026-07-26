@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -94,7 +95,11 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(len(uploaded_body["artifacts"]), 1)
         self.assertEqual(uploaded_body["artifacts"][0]["kind"], "source_input")
         self.assertEqual(uploaded_body["artifacts"][0]["size"], len(b"zip-bytes"))
+        self.assertEqual(uploaded_body["artifacts"][0]["filename"], "dist.zip")
         self.assertEqual(uploaded_body["job"]["inputArtifactId"], uploaded_body["artifacts"][0]["id"])
+        self.assertEqual(uploaded_body["job"]["inputName"], "dist.zip")
+        self.assertEqual(uploaded_body["job"]["inputKind"], "archive")
+        self.assertIsNotNone(uploaded_body["job"]["filesExpiresAt"])
         self.assertTrue(Path(uploaded_body["artifacts"][0]["storageUri"]).exists())
 
         fetched = self.client.get(f"/jobs/{job_id}", headers=self.access_headers)
@@ -124,6 +129,221 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(uploaded.status_code, 413)
         self.assertEqual(self.store.list_artifacts(job_id), [])
 
+    def test_directory_upload_preserves_relative_paths_and_rejects_unsafe_or_oversized_inputs(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        )
+        job_id = created.json()["job"]["id"]
+
+        unsafe = self.client.post(
+            f"/jobs/{job_id}/upload-directory",
+            files=[
+                ("files", ("main.js", b"console.log('unsafe')", "text/javascript")),
+                ("paths", (None, "../main.js")),
+            ],
+            headers=self.access_headers,
+        )
+        self.assertEqual(unsafe.status_code, 400)
+        self.assertEqual(self.store.list_artifacts(job_id), [])
+
+        with patch.dict(
+            os.environ,
+            {
+                "AI_JSUNPACK_MAX_UPLOAD_BYTES": "64",
+                "AI_JSUNPACK_MAX_DIRECTORY_FILE_BYTES": "48",
+                "AI_JSUNPACK_MAX_DIRECTORY_FILES": "4",
+            },
+            clear=False,
+        ):
+            uploaded = self.client.post(
+                f"/jobs/{job_id}/upload-directory",
+                files=[
+                    ("files", ("main.js", b"console.log('ok')", "text/javascript")),
+                    ("files", ("index.html", b"<script src='src/main.js'></script>", "text/html")),
+                    ("paths", (None, "sample-project/src/main.js")),
+                    ("paths", (None, "sample-project/index.html")),
+                    ("directoryName", (None, "sample-project")),
+                ],
+                headers=self.access_headers,
+            )
+
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        body = uploaded.json()
+        self.assertEqual(body["job"]["inputKind"], "folder")
+        self.assertEqual(body["job"]["inputName"], "sample-project")
+        artifact = self.store.get_artifact(job_id, body["job"]["inputArtifactId"])
+        self.assertEqual(artifact.filename, "sample-project.zip")
+        with zipfile.ZipFile(BytesIO(self.store.read_artifact_record(artifact))) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                ["sample-project/src/main.js", "sample-project/index.html"],
+            )
+
+        oversized_job = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        ).json()["job"]["id"]
+        with patch.dict(os.environ, {"AI_JSUNPACK_MAX_DIRECTORY_FILE_BYTES": "3"}, clear=False):
+            oversized = self.client.post(
+                f"/jobs/{oversized_job}/upload-directory",
+                files=[
+                    ("files", ("main.js", b"four", "text/javascript")),
+                    ("paths", (None, "main.js")),
+                ],
+                headers=self.access_headers,
+            )
+        self.assertEqual(oversized.status_code, 413)
+
+    def test_account_history_is_owner_scoped_project_filtered_and_paginated(self):
+        first = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        ).json()["job"]
+        second = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        ).json()["job"]
+        self.store.update_status(first["id"], "completed")
+        self.store.create_job(api_main.CreateJobRequest(project_id="proj", owner_id="someone-else"))
+        self.store.create_job(api_main.CreateJobRequest(project_id="private-proj", owner_id="owner"))
+
+        page = self.client.get("/jobs?limit=1&offset=0", headers=self.access_headers)
+        completed = self.client.get("/jobs?projectId=proj&status=completed", headers=self.access_headers)
+        forbidden = self.client.get("/jobs?projectId=private-proj", headers=self.access_headers)
+
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertEqual(page.json()["total"], 2)
+        self.assertEqual(len(page.json()["items"]), 1)
+        self.assertEqual(page.json()["limit"], 1)
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual([item["job"]["id"] for item in completed.json()["items"]], [first["id"]])
+        self.assertNotEqual(page.json()["items"][0]["job"]["ownerId"], "someone-else")
+        self.assertIn(second["id"], {item["job"]["id"] for item in self.client.get("/jobs", headers=self.access_headers).json()["items"]})
+        self.assertEqual(forbidden.status_code, 403)
+
+    def test_result_response_download_expiration_and_soft_delete(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        )
+        job_id = created.json()["job"]["id"]
+        source_artifact = self.store.write_artifact(
+            job_id,
+            kind="source_input",
+            stage="intake",
+            filename="secret-input.js",
+            content=b"const secret = true;",
+            content_type="text/javascript",
+            producer="test.api",
+        )
+        result_artifact = self.store.write_artifact(
+            job_id,
+            kind="result_file",
+            stage="packaging",
+            filename="transformed.js",
+            content=b"const readable = true;",
+            content_type="text/javascript",
+            producer="test.api",
+        )
+        summary_payload = {
+            "overview": "The input was deobfuscated.",
+            "processingScope": ["src/input.js"],
+            "majorChanges": ["renamed symbols"],
+            "validation": {"status": "pass"},
+            "review": {"status": "pass"},
+            "risks": [],
+            "limitations": [],
+            "fallbackReason": None,
+        }
+        summary_artifact = self.store.write_artifact(
+            job_id,
+            kind="result_summary",
+            stage="packaging",
+            filename="result-summary.json",
+            content=json.dumps(summary_payload).encode("utf-8"),
+            content_type="application/json",
+            producer="test.api",
+        )
+        self.store.update_job_delivery(
+            job_id,
+            delivery_kind="single_file",
+            primary_result_artifact_id=result_artifact.id,
+            result_summary_artifact_id=summary_artifact.id,
+        )
+
+        result = self.client.get(f"/jobs/{job_id}/result", headers=self.access_headers)
+        downloaded = self.client.get(f"/jobs/{job_id}/result/download", headers=self.access_headers)
+        same_project_other = self.auth_headers("other-owner", {"proj": "owner"})
+        other_job_view = self.client.get(f"/jobs/{job_id}", headers=same_project_other)
+        other_result = self.client.get(f"/jobs/{job_id}/result", headers=same_project_other)
+        other_download = self.client.get(f"/jobs/{job_id}/result/download", headers=same_project_other)
+        other_result_artifact = self.client.get(
+            f"/jobs/{job_id}/artifacts/{result_artifact.id}/download",
+            headers=same_project_other,
+        )
+        other_summary_artifact = self.client.get(
+            f"/jobs/{job_id}/artifacts/{summary_artifact.id}/download",
+            headers=same_project_other,
+        )
+        other_source_artifact = self.client.get(
+            f"/jobs/{job_id}/artifacts/{source_artifact.id}/download",
+            headers=same_project_other,
+        )
+        history = self.client.get("/jobs", headers=self.access_headers)
+
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["primaryResult"]["id"], result_artifact.id)
+        self.assertEqual(result.json()["summary"], summary_payload)
+        self.assertEqual(result.json()["downloadUrl"], f"/jobs/{job_id}/result/download")
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.content, b"const readable = true;")
+        self.assertIn('filename="transformed.js"', downloaded.headers["content-disposition"])
+        self.assertEqual(other_job_view.status_code, 200, other_job_view.text)
+        self.assertEqual(other_result.status_code, 403)
+        self.assertEqual(other_download.status_code, 403)
+        self.assertEqual(other_result_artifact.status_code, 403)
+        self.assertEqual(other_summary_artifact.status_code, 403)
+        self.assertEqual(other_source_artifact.status_code, 403)
+        self.assertEqual(history.json()["items"][0]["primaryResult"]["filename"], "transformed.js")
+
+        deleted = self.client.delete(f"/jobs/{job_id}", headers=self.access_headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertIsNotNone(deleted.json()["deletedAt"])
+        self.assertFalse(Path(result_artifact.storage_uri).exists())
+        self.assertEqual(self.client.get(f"/jobs/{job_id}", headers=self.access_headers).status_code, 404)
+        self.assertEqual(self.client.get("/jobs", headers=self.access_headers).json()["total"], 0)
+
+        expired_job_id = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        ).json()["job"]["id"]
+        expired_artifact = self.store.write_artifact(
+            expired_job_id,
+            kind="result_file",
+            stage="packaging",
+            filename="expired.js",
+            content=b"expired",
+            content_type="text/javascript",
+            producer="test.api",
+            expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        )
+        self.store.update_job_delivery(
+            expired_job_id,
+            delivery_kind="single_file",
+            primary_result_artifact_id=expired_artifact.id,
+        )
+        expired_result = self.client.get(f"/jobs/{expired_job_id}/result", headers=self.access_headers)
+        expired_download = self.client.get(f"/jobs/{expired_job_id}/result/download", headers=self.access_headers)
+        self.assertIsNone(expired_result.json()["downloadUrl"])
+        self.assertEqual(expired_download.status_code, 410)
+
     def test_missing_job_returns_404(self):
         fetched = self.client.get("/jobs/job_missing", headers=self.access_headers)
         uploaded = self.client.post(
@@ -134,6 +354,32 @@ class ApiEndpointTest(unittest.TestCase):
 
         self.assertEqual(fetched.status_code, 404)
         self.assertEqual(uploaded.status_code, 404)
+
+    def test_delete_job_reports_artifact_delete_failures(self):
+        created = self.client.post(
+            "/jobs",
+            json={"projectId": "proj", "ownerId": "owner"},
+            headers=self.access_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["job"]["id"]
+        artifact = self.store.write_artifact(
+            job_id,
+            kind="result_file",
+            stage="packaging",
+            filename="result.js",
+            content=b"result",
+            content_type="text/javascript",
+            producer="test.api",
+        )
+
+        with patch.object(self.store.artifact_store, "delete", side_effect=OSError("delete failed")):
+            deleted = self.client.delete(f"/jobs/{job_id}", headers=self.access_headers)
+
+        self.assertEqual(deleted.status_code, 500)
+        self.assertEqual(deleted.json()["detail"]["message"], "Failed to delete one or more job artifacts")
+        self.assertIn(artifact.id, deleted.json()["detail"]["errors"][0])
+        self.assertEqual(self.client.get(f"/jobs/{job_id}", headers=self.access_headers).status_code, 200)
 
     def test_runtime_validation_report_and_artifact_download_endpoints(self):
         created = self.client.post("/jobs", json={"projectId": "proj", "ownerId": "owner"}, headers=self.access_headers)
@@ -463,6 +709,14 @@ class ApiEndpointTest(unittest.TestCase):
             f"/jobs/{job_id}/reports/result-package",
             headers=self.access_headers,
         )
+        same_project_other = self.auth_headers("other-owner", {"proj": "owner"})
+        other_reports = self.client.get(f"/jobs/{job_id}/reports", headers=same_project_other)
+        other_audit_download = self.client.get(f"/jobs/{job_id}/reports/audit", headers=same_project_other)
+        other_package_download = self.client.get(f"/jobs/{job_id}/result-package", headers=same_project_other)
+        other_package_artifact_download = self.client.get(
+            f"/jobs/{job_id}/artifacts/{package_artifact.id}/download",
+            headers=same_project_other,
+        )
         rerun = self.client.post(f"/jobs/{job_id}/rerun", headers=self.access_headers)
 
         self.assertEqual(audit_download.status_code, 200)
@@ -476,6 +730,10 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(generic_evidence_index_download.status_code, 200)
         self.assertEqual(unsupported_report_list.status_code, 400)
         self.assertEqual(unsupported_report_download.status_code, 400)
+        self.assertEqual(other_reports.status_code, 200)
+        self.assertEqual(other_audit_download.status_code, 403)
+        self.assertEqual(other_package_download.status_code, 403)
+        self.assertEqual(other_package_artifact_download.status_code, 403)
         self.assertEqual(audit_download.text, "# Audit\n")
         self.assertEqual(generic_audit_download.text, "# Audit\n")
         self.assertEqual(package_download.content, self.store.read_artifact_record(package_artifact))
@@ -532,9 +790,7 @@ class ApiEndpointTest(unittest.TestCase):
         self.assertEqual(downloaded.headers["content-type"], "text/markdown; charset=utf-8")
         disposition = downloaded.headers["content-disposition"]
         self.assertIn("attachment;", disposition)
-        self.assertIn('filename="artifact_', disposition)
         self.assertIn('bad__name__x=.md"', disposition)
-        self.assertIn("filename*=UTF-8''artifact_", disposition)
         self.assertIn("bad__name%22%3Bx%3D.md", disposition)
         self.assertNotIn("\r", disposition)
         self.assertNotIn("\n", disposition)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -229,15 +230,22 @@ class WorkerQueueRunner:
 
     @contextmanager
     def _source_input_path(self, artifact: ArtifactRecord) -> Iterator[Path]:
-        local_path = self.store.artifact_local_path(artifact)
-        if local_path is not None:
-            yield local_path
-            return
-
         with tempfile.TemporaryDirectory(prefix="ai-jsunpack-source-input-") as temp_dir:
-            filename = self.store.artifact_filename(artifact) or "source-input.bin"
+            filename = getattr(artifact, "filename", None) or self.store.artifact_filename(artifact) or "source-input.bin"
+            physical_prefix = f"{artifact.id}-"
+            if filename.startswith(physical_prefix):
+                filename = filename.removeprefix(physical_prefix)
+            filename = Path(filename).name or "source-input.bin"
             materialized = Path(temp_dir) / filename
-            materialized.write_bytes(self.store.read_artifact_record(artifact))
+            local_path = self.store.artifact_local_path(artifact)
+            if local_path is not None and local_path.is_dir():
+                shutil.copytree(local_path, materialized)
+            elif local_path is not None:
+                shutil.copy2(local_path, materialized)
+            elif self.store.artifact_is_directory(artifact):
+                self.store.materialize_artifact_directory(artifact, materialized)
+            else:
+                materialized.write_bytes(self.store.read_artifact_record(artifact))
             yield materialized
 
     def _ops_metrics_snapshot(

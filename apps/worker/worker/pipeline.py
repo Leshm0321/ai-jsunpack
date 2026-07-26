@@ -450,6 +450,13 @@ class WorkerPipeline:
             parent_artifact_ids=context.packaging_parent_ids,
         )
         context.run.transition("packaging", packaging_result.message)
+        if packaging_result.primary_result_artifact is not None:
+            context.store.update_job_delivery(
+                context.job_id,
+                delivery_kind=packaging_result.delivery_kind,
+                primary_result_artifact_id=packaging_result.primary_result_artifact.id,
+                result_summary_artifact_id=packaging_result.result_summary_artifact.id,
+            )
         context.store.update_status(
             context.job_id,
             packaging_result.final_status,

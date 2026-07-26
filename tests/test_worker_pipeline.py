@@ -203,7 +203,12 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn("audit_report", artifact_by_kind)
                 self.assertIn("html_report", artifact_by_kind)
                 self.assertIn("evidence_index", artifact_by_kind)
+                self.assertIn("evidence_package", artifact_by_kind)
                 self.assertIn("result_package", artifact_by_kind)
+                self.assertIn("result_summary", artifact_by_kind)
+                self.assertEqual(persisted_job.delivery_kind, "project_package")
+                self.assertEqual(persisted_job.primary_result_artifact_id, artifact_by_kind["result_package"].id)
+                self.assertEqual(persisted_job.result_summary_artifact_id, artifact_by_kind["result_summary"].id)
                 inference_artifacts = [artifact for artifact in artifacts if artifact.kind == "inference_record"]
                 build_log_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_log"]
                 build_artifacts = [artifact for artifact in artifacts if artifact.kind == "build_artifact"]
@@ -427,7 +432,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", package_paths)
                 report_sections = {item["anchor"]: item for item in evidence_index_payload["reportSections"]}
                 self.assertIn("review-fix-convergence", report_sections)
-                with zipfile.ZipFile(artifact_by_kind["result_package"].storage_uri) as archive:
+                with zipfile.ZipFile(artifact_by_kind["evidence_package"].storage_uri) as archive:
                     names = set(archive.namelist())
                     review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 self.assertIn("audit-report.md", names)
@@ -452,9 +457,13 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(f"evidence/runtime_screenshot/{artifact_by_kind['runtime_screenshot'].id}.png", names)
                 self.assertIn(f"evidence/runtime_comparison/{artifact_by_kind['runtime_comparison'].id}.json", names)
                 self.assertIn("generated_project/src/main.ts", names)
-                self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
-                self.assertIn(artifact_by_kind["html_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
-                self.assertIn(artifact_by_kind["evidence_index"].id, artifact_by_kind["result_package"].parent_artifact_ids)
+                self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["evidence_package"].parent_artifact_ids)
+                self.assertIn(artifact_by_kind["html_report"].id, artifact_by_kind["evidence_package"].parent_artifact_ids)
+                self.assertIn(artifact_by_kind["evidence_index"].id, artifact_by_kind["evidence_package"].parent_artifact_ids)
+                with zipfile.ZipFile(artifact_by_kind["result_package"].storage_uri) as archive:
+                    user_names = set(archive.namelist())
+                self.assertNotIn("audit.json", user_names)
+                self.assertFalse(any(name.startswith("evidence/") or name.startswith("src/analysis/") for name in user_names))
             finally:
                 store.close()
 
@@ -534,7 +543,13 @@ class WorkerPipelineTest(unittest.TestCase):
                 )
                 self.assertTrue((generated_project_root / "public" / "original" / "agentApi.js").exists())
                 self.assertTrue((generated_project_root / "public" / "original" / "index.html").exists())
-                self.assertIn("result_package", artifact_by_kind)
+                self.assertIn("result_file", artifact_by_kind)
+                self.assertIn("result_summary", artifact_by_kind)
+                self.assertIn("evidence_package", artifact_by_kind)
+                self.assertEqual(persisted_job.delivery_kind, "single_file")
+                self.assertEqual(artifact_by_kind["result_file"].filename, "agentApi.js")
+                self.assertEqual(persisted_job.primary_result_artifact_id, artifact_by_kind["result_file"].id)
+                self.assertEqual(persisted_job.result_summary_artifact_id, artifact_by_kind["result_summary"].id)
             finally:
                 store.close()
 
@@ -656,7 +671,8 @@ class WorkerPipelineTest(unittest.TestCase):
                 generated_projects = [artifact for artifact in artifacts if artifact.kind == "generated_project"]
                 audit_report = next(artifact for artifact in artifacts if artifact.kind == "audit_report")
                 result_package = next(artifact for artifact in artifacts if artifact.kind == "result_package")
-                with zipfile.ZipFile(result_package.storage_uri) as archive:
+                evidence_package = next(artifact for artifact in artifacts if artifact.kind == "evidence_package")
+                with zipfile.ZipFile(evidence_package.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
                     review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
 
@@ -716,9 +732,11 @@ class WorkerPipelineTest(unittest.TestCase):
                     review_fix_summary["nextSteps"],
                     ["无需用户操作；请随结果包保留 Review/Fix 摘要以供审计。"],
                 )
-                self.assertIn(audit_report.id, result_package.parent_artifact_ids)
+                self.assertIn(audit_report.id, evidence_package.parent_artifact_ids)
+                self.assertNotIn(audit_report.id, result_package.parent_artifact_ids)
                 with zipfile.ZipFile(result_package.storage_uri) as archive:
-                    repaired_index = archive.read("generated_project/index.html").decode("utf-8")
+                    repaired_index = archive.read("index.html").decode("utf-8")
+                    self.assertNotIn("audit.json", archive.namelist())
                 self.assertIn("Original App", repaired_index)
             finally:
                 store.close()
@@ -769,9 +787,9 @@ class WorkerPipelineTest(unittest.TestCase):
                     if artifact.kind == "runtime_trace"
                 ]
                 generated_projects = [artifact for artifact in artifacts if artifact.kind == "generated_project"]
-                result_package = next(artifact for artifact in artifacts if artifact.kind == "result_package")
+                evidence_package = next(artifact for artifact in artifacts if artifact.kind == "evidence_package")
                 evidence_index = next(artifact for artifact in artifacts if artifact.kind == "evidence_index")
-                with zipfile.ZipFile(result_package.storage_uri) as archive:
+                with zipfile.ZipFile(evidence_package.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
                     review_fix_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 evidence_index_payload = json.loads(Path(evidence_index.storage_uri).read_text(encoding="utf-8"))

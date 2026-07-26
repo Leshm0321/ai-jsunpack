@@ -56,6 +56,8 @@ class SharedContractAlignmentTest(unittest.TestCase):
         self.assertEqual(list(get_args(models.JobStatus)), expected["jobStatus"])
         self.assertEqual(list(get_args(models.CloudMode)), expected["cloudMode"])
         self.assertEqual(list(get_args(models.ArtifactKind)), expected["artifactKind"])
+        self.assertEqual(list(get_args(models.InputKind)), expected["inputKind"])
+        self.assertEqual(list(get_args(models.DeliveryKind)), expected["deliveryKind"])
         self.assertEqual(list(get_args(models.FailureClass)), expected["failureClass"])
         self.assertEqual(list(get_args(models.SensitivityClass)), expected["sensitivityClass"])
         self.assertEqual(list(get_args(models.RetentionClass)), expected["retentionClass"])

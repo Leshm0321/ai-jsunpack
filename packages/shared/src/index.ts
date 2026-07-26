@@ -53,6 +53,9 @@ export const ARTIFACT_KINDS = [
   "runtime_diagnosis",
   "report_section",
   "ops_alert_event",
+  "result_file",
+  "result_summary",
+  "evidence_package",
   "result_package",
   "audit_report",
   "html_report",
@@ -60,6 +63,12 @@ export const ARTIFACT_KINDS = [
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
+
+export const INPUT_KINDS = ["single_script", "archive", "folder"] as const;
+export type InputKind = (typeof INPUT_KINDS)[number];
+
+export const DELIVERY_KINDS = ["single_file", "project_package"] as const;
+export type DeliveryKind = (typeof DELIVERY_KINDS)[number];
 
 export const FAILURE_CLASSES = [
   "none",
@@ -117,6 +126,7 @@ export interface Artifact {
   hash: string;
   size: number;
   storageUri: string;
+  filename: string;
   parentArtifactIds: string[];
   producer: string;
   sensitivityClass: SensitivityClass;
@@ -133,6 +143,13 @@ export interface Job {
   ownerId: string;
   projectId: string;
   inputArtifactId?: string;
+  inputName?: string | null;
+  inputKind?: InputKind | null;
+  deliveryKind?: DeliveryKind | null;
+  primaryResultArtifactId?: string | null;
+  resultSummaryArtifactId?: string | null;
+  filesExpiresAt?: string | null;
+  deletedAt?: string | null;
   config: Record<string, unknown>;
   cloudMode: CloudMode;
   reviewAttempt: number;
@@ -1299,6 +1316,8 @@ export const SHARED_CONTRACT_ENUMS = {
   jobStatus: JOB_STATUSES,
   cloudMode: CLOUD_MODES,
   artifactKind: ARTIFACT_KINDS,
+  inputKind: INPUT_KINDS,
+  deliveryKind: DELIVERY_KINDS,
   failureClass: FAILURE_CLASSES,
   sensitivityClass: SENSITIVITY_CLASSES,
   retentionClass: RETENTION_CLASSES,
@@ -1338,6 +1357,7 @@ export const SHARED_JSON_SCHEMAS = {
       hash: stringSchema,
       size: { type: "integer", minimum: 0 },
       storageUri: stringSchema,
+      filename: stringSchema,
       parentArtifactIds: stringArraySchema,
       producer: stringSchema,
       sensitivityClass: { type: "string", enum: SENSITIVITY_CLASSES },
@@ -1358,6 +1378,7 @@ export const SHARED_JSON_SCHEMAS = {
       "hash",
       "size",
       "storageUri",
+      "filename",
       "parentArtifactIds",
       "producer",
       "sensitivityClass",
@@ -1439,6 +1460,13 @@ export const SHARED_JSON_SCHEMAS = {
       ownerId: stringSchema,
       projectId: stringSchema,
       inputArtifactId: stringSchema,
+      inputName: stringSchema,
+      inputKind: { type: "string", enum: INPUT_KINDS },
+      deliveryKind: { type: "string", enum: DELIVERY_KINDS },
+      primaryResultArtifactId: stringSchema,
+      resultSummaryArtifactId: stringSchema,
+      filesExpiresAt: { type: "string", format: "date-time" },
+      deletedAt: { type: "string", format: "date-time" },
       config: { type: "object", additionalProperties: true },
       cloudMode: { type: "string", enum: CLOUD_MODES },
       reviewAttempt: { type: "integer", minimum: 0 },
@@ -2132,6 +2160,7 @@ export const EXAMPLE_ARTIFACT = {
   hash: "sha256:contract-fixture",
   size: 128,
   storageUri: "file://artifacts/job_contract_example/input-inventory.json",
+  filename: "input-inventory.json",
   parentArtifactIds: [],
   producer: "contract.test",
   sensitivityClass: "source_sensitive",
@@ -2148,6 +2177,13 @@ export const EXAMPLE_JOB = {
   ownerId: "local-user",
   projectId: "default",
   inputArtifactId: EXAMPLE_ARTIFACT.id,
+  inputName: "input.js",
+  inputKind: "single_script",
+  deliveryKind: null,
+  primaryResultArtifactId: null,
+  resultSummaryArtifactId: null,
+  filesExpiresAt: "2026-09-12T00:00:00.000Z",
+  deletedAt: null,
   config: {
     fixture: true
   },

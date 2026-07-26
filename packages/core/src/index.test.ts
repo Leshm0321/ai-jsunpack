@@ -547,8 +547,10 @@ test("writeProject 输出可构建的生成项目外壳", async () => {
     const result = await writeProject(plan, { inputPath: root, outputDir });
     const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
       kind: string;
+      sourceKind: string;
       copiedSourceFiles: string[];
       transformedSourceFiles: string[];
+      sourceTransformMap: Record<string, string>;
       generatedModuleFiles: string[];
       entrypointFiles: string[];
       typeDefinitionFiles: string[];
@@ -558,8 +560,10 @@ test("writeProject 输出可构建的生成项目外壳", async () => {
 
     assert.equal(result.projectPath, outputDir);
     assert.equal(manifest.kind, "generated_project");
+    assert.equal(manifest.sourceKind, "folder");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
     assert.ok(manifest.transformedSourceFiles.includes("src/transformed/assets/app.js"));
+    assert.equal(manifest.sourceTransformMap["assets/app.js"], "src/transformed/assets/app.js");
     assert.ok(manifest.generatedModuleFiles.includes("src/modules/module-index.ts"));
     assert.ok(manifest.entrypointFiles.includes("src/entrypoints/reconstruction-entry.ts"));
     assert.ok(manifest.typeDefinitionFiles.includes("src/types/reconstruction.d.ts"));
@@ -609,11 +613,15 @@ test("writeProject 接受归档输入并复制解压后的源文件", async () =
     const outputDir = path.join(root, "generated_project");
     const result = await writeProject(plan, { inputPath: archivePath, outputDir });
     const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
+      sourceKind: string;
       copiedSourceFiles: string[];
+      sourceTransformMap: Record<string, string>;
     };
 
     assert.equal(result.projectPath, outputDir);
+    assert.equal(manifest.sourceKind, "archive");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/assets/app.js"));
+    assert.equal(manifest.sourceTransformMap["assets/app.js"], "src/transformed/assets/app.js");
     assert.equal(
       await readFile(path.join(outputDir, "public", "original", "assets", "app.js"), "utf8"),
       "function archivedBoot(){return 1} export { archivedBoot };"
@@ -636,14 +644,18 @@ test("writeProject 接受单个 JavaScript 输入并复制封装后的静态源�
     const outputDir = path.join(root, "generated_project");
     const result = await writeProject(plan, { inputPath, outputDir });
     const manifest = JSON.parse(await readFile(path.join(outputDir, "src", "reconstruction-manifest.json"), "utf8")) as {
+      sourceKind: string;
       copiedSourceFiles: string[];
+      sourceTransformMap: Record<string, string>;
       limitations: string[];
     };
 
     assert.equal(result.projectPath, outputDir);
+    assert.equal(manifest.sourceKind, "single_script");
     assert.equal(plan.entryHtml, "index.html");
     assert.ok(manifest.copiedSourceFiles.includes("public/original/agentApi.js"));
     assert.ok(manifest.copiedSourceFiles.includes("public/original/index.html"));
+    assert.equal(manifest.sourceTransformMap["agentApi.js"], "src/transformed/agentApi.js");
     assert.ok(manifest.limitations.some((limitation) => limitation.includes("single_script 文件已封装")));
     assert.equal(
       await readFile(path.join(outputDir, "public", "original", "agentApi.js"), "utf8"),

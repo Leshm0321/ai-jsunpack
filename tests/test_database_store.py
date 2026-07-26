@@ -22,7 +22,7 @@ from apps.api.app.models import (
     OpsHeartbeatRequest,
     RetentionCleanupRequest,
 )
-from apps.api.app.store import create_artifact_store, create_store
+from apps.api.app.store import ArtifactDeletionError, create_artifact_store, create_store
 
 
 class FakeS3Error(Exception):
@@ -142,6 +142,7 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertEqual(Path(artifact.storage_uri).read_bytes(), b'{"ok":true}')
                 self.assertEqual(Path(artifact.storage_uri).parent, artifact_root / job.id)
                 self.assertTrue(Path(artifact.storage_uri).name.endswith("-input.json"))
+                self.assertEqual(artifact.filename, "input.json")
 
                 reopened = create_store(database_url=database_url, artifact_root=artifact_root)
                 persisted_job = reopened.get_job(job.id)
@@ -772,7 +773,7 @@ class DatabaseStoreTest(unittest.TestCase):
                 )
 
                 self.assertEqual(source.retention_class, "archive")
-                self.assertIsNone(source.expires_at)
+                self.assertEqual(source.expires_at, job.files_expires_at)
                 self.assertEqual(log.retention_class, "ephemeral")
                 self.assertIsNotNone(log.expires_at)
 
@@ -888,6 +889,320 @@ class DatabaseStoreTest(unittest.TestCase):
                 self.assertEqual(result.deleted_count, 1)
                 self.assertFalse(object_client.objects)
                 self.assertIsNone(store.get_artifact(job.id, artifact.id))
+            finally:
+                store.close()
+
+    def test_product_columns_migrate_legacy_rows_and_recover_logical_filename(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_path = root / "metadata.db"
+            artifact_root = root / "artifacts"
+            job_dir = artifact_root / "job_legacy"
+            job_dir.mkdir(parents=True)
+            storage_path = job_dir / "artifact_legacy-input.js"
+            storage_path.write_bytes(b"console.log('legacy')")
+            timestamp = "2026-07-01T00:00:00+00:00"
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    """
+                    create table jobs (
+                        id varchar primary key, status varchar not null, owner_id varchar not null,
+                        project_id varchar not null, input_artifact_id varchar, config json not null,
+                        cloud_mode varchar not null, review_attempt integer not null, worker_lease json,
+                        failure_class varchar not null, failure_reason varchar, created_at varchar not null,
+                        updated_at varchar not null
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    create table artifacts (
+                        id varchar primary key, job_id varchar not null, kind varchar not null,
+                        stage varchar not null, attempt integer not null, schema_version varchar not null,
+                        content_type varchar not null, hash varchar not null, size integer not null,
+                        storage_uri varchar not null, parent_artifact_ids json not null, producer varchar not null,
+                        sensitivity_class varchar not null, retention_class varchar not null, created_at varchar not null
+                    )
+                    """
+                )
+                connection.execute(
+                    "insert into jobs values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "job_legacy",
+                        "intake",
+                        "owner",
+                        "proj",
+                        "artifact_legacy",
+                        "{}",
+                        "local_only",
+                        0,
+                        None,
+                        "none",
+                        None,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "insert into artifacts values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "artifact_legacy",
+                        "job_legacy",
+                        "source_input",
+                        "intake",
+                        0,
+                        "legacy",
+                        "text/javascript",
+                        "legacy-hash",
+                        storage_path.stat().st_size,
+                        str(storage_path),
+                        "[]",
+                        "legacy",
+                        "source_sensitive",
+                        "archive",
+                        timestamp,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = create_store(
+                database_url=f"sqlite:///{database_path.as_posix()}",
+                artifact_root=artifact_root,
+            )
+            try:
+                job = store.get_job("job_legacy")
+                artifact = store.get_artifact("job_legacy", "artifact_legacy")
+
+                self.assertEqual(job.run_attempt, 0)
+                self.assertIsNone(job.input_name)
+                self.assertIsNone(job.delivery_kind)
+                self.assertIsNone(job.deleted_at)
+                self.assertEqual(artifact.filename, "input.js")
+                self.assertIsNone(artifact.expires_at)
+            finally:
+                store.close()
+
+    def test_job_listing_delivery_metadata_and_global_expiration_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                store.write_settings_revision(
+                    "account",
+                    {"fileRetentionDays": 14},
+                    scope_id="owner",
+                    actor_id="owner",
+                    reason="test retention",
+                    expected_revision=0,
+                )
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.update_job_input_metadata(job.id, input_name="input.js", input_kind="single_script")
+                result = store.write_artifact(
+                    job.id,
+                    kind="result_file",
+                    stage="packaging",
+                    filename="readable.js",
+                    content=b"readable",
+                    content_type="text/javascript",
+                    producer="test.database_store",
+                    expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                )
+                summary = store.write_artifact(
+                    job.id,
+                    kind="result_summary",
+                    stage="packaging",
+                    filename="summary.json",
+                    content=b"{}",
+                    content_type="application/json",
+                    producer="test.database_store",
+                )
+                delivered = store.update_job_delivery(
+                    job.id,
+                    delivery_kind="single_file",
+                    primary_result_artifact_id=result.id,
+                    result_summary_artifact_id=summary.id,
+                )
+                listed, total = store.list_jobs(owner_id="owner", project_ids=["proj"], limit=10, offset=0)
+
+                self.assertEqual(total, 1)
+                self.assertEqual(listed[0].input_name, "input.js")
+                self.assertEqual(delivered.primary_result_artifact_id, result.id)
+                self.assertEqual((datetime.fromisoformat(job.files_expires_at) - datetime.fromisoformat(job.created_at)).days, 14)
+                self.assertEqual(store.cleanup_expired_artifacts(), 1)
+                self.assertIsNone(store.get_artifact(job.id, result.id))
+                self.assertIsNotNone(store.get_artifact(job.id, summary.id))
+
+                deleted = store.soft_delete_job(job.id)
+                self.assertIsNotNone(deleted.deleted_at)
+                self.assertIsNone(store.get_job(job.id))
+                self.assertIsNotNone(store.get_job(job.id, include_deleted=True))
+            finally:
+                store.close()
+
+    def test_global_expiration_cleanup_persists_successes_and_logs_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+                failed = store.write_artifact(
+                    job.id,
+                    kind="build_log",
+                    stage="building",
+                    filename="failed.log",
+                    content=b"failed",
+                    content_type="text/plain",
+                    producer="test.database_store",
+                    expires_at=expired_at,
+                )
+                deleted = store.write_artifact(
+                    job.id,
+                    kind="build_log",
+                    stage="building",
+                    filename="deleted.log",
+                    content=b"deleted",
+                    content_type="text/plain",
+                    producer="test.database_store",
+                    expires_at=expired_at,
+                )
+                original_delete = store.artifact_store.delete
+
+                def delete_with_one_failure(storage_uri: str) -> None:
+                    if storage_uri == failed.storage_uri:
+                        raise OSError("delete failed")
+                    original_delete(storage_uri)
+
+                with patch.object(store.artifact_store, "delete", side_effect=delete_with_one_failure):
+                    with self.assertLogs("apps.api.app.store", level="WARNING") as logs:
+                        deleted_count = store.cleanup_expired_artifacts()
+
+                self.assertEqual(deleted_count, 1)
+                self.assertIn(failed.id, "\n".join(logs.output))
+                self.assertIsNotNone(store.get_artifact(job.id, failed.id))
+                self.assertIsNone(store.get_artifact(job.id, deleted.id))
+                self.assertTrue(Path(failed.storage_uri).exists())
+                self.assertFalse(Path(deleted.storage_uri).exists())
+            finally:
+                store.close()
+
+    def test_soft_delete_job_persists_artifact_successes_and_reports_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                failed = store.write_artifact(
+                    job.id,
+                    kind="build_log",
+                    stage="building",
+                    filename="failed.log",
+                    content=b"failed",
+                    content_type="text/plain",
+                    producer="test.database_store",
+                )
+                deleted = store.write_artifact(
+                    job.id,
+                    kind="result_file",
+                    stage="packaging",
+                    filename="deleted.js",
+                    content=b"deleted",
+                    content_type="text/javascript",
+                    producer="test.database_store",
+                )
+                original_delete = store.artifact_store.delete
+
+                def delete_with_one_failure(storage_uri: str) -> None:
+                    if storage_uri == failed.storage_uri:
+                        raise OSError("delete failed")
+                    original_delete(storage_uri)
+
+                with patch.object(store.artifact_store, "delete", side_effect=delete_with_one_failure):
+                    with self.assertRaises(ArtifactDeletionError) as error:
+                        store.soft_delete_job(job.id)
+
+                self.assertIn(failed.id, error.exception.errors[0])
+                self.assertIsNotNone(store.get_job(job.id))
+                self.assertIsNotNone(store.get_artifact(job.id, failed.id))
+                self.assertIsNone(store.get_artifact(job.id, deleted.id))
+                self.assertTrue(Path(failed.storage_uri).exists())
+                self.assertFalse(Path(deleted.storage_uri).exists())
+            finally:
+                store.close()
+
+    def test_artifact_registration_cleans_storage_when_job_is_deleted_during_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            source_path = root / "generated.js"
+            source_path.write_text("const generated = true;", encoding="utf-8")
+            try:
+                for registration_kind in ("bytes", "path"):
+                    with self.subTest(registration_kind=registration_kind):
+                        job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                        stored_uris: list[str] = []
+
+                        if registration_kind == "bytes":
+                            original_write = store.artifact_store.write_bytes
+
+                            def write_then_delete(**kwargs):
+                                stored = original_write(**kwargs)
+                                stored_uris.append(stored.storage_uri)
+                                store.soft_delete_job(job.id)
+                                return stored
+
+                            with patch.object(store.artifact_store, "write_bytes", side_effect=write_then_delete):
+                                with self.assertRaises(KeyError):
+                                    store.write_artifact(
+                                        job.id,
+                                        kind="build_log",
+                                        stage="building",
+                                        filename="build.log",
+                                        content=b"build",
+                                        content_type="text/plain",
+                                        producer="test.database_store",
+                                    )
+                        else:
+                            original_copy = store.artifact_store.copy_path
+
+                            def copy_then_delete(**kwargs):
+                                stored = original_copy(**kwargs)
+                                stored_uris.append(stored.storage_uri)
+                                store.soft_delete_job(job.id)
+                                return stored
+
+                            with patch.object(store.artifact_store, "copy_path", side_effect=copy_then_delete):
+                                with self.assertRaises(KeyError):
+                                    store.register_artifact_path(
+                                        job.id,
+                                        kind="generated_project",
+                                        stage="reconstructing",
+                                        filename="generated.js",
+                                        source_path=source_path,
+                                        content_type="text/javascript",
+                                        producer="test.database_store",
+                                    )
+
+                        self.assertEqual(len(stored_uris), 1)
+                        self.assertFalse(Path(stored_uris[0]).exists())
+                        self.assertEqual(store.list_artifacts(job.id, include_deleted=True), [])
+                        self.assertIsNotNone(store.get_job(job.id, include_deleted=True).deleted_at)
             finally:
                 store.close()
 

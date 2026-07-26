@@ -7,10 +7,346 @@ from pathlib import Path
 from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
 from apps.api.app.models import CreateJobRequest, OpsAlert, OpsAlertDelivery, OpsAlertEvent, OpsAlertRule
 from apps.api.app.store import artifacts_table, create_store
+from apps.worker.worker.delivery import DeliveryError, DeliveryPublisher
 from apps.worker.worker.packaging import PackagingRunner
 
 
 class PackagingRunnerTest(unittest.TestCase):
+    def test_delivery_publishes_standalone_single_script_as_result_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                source = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="rerun-source-input.js",
+                    content=b"const original = 1;",
+                    content_type="text/javascript",
+                    producer="test",
+                )
+                job = store.update_job_input_metadata(
+                    job.id,
+                    input_name="rerun-source-input.js",
+                    input_kind="single_script",
+                )
+                project = self._generated_project(
+                    root / "generated-single",
+                    source_kind="single_script",
+                    originals={"rerun-source-input.js": b"const original = 1;"},
+                    transformed={"rerun-source-input.js": b"const transformed = 2;\n"},
+                )
+                generated = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=project,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                    parent_artifact_ids=[source.id],
+                )
+
+                result = DeliveryPublisher().publish(
+                    job=job,
+                    store=store,
+                    generated_project=generated,
+                    parent_artifact_ids=[source.id],
+                )
+
+                self.assertEqual(result.artifact.kind, "result_file")
+                self.assertEqual(result.delivery_kind, "single_file")
+                self.assertEqual(result.artifact.filename, "rerun-source-input.js")
+                self.assertEqual(store.read_artifact_record(result.artifact), b"const transformed = 2;\n")
+            finally:
+                store.close()
+
+    def test_delivery_downgrades_single_script_with_auxiliary_dependency_to_clean_zip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                source = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="main.js",
+                    content=b"import './helper.js';",
+                    content_type="text/javascript",
+                    producer="test",
+                )
+                job = store.update_job_input_metadata(job.id, input_name="main.js", input_kind="single_script")
+                project = self._generated_project(
+                    root / "generated-downgrade",
+                    source_kind="single_script",
+                    originals={
+                        "index.html": b'<script type="module" src="./main.js"></script>',
+                        "main.js": b"import './helper.js';",
+                        "helper.js": b"throw new Error('missing dependency');",
+                    },
+                    transformed={"main.js": b"import './helper.js';\nexport const ready = true;\n"},
+                    dependency_placeholders=[{"resolvedPath": "helper.js", "status": "generated"}],
+                )
+                generated = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=project,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                    parent_artifact_ids=[source.id],
+                )
+
+                result = DeliveryPublisher().publish(
+                    job=job,
+                    store=store,
+                    generated_project=generated,
+                    parent_artifact_ids=[source.id],
+                )
+
+                self.assertEqual(result.artifact.kind, "result_package")
+                self.assertEqual(result.delivery_kind, "project_package")
+                self.assertIsNotNone(result.downgrade_reason)
+                with zipfile.ZipFile(result.artifact.storage_uri) as archive:
+                    names = set(archive.namelist())
+                    self.assertEqual(
+                        archive.read("main.js"),
+                        b"import './helper.js';\nexport const ready = true;\n",
+                    )
+                self.assertEqual(names, {"helper.js", "index.html", "main.js"})
+                self.assertNotIn("audit.json", names)
+                self.assertFalse(any(name.startswith("evidence/") or name.startswith("src/analysis/") for name in names))
+            finally:
+                store.close()
+
+    def test_delivery_project_package_preserves_resources_and_replaces_transformed_scripts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                source = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="site.zip",
+                    content=b"zip-placeholder",
+                    content_type="application/zip",
+                    producer="test",
+                )
+                job = store.update_job_input_metadata(job.id, input_name="site.zip", input_kind="archive")
+                project = self._generated_project(
+                    root / "generated-archive",
+                    source_kind="archive",
+                    originals={
+                        "index.html": b'<script src="assets/app.js"></script>',
+                        "assets/app.js": b"const original = true;",
+                        "assets/app.css": b"body{color:navy}",
+                        "assets/logo.svg": b"<svg></svg>",
+                    },
+                    transformed={"assets/app.js": b"const readableApplication = true;\n"},
+                )
+                generated = store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=project,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                    parent_artifact_ids=[source.id],
+                )
+
+                result = DeliveryPublisher().publish(
+                    job=job,
+                    store=store,
+                    generated_project=generated,
+                    parent_artifact_ids=[source.id],
+                )
+
+                self.assertEqual(result.artifact.filename, "site-result.zip")
+                with zipfile.ZipFile(result.artifact.storage_uri) as archive:
+                    self.assertEqual(archive.read("assets/app.js"), b"const readableApplication = true;\n")
+                    self.assertEqual(archive.read("assets/app.css"), b"body{color:navy}")
+                    self.assertEqual(archive.read("assets/logo.svg"), b"<svg></svg>")
+                    self.assertFalse(any(name.startswith("src/") for name in archive.namelist()))
+            finally:
+                store.close()
+
+    def test_delivery_missing_generated_project_does_not_publish_placeholder_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="source.js",
+                    content=b"const original = 1;",
+                    content_type="text/javascript",
+                    producer="test",
+                )
+                store.update_job_input_metadata(job.id, input_name="source.js", input_kind="single_script")
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                summary = json.loads(store.read_artifact_record(result.result_summary_artifact))
+                artifacts = store.list_artifacts(job.id)
+
+                self.assertIsNone(result.primary_result_artifact)
+                self.assertEqual(result.delivery_kind, "unavailable")
+                self.assertEqual(result.downgrade_reason, summary["delivery"]["downgradeReason"])
+                self.assertFalse(summary["delivery"]["available"])
+                self.assertIsNone(summary["delivery"]["artifactId"])
+                self.assertNotIn("result_package", {artifact.kind for artifact in artifacts})
+                self.assertIn("result_summary", {artifact.kind for artifact in artifacts})
+                self.assertIn("evidence_package", {artifact.kind for artifact in artifacts})
+            finally:
+                store.close()
+
+    def test_delivery_safe_relative_rejects_absolute_drive_empty_and_dot_paths(self):
+        publisher = DeliveryPublisher()
+        unsafe_paths = [
+            "",
+            ".",
+            "..",
+            "./app.js",
+            "src/./app.js",
+            "src//app.js",
+            "../app.js",
+            "src/../app.js",
+            "/app.js",
+            "\\app.js",
+            "//server/share/app.js",
+            "\\\\server\\share\\app.js",
+            "C:/app.js",
+            "C:\\app.js",
+            "src/app:bundle.js",
+            "src/app.js\x00.txt",
+        ]
+
+        for unsafe_path in unsafe_paths:
+            with self.subTest(path=unsafe_path):
+                with self.assertRaisesRegex(DeliveryError, "Unsafe delivery path"):
+                    publisher._safe_relative(unsafe_path)
+
+        self.assertEqual(publisher._safe_relative("src\\nested\\app.js"), "src/nested/app.js")
+
+    def test_packaging_separates_user_result_summary_and_internal_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                source = store.write_artifact(
+                    job.id,
+                    kind="source_input",
+                    stage="intake",
+                    filename="source.js",
+                    content=b"const original = 1;",
+                    content_type="text/javascript",
+                    producer="test",
+                )
+                store.update_job_input_metadata(job.id, input_name="source.js", input_kind="single_script")
+                project = self._generated_project(
+                    root / "generated-packaging",
+                    source_kind="single_script",
+                    originals={"source.js": b"const original = 1;"},
+                    transformed={"source.js": b"const readableSource = 1;\n"},
+                )
+                store.register_artifact_path(
+                    job.id,
+                    kind="generated_project",
+                    stage="reconstructing",
+                    filename="generated-project",
+                    source_path=project,
+                    content_type="application/vnd.ai-jsunpack.generated-project+directory",
+                    producer="test",
+                    parent_artifact_ids=[source.id],
+                )
+
+                result = PackagingRunner().run(job_id=job.id, store=store)
+                summary = json.loads(store.read_artifact_record(result.result_summary_artifact))
+
+                self.assertEqual(result.primary_result_artifact.kind, "result_file")
+                self.assertEqual(result.evidence_package_artifact.kind, "evidence_package")
+                self.assertEqual(result.result_summary_artifact.kind, "result_summary")
+                self.assertEqual(summary["overview"]["source"], "deterministic_fallback")
+                self.assertIn("processingScope", summary)
+                self.assertIn("majorChanges", summary)
+                self.assertIn("validation", summary)
+                self.assertIn("review", summary)
+                self.assertIn("risks", summary)
+                self.assertIn("limitations", summary)
+                self.assertIsNotNone(summary["fallbackReason"])
+                with zipfile.ZipFile(result.evidence_package_artifact.storage_uri) as archive:
+                    names = set(archive.namelist())
+                self.assertIn("audit.json", names)
+                self.assertIn("evidence-index.json", names)
+            finally:
+                store.close()
+
+    def _generated_project(
+        self,
+        root: Path,
+        *,
+        source_kind: str,
+        originals: dict[str, bytes],
+        transformed: dict[str, bytes],
+        dependency_placeholders: list[dict] | None = None,
+    ) -> Path:
+        source_root = root / "public" / "original"
+        transformed_root = root / "src" / "transformed"
+        analysis_root = root / "src" / "analysis"
+        source_root.mkdir(parents=True)
+        transformed_root.mkdir(parents=True)
+        analysis_root.mkdir(parents=True)
+        for relative, content in originals.items():
+            target = source_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        transform_map: dict[str, str] = {}
+        for relative, content in transformed.items():
+            target = transformed_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            transform_map[relative] = f"src/transformed/{relative}"
+        (root / "src" / "reconstruction-manifest.json").write_text(
+            json.dumps(
+                {
+                    "kind": "generated_project",
+                    "sourceKind": source_kind,
+                    "sourceTransformMap": transform_map,
+                    "transformedSourceFiles": list(transform_map.values()),
+                    "dependencyPlaceholders": dependency_placeholders or [],
+                    "limitations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (analysis_root / "private.json").write_text("{}", encoding="utf-8")
+        return root
+
     def test_packaging_reports_missing_dependency_placeholder_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -64,7 +400,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 html_report = Path(result.html_report_artifact.storage_uri).read_text(encoding="utf-8")
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
-                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                with zipfile.ZipFile(result.evidence_package_artifact.storage_uri) as archive:
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
 
                 self.assertIn("## 依赖占位摘要", report)
@@ -150,7 +486,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
-                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                with zipfile.ZipFile(result.evidence_package_artifact.storage_uri) as archive:
                     ops_events = json.loads(archive.read("ops-alert-events.json").decode("utf-8"))
                     audit_payload = json.loads(archive.read("audit.json").decode("utf-8"))
 
@@ -706,7 +1042,7 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
-                audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
+                audit_payload = self._read_zip_json(result.evidence_package_artifact.storage_uri, "audit.json")
                 attachments = {item["artifactId"]: item for item in evidence_index["attachments"]}
 
                 self.assertEqual(evidence_index["includedCount"], 4)
@@ -829,7 +1165,7 @@ class PackagingRunnerTest(unittest.TestCase):
                     any(item["label"] == "Review/Fix 收敛摘要" for item in risk_section["details"])
                 )
 
-                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                with zipfile.ZipFile(result.evidence_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
                     packaged_summary = json.loads(archive.read("review-fix-summary.json").decode("utf-8"))
                 self.assertIn(f"evidence/runtime_trace/{runtime_trace.id}.json", names)
@@ -909,8 +1245,8 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 report = Path(result.audit_report_artifact.storage_uri).read_text(encoding="utf-8")
-                audit_payload = self._read_zip_json(result.result_package_artifact.storage_uri, "audit.json")
-                runtime_traces = self._read_zip_json(result.result_package_artifact.storage_uri, "runtime-traces.json")
+                audit_payload = self._read_zip_json(result.evidence_package_artifact.storage_uri, "audit.json")
+                runtime_traces = self._read_zip_json(result.evidence_package_artifact.storage_uri, "runtime-traces.json")
                 evidence_index = json.loads(Path(result.evidence_index_artifact.storage_uri).read_text(encoding="utf-8"))
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
 
@@ -1027,7 +1363,7 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(evidence_index["policySummary"]["retentionCounts"]["archive"], 3)
                 self.assertEqual(evidence_index["policySummary"]["retentionCounts"]["ephemeral"], 1)
 
-                with zipfile.ZipFile(result.result_package_artifact.storage_uri) as archive:
+                with zipfile.ZipFile(result.evidence_package_artifact.storage_uri) as archive:
                     names = set(archive.namelist())
                 self.assertIn(f"evidence/runtime_scenario/{scenario.id}.json", names)
                 self.assertNotIn(f"evidence/runtime_trace/{trace.id}.json", names)
@@ -1140,7 +1476,7 @@ class PackagingRunnerTest(unittest.TestCase):
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 evidence_index = json.loads(store.read_artifact_record(result.evidence_index_artifact).decode("utf-8"))
-                package_bytes = store.read_artifact_record(result.result_package_artifact)
+                package_bytes = store.read_artifact_record(result.evidence_package_artifact)
                 report_sections = {item["anchor"]: item for item in evidence_index["reportSections"]}
                 runtime_details = report_sections["runtime-compare-difference-summary"]["details"]
 

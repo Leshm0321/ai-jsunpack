@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     create_engine,
+    func,
     insert,
     inspect,
     select,
@@ -37,9 +39,11 @@ from .models import (
     ArtifactKind,
     ArtifactRecord,
     CreateJobRequest,
+    DeliveryKind,
     FailureClass,
     JobRecord,
     JobStatus,
+    InputKind,
     OpsAlert,
     OpsAlertDelivery,
     OpsAlertEvent,
@@ -59,6 +63,8 @@ from .models import (
     utc_now,
 )
 
+logger = logging.getLogger(__name__)
+
 
 DATABASE_URL_ENV = "AI_JSUNPACK_DATABASE_URL"
 ARTIFACT_ROOT_ENV = "AI_JSUNPACK_ARTIFACT_ROOT"
@@ -76,6 +82,7 @@ ARTIFACT_S3_LIFECYCLE_ENABLED_ENV = "AI_JSUNPACK_ARTIFACT_S3_LIFECYCLE_ENABLED"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://ai_jsunpack:ai_jsunpack@127.0.0.1:5432/ai_jsunpack"
 CONTRACT_SCHEMA_VERSION = "2026-06-14"
 EPHEMERAL_RETENTION_DAYS = 7
+DEFAULT_FILE_RETENTION_DAYS = 90
 DEFAULT_PRESIGN_TTL_SECONDS = 3600
 DEFAULT_WORKER_LEASE_SECONDS = 300
 DEFAULT_WORKER_MAX_ATTEMPTS = 3
@@ -84,6 +91,9 @@ TERMINAL_JOB_STATUSES: set[JobStatus] = {"completed", "completed_best_effort", "
 
 RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
     "source_input": "source",
+    "result_file": "package",
+    "result_summary": "derived",
+    "evidence_package": "package",
     "result_package": "package",
     "audit_report": "package",
     "html_report": "package",
@@ -96,6 +106,13 @@ RETENTION_CATEGORY_BY_KIND: dict[str, RetentionCategory] = {
     "runtime_diagnosis": "derived",
     "report_section": "derived",
 }
+FILE_RETENTION_ARTIFACT_KINDS = {
+    "source_input",
+    "result_file",
+    "result_package",
+    "audit_report",
+    "html_report",
+}
 DEFAULT_RETENTION_BY_CATEGORY: dict[RetentionCategory, RetentionClass] = {
     "source": "archive",
     "derived": "project",
@@ -104,6 +121,12 @@ DEFAULT_RETENTION_BY_CATEGORY: dict[RetentionCategory, RetentionClass] = {
     "screenshots": "ephemeral",
     "memory": "project",
 }
+
+
+class ArtifactDeletionError(RuntimeError):
+    def __init__(self, errors: list[str]) -> None:
+        super().__init__("Artifact deletion failed")
+        self.errors = errors
 
 metadata = MetaData()
 
@@ -115,6 +138,13 @@ jobs_table = Table(
     Column("owner_id", String, nullable=False),
     Column("project_id", String, nullable=False),
     Column("input_artifact_id", String, nullable=True),
+    Column("input_name", String, nullable=True),
+    Column("input_kind", String, nullable=True),
+    Column("delivery_kind", String, nullable=True),
+    Column("primary_result_artifact_id", String, nullable=True),
+    Column("result_summary_artifact_id", String, nullable=True),
+    Column("files_expires_at", String, nullable=True),
+    Column("deleted_at", String, nullable=True),
     Column("config", JSON, nullable=False),
     Column("cloud_mode", String, nullable=False),
     Column("review_attempt", Integer, nullable=False),
@@ -139,6 +169,7 @@ artifacts_table = Table(
     Column("hash", String, nullable=False),
     Column("size", Integer, nullable=False),
     Column("storage_uri", String, nullable=False),
+    Column("filename", String, nullable=True),
     Column("parent_artifact_ids", JSON, nullable=False),
     Column("producer", String, nullable=False),
     Column("sensitivity_class", String, nullable=False),
@@ -226,9 +257,11 @@ class DatabaseStore:
             return
         metadata.create_all(self.engine)
         self._ensure_jobs_queue_columns()
+        self._ensure_jobs_product_columns()
         self._ensure_ops_heartbeat_columns()
         self._ensure_ops_alert_event_columns()
         self._ensure_artifacts_lifecycle_columns()
+        self._ensure_artifacts_filename_column()
         self._schema_ready = True
 
     def close(self) -> None:
@@ -247,7 +280,8 @@ class DatabaseStore:
                 .limit(1)
             ).mappings().first()
         if row is None:
-            return SettingsSnapshot(scope=scope, scope_id=scope_id, revision=0, settings={})
+            defaults = {"fileRetentionDays": DEFAULT_FILE_RETENTION_DAYS} if scope == "account" else {}
+            return SettingsSnapshot(scope=scope, scope_id=scope_id, revision=0, settings=defaults)
         revision = self._settings_revision_from_row(row)
         return SettingsSnapshot(
             scope=scope,
@@ -344,6 +378,13 @@ class DatabaseStore:
             "owner_id": request.owner_id,
             "project_id": request.project_id,
             "input_artifact_id": None,
+            "input_name": None,
+            "input_kind": None,
+            "delivery_kind": None,
+            "primary_result_artifact_id": None,
+            "result_summary_artifact_id": None,
+            "files_expires_at": self.file_expires_at_for_owner(request.owner_id, now=now),
+            "deleted_at": None,
             "config": request.config,
             "cloud_mode": request.cloud_mode,
             "review_attempt": 0,
@@ -358,11 +399,130 @@ class DatabaseStore:
             connection.execute(insert(jobs_table).values(**row))
         return self._job_from_row(row)
 
-    def get_job(self, job_id: str) -> JobRecord | None:
+    def get_job(self, job_id: str, *, include_deleted: bool = False) -> JobRecord | None:
+        self.initialize()
+        query = select(jobs_table).where(jobs_table.c.id == job_id)
+        if not include_deleted:
+            query = query.where(jobs_table.c.deleted_at.is_(None))
+        with self.engine.begin() as connection:
+            row = connection.execute(query).mappings().first()
+        return self._job_from_row(row) if row else None
+
+    def list_jobs(
+        self,
+        *,
+        owner_id: str,
+        project_ids: tuple[str, ...] | list[str],
+        project_id: str | None = None,
+        status: JobStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        include_deleted: bool = False,
+    ) -> tuple[list[JobRecord], int]:
+        self.initialize()
+        allowed_projects = tuple(dict.fromkeys(project_ids))
+        query = select(jobs_table).where(jobs_table.c.owner_id == owner_id)
+        count_query = select(func.count()).select_from(jobs_table).where(jobs_table.c.owner_id == owner_id)
+        if not include_deleted:
+            query = query.where(jobs_table.c.deleted_at.is_(None))
+            count_query = count_query.where(jobs_table.c.deleted_at.is_(None))
+        query = query.where(jobs_table.c.project_id.in_(allowed_projects))
+        count_query = count_query.where(jobs_table.c.project_id.in_(allowed_projects))
+        if project_id is not None:
+            query = query.where(jobs_table.c.project_id == project_id)
+            count_query = count_query.where(jobs_table.c.project_id == project_id)
+        if status is not None:
+            query = query.where(jobs_table.c.status == status)
+            count_query = count_query.where(jobs_table.c.status == status)
+        query = query.order_by(jobs_table.c.created_at.desc(), jobs_table.c.id.desc())
+        query = query.limit(max(1, min(limit, 200))).offset(max(0, offset))
+        with self.engine.begin() as connection:
+            rows = connection.execute(query).mappings().all()
+            total = int(connection.execute(count_query).scalar_one())
+        return [self._job_from_row(row) for row in rows], total
+
+    def update_job_input_metadata(
+        self,
+        job_id: str,
+        *,
+        input_name: str,
+        input_kind: InputKind,
+        files_expires_at: str | None = None,
+    ) -> JobRecord:
+        self.initialize()
+        values: dict[str, Any] = {
+            "input_name": input_name,
+            "input_kind": input_kind,
+            "updated_at": utc_now(),
+        }
+        if files_expires_at is not None:
+            values["files_expires_at"] = files_expires_at
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                .values(**values)
+            )
+            if result.rowcount == 0:
+                raise KeyError(f"Job not found: {job_id}")
+            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+        return self._job_from_row(row)
+
+    def update_job_delivery(
+        self,
+        job_id: str,
+        *,
+        delivery_kind: DeliveryKind,
+        primary_result_artifact_id: str,
+        result_summary_artifact_id: str | None = None,
+    ) -> JobRecord:
         self.initialize()
         with self.engine.begin() as connection:
+            artifact_row = connection.execute(
+                select(artifacts_table.c.id).where(
+                    artifacts_table.c.id == primary_result_artifact_id,
+                    artifacts_table.c.job_id == job_id,
+                )
+            ).first()
+            if artifact_row is None:
+                raise KeyError(f"Primary result artifact not found: {primary_result_artifact_id}")
+            if result_summary_artifact_id is not None:
+                summary_row = connection.execute(
+                    select(artifacts_table.c.id).where(
+                        artifacts_table.c.id == result_summary_artifact_id,
+                        artifacts_table.c.job_id == job_id,
+                    )
+                ).first()
+                if summary_row is None:
+                    raise KeyError(f"Result summary artifact not found: {result_summary_artifact_id}")
+            result = connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                .values(
+                    delivery_kind=delivery_kind,
+                    primary_result_artifact_id=primary_result_artifact_id,
+                    result_summary_artifact_id=result_summary_artifact_id,
+                    updated_at=utc_now(),
+                )
+            )
+            if result.rowcount == 0:
+                raise KeyError(f"Job not found: {job_id}")
             row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
-        return self._job_from_row(row) if row else None
+        return self._job_from_row(row)
+
+    def file_expires_at_for_owner(self, owner_id: str, *, now: str | None = None) -> str:
+        snapshot = self.get_settings("account", owner_id)
+        raw_days = snapshot.settings.get("fileRetentionDays", DEFAULT_FILE_RETENTION_DAYS)
+        days = raw_days if isinstance(raw_days, int) and not isinstance(raw_days, bool) else DEFAULT_FILE_RETENTION_DAYS
+        days = max(1, min(days, 3650))
+        base = parse_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        return (base + timedelta(days=days)).isoformat()
+
+    def file_expires_at_for_job(self, job_id: str, *, now: str | None = None) -> str:
+        job = self.get_job(job_id, include_deleted=True)
+        if job is None:
+            raise KeyError(f"Job not found: {job_id}")
+        return job.files_expires_at or self.file_expires_at_for_owner(job.owner_id, now=now)
 
     def update_status(
         self,
@@ -374,7 +534,9 @@ class DatabaseStore:
     ) -> JobRecord:
         self.initialize()
         with self.engine.begin() as connection:
-            current_row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            current_row = connection.execute(
+                select(jobs_table).where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+            ).mappings().first()
             if current_row is None:
                 raise KeyError(f"未找到作业：{job_id}")
             current_job = self._job_from_row(current_row)
@@ -423,6 +585,7 @@ class DatabaseStore:
                     select(jobs_table)
                     .where(
                         jobs_table.c.status.in_(QUEUE_ELIGIBLE_STATUSES),
+                        jobs_table.c.deleted_at.is_(None),
                         jobs_table.c.input_artifact_id.is_not(None),
                         jobs_table.c.run_attempt < max_attempts,
                     )
@@ -438,6 +601,7 @@ class DatabaseStore:
                     .where(
                         jobs_table.c.id == row["id"],
                         jobs_table.c.status == row["status"],
+                        jobs_table.c.deleted_at.is_(None),
                         jobs_table.c.input_artifact_id.is_not(None),
                         jobs_table.c.run_attempt < max_attempts,
                     )
@@ -472,7 +636,9 @@ class DatabaseStore:
         timestamp = renewed_at.isoformat()
 
         with self.engine.begin() as connection:
-            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            row = connection.execute(
+                select(jobs_table).where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+            ).mappings().first()
             if row is None:
                 raise KeyError(f"未找到作业：{job_id}")
             job = self._job_from_row(row)
@@ -490,7 +656,9 @@ class DatabaseStore:
         self.initialize()
         timestamp = utc_now()
         with self.engine.begin() as connection:
-            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+            row = connection.execute(
+                select(jobs_table).where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+            ).mappings().first()
             if row is None:
                 raise KeyError(f"未找到作业：{job_id}")
             job = self._job_from_row(row)
@@ -815,7 +983,7 @@ class DatabaseStore:
         return self.artifact_store.materialize_directory(artifact.storage_uri, target_dir)
 
     def artifact_filename(self, artifact: ArtifactRecord) -> str:
-        return self.artifact_store.filename(artifact.storage_uri)
+        return artifact.filename
 
     def artifact_suffix(self, artifact: ArtifactRecord) -> str:
         return self.artifact_store.suffix(artifact.storage_uri)
@@ -839,11 +1007,21 @@ class DatabaseStore:
         self.initialize()
         artifact_id = new_artifact_id()
         with self.engine.begin() as connection:
-            job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
+            job_row = connection.execute(
+                select(jobs_table.c.input_artifact_id, jobs_table.c.files_expires_at).where(
+                    jobs_table.c.id == job_id,
+                    jobs_table.c.deleted_at.is_(None),
+                )
+            ).first()
         if job_row is None:
             raise KeyError(f"未找到作业：{job_id}")
         resolved_retention_class = retention_class or default_retention_class(kind)
-        resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
+        if expires_at is not None:
+            resolved_expires_at = expires_at
+        elif kind in FILE_RETENTION_ARTIFACT_KINDS:
+            resolved_expires_at = job_row.files_expires_at or self.file_expires_at_for_job(job_id)
+        else:
+            resolved_expires_at = default_expires_at(resolved_retention_class)
         metadata, tags = artifact_object_metadata(
             job_id=job_id,
             artifact_id=artifact_id,
@@ -872,6 +1050,7 @@ class DatabaseStore:
             "hash": stored.hash,
             "size": stored.size,
             "storage_uri": stored.storage_uri,
+            "filename": safe_artifact_filename(filename),
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
@@ -881,14 +1060,28 @@ class DatabaseStore:
             "deleted_at": None,
             "deletion_reason": None,
         }
-        with self.engine.begin() as connection:
-            connection.execute(insert(artifacts_table).values(**row))
-            if kind == "source_input" and not job_row.input_artifact_id:
-                connection.execute(
+        try:
+            with self.engine.begin() as connection:
+                lock_result = connection.execute(
                     update(jobs_table)
-                    .where(jobs_table.c.id == job_id)
-                    .values(input_artifact_id=artifact_id, updated_at=utc_now())
+                    .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                    .values(updated_at=jobs_table.c.updated_at)
                 )
+                if lock_result.rowcount == 0:
+                    raise KeyError(f"未找到作业：{job_id}")
+                current_job_row = connection.execute(
+                    select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)
+                ).first()
+                connection.execute(insert(artifacts_table).values(**row))
+                if kind == "source_input" and current_job_row is not None and not current_job_row.input_artifact_id:
+                    connection.execute(
+                        update(jobs_table)
+                        .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                        .values(input_artifact_id=artifact_id, updated_at=utc_now())
+                    )
+        except Exception:
+            self._cleanup_unregistered_artifact(stored.storage_uri, job_id=job_id, artifact_id=artifact_id)
+            raise
         return self._artifact_from_row(row)
 
     def register_artifact_path(
@@ -910,7 +1103,12 @@ class DatabaseStore:
         self.initialize()
         artifact_id = new_artifact_id()
         with self.engine.begin() as connection:
-            job_row = connection.execute(select(jobs_table.c.input_artifact_id).where(jobs_table.c.id == job_id)).first()
+            job_row = connection.execute(
+                select(jobs_table.c.input_artifact_id, jobs_table.c.files_expires_at).where(
+                    jobs_table.c.id == job_id,
+                    jobs_table.c.deleted_at.is_(None),
+                )
+            ).first()
         if job_row is None:
             raise KeyError(f"未找到作业：{job_id}")
 
@@ -918,7 +1116,12 @@ class DatabaseStore:
         if not source.exists():
             raise FileNotFoundError(f"Artifact 源路径不存在：{source}")
         resolved_retention_class = retention_class or default_retention_class(kind)
-        resolved_expires_at = expires_at if expires_at is not None else default_expires_at(resolved_retention_class)
+        if expires_at is not None:
+            resolved_expires_at = expires_at
+        elif kind in FILE_RETENTION_ARTIFACT_KINDS:
+            resolved_expires_at = job_row.files_expires_at or self.file_expires_at_for_job(job_id)
+        else:
+            resolved_expires_at = default_expires_at(resolved_retention_class)
         metadata, tags = artifact_object_metadata(
             job_id=job_id,
             artifact_id=artifact_id,
@@ -948,6 +1151,7 @@ class DatabaseStore:
             "hash": stored.hash,
             "size": stored.size,
             "storage_uri": stored.storage_uri,
+            "filename": safe_artifact_filename(filename),
             "parent_artifact_ids": parent_artifact_ids or [],
             "producer": producer,
             "sensitivity_class": sensitivity_class,
@@ -957,9 +1161,31 @@ class DatabaseStore:
             "deleted_at": None,
             "deletion_reason": None,
         }
-        with self.engine.begin() as connection:
-            connection.execute(insert(artifacts_table).values(**row))
+        try:
+            with self.engine.begin() as connection:
+                lock_result = connection.execute(
+                    update(jobs_table)
+                    .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                    .values(updated_at=jobs_table.c.updated_at)
+                )
+                if lock_result.rowcount == 0:
+                    raise KeyError(f"未找到作业：{job_id}")
+                connection.execute(insert(artifacts_table).values(**row))
+        except Exception:
+            self._cleanup_unregistered_artifact(stored.storage_uri, job_id=job_id, artifact_id=artifact_id)
+            raise
         return self._artifact_from_row(row)
+
+    def _cleanup_unregistered_artifact(self, storage_uri: str, *, job_id: str, artifact_id: str) -> None:
+        try:
+            self.artifact_store.delete(storage_uri)
+        except Exception as error:
+            logger.warning(
+                "Failed to clean unregistered artifact %s for job %s: %s",
+                artifact_id,
+                job_id,
+                error,
+            )
 
     def cleanup_retention(self, job_id: str, request: RetentionCleanupRequest) -> RetentionCleanupResult:
         self.initialize()
@@ -1044,15 +1270,115 @@ class DatabaseStore:
             errors=errors,
         )
 
+    def cleanup_expired_artifacts(self, *, now: str | None = None) -> int:
+        self.initialize()
+        timestamp = parse_timestamp(now or utc_now()).isoformat()
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(artifacts_table).where(
+                    artifacts_table.c.deleted_at.is_(None),
+                    artifacts_table.c.expires_at.is_not(None),
+                    artifacts_table.c.expires_at <= timestamp,
+                )
+            ).mappings().all()
+        deleted_count = 0
+        for row in rows:
+            artifact = self._artifact_from_row(row)
+            try:
+                self._delete_artifact_record(artifact, deleted_at=timestamp, reason="expired")
+                deleted_count += 1
+            except Exception as error:
+                logger.warning("Failed to delete expired artifact %s: %s", artifact.id, error)
+                continue
+        return deleted_count
+
+    def soft_delete_job(self, job_id: str, *, reason: str = "user_deleted") -> JobRecord:
+        self.initialize()
+        timestamp = utc_now()
+        normalized_reason = normalize_cleanup_reason(reason)
+        errors: list[str] = []
+        with self.engine.begin() as connection:
+            lock_result = connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                .values(updated_at=jobs_table.c.updated_at)
+            )
+            if lock_result.rowcount == 0:
+                row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+                if row is None:
+                    raise KeyError(f"Job not found: {job_id}")
+                return self._job_from_row(row)
+
+            artifact_rows = (
+                connection.execute(
+                    select(artifacts_table)
+                    .where(artifacts_table.c.job_id == job_id, artifacts_table.c.deleted_at.is_(None))
+                    .order_by(artifacts_table.c.created_at, artifacts_table.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            for artifact_row in artifact_rows:
+                artifact = self._artifact_from_row(artifact_row)
+                try:
+                    if self.artifact_store.exists(artifact.storage_uri):
+                        self.artifact_store.delete(artifact.storage_uri)
+                except Exception as error:
+                    message = f"{artifact.id}: {error}"
+                    errors.append(message)
+                    logger.warning("Failed to delete artifact %s for job %s: %s", artifact.id, job_id, error)
+                    continue
+                connection.execute(
+                    update(artifacts_table)
+                    .where(artifacts_table.c.id == artifact.id, artifacts_table.c.deleted_at.is_(None))
+                    .values(deleted_at=timestamp, deletion_reason=normalized_reason)
+                )
+
+            if not errors:
+                connection.execute(
+                    update(jobs_table)
+                    .where(jobs_table.c.id == job_id, jobs_table.c.deleted_at.is_(None))
+                    .values(deleted_at=timestamp, updated_at=timestamp)
+                )
+            row = connection.execute(select(jobs_table).where(jobs_table.c.id == job_id)).mappings().first()
+        if errors:
+            raise ArtifactDeletionError(errors)
+        return self._job_from_row(row)
+
+    def _delete_artifact_record(self, artifact: ArtifactRecord, *, deleted_at: str, reason: str) -> None:
+        if artifact.deleted_at is not None:
+            return
+        if self.artifact_store.exists(artifact.storage_uri):
+            self.artifact_store.delete(artifact.storage_uri)
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(artifacts_table)
+                .where(artifacts_table.c.id == artifact.id, artifacts_table.c.deleted_at.is_(None))
+                .values(deleted_at=deleted_at, deletion_reason=reason)
+            )
+
     def _job_from_row(self, row: Any) -> JobRecord:
         data = dict(row)
         data.setdefault("run_attempt", 0)
+        data.setdefault("input_name", None)
+        data.setdefault("input_kind", None)
+        data.setdefault("delivery_kind", None)
+        data.setdefault("primary_result_artifact_id", None)
+        data.setdefault("result_summary_artifact_id", None)
+        data.setdefault("files_expires_at", None)
+        data.setdefault("deleted_at", None)
         data["config"] = normalize_json_dict(data.get("config"))
         data["worker_lease"] = normalize_optional_json_dict(data.get("worker_lease"))
         return JobRecord.model_validate(data)
 
     def _artifact_from_row(self, row: Any) -> ArtifactRecord:
         data = dict(row)
+        filename = data.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            stored_filename = self.artifact_store.filename(str(data.get("storage_uri") or ""))
+            prefix = f"{data.get('id')}-"
+            filename = stored_filename[len(prefix) :] if stored_filename.startswith(prefix) else stored_filename
+        data["filename"] = filename or "artifact.bin"
         data["parent_artifact_ids"] = normalize_json_string_list(data.get("parent_artifact_ids"))
         data.setdefault("expires_at", None)
         data.setdefault("deleted_at", None)
@@ -1089,6 +1415,22 @@ class DatabaseStore:
             if "run_attempt" not in existing_columns:
                 connection.execute(text("ALTER TABLE jobs ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0"))
 
+    def _ensure_jobs_product_columns(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("jobs")}
+        product_columns = {
+            "input_name": "VARCHAR",
+            "input_kind": "VARCHAR",
+            "delivery_kind": "VARCHAR",
+            "primary_result_artifact_id": "VARCHAR",
+            "result_summary_artifact_id": "VARCHAR",
+            "files_expires_at": "VARCHAR",
+            "deleted_at": "VARCHAR",
+        }
+        with self.engine.begin() as connection:
+            for column_name, column_type in product_columns.items():
+                if column_name not in existing_columns:
+                    connection.execute(text(f"ALTER TABLE jobs ADD COLUMN {column_name} {column_type}"))
+
     def _ensure_ops_heartbeat_columns(self) -> None:
         existing_columns = {column["name"] for column in inspect(self.engine).get_columns("ops_heartbeats")}
         with self.engine.begin() as connection:
@@ -1120,6 +1462,12 @@ class DatabaseStore:
             for column_name, column_type in lifecycle_columns.items():
                 if column_name not in existing_columns:
                     connection.execute(text(f"ALTER TABLE artifacts ADD COLUMN {column_name} {column_type}"))
+
+    def _ensure_artifacts_filename_column(self) -> None:
+        existing_columns = {column["name"] for column in inspect(self.engine).get_columns("artifacts")}
+        if "filename" not in existing_columns:
+            with self.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE artifacts ADD COLUMN filename VARCHAR"))
 
 
 def retention_category_for_kind(kind: str) -> RetentionCategory:
@@ -1195,6 +1543,12 @@ def normalize_settings_scope_id(scope: SettingScope, scope_id: str | None) -> st
     if not scope_id or not scope_id.strip():
         raise ValueError("项目设置需要项目 ID")
     return scope_id.strip()
+
+
+def safe_artifact_filename(filename: str) -> str:
+    normalized = filename.replace("\\", "/").replace("\x00", "")
+    candidate = Path(normalized).name.strip()
+    return candidate or "artifact.bin"
 
 
 def cleanup_matches(*, artifact: ArtifactRecord, request: RetentionCleanupRequest, now: datetime) -> bool:

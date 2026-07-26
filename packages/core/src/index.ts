@@ -18,6 +18,7 @@ export interface AnalyzeInputConfig {
 }
 
 export interface CoreAnalysisResult extends HeadlessAnalysisResult {
+  inputSourceKind?: NormalizedInputPackage["sourceKind"];
   sourceMapAnalysis: SourceMapArtifactAnalysis;
   graphAnalysis: GraphAnalysis;
   transformAnalysis: TransformAnalysis;
@@ -45,6 +46,7 @@ export interface ReconstructionPlan {
   kind: "reconstruction_plan";
   jobId?: string;
   strategy: "static_host_project";
+  inputSourceKind?: NormalizedInputPackage["sourceKind"];
   entryHtml: string | null;
   sourceFiles: string[];
   scripts: string[];
@@ -137,11 +139,13 @@ export interface AgentFeedbackResult {
 export interface GeneratedProjectManifest {
   kind: "generated_project";
   jobId?: string;
+  sourceKind: "single_script" | "archive" | "folder";
   projectPath: string;
   entrypoint: string;
   generatedFiles: string[];
   copiedSourceFiles: string[];
   transformedSourceFiles: string[];
+  sourceTransformMap: Record<string, string>;
   generatedModuleFiles: string[];
   entrypointFiles: string[];
   typeDefinitionFiles: string[];
@@ -461,6 +465,7 @@ export async function analyzeInputPackage(inputPath: string, config: AnalyzeInpu
     const dependencyPlaceholders = await analyzeDependencyPlaceholders(rootDir, inventory);
 
     return {
+      inputSourceKind: sourceKind,
       inventory,
       astIndexes,
       detectedRuntime,
@@ -2585,6 +2590,7 @@ export function planReconstruction(
     kind: "reconstruction_plan",
     jobId: config.jobId,
     strategy: "static_host_project",
+    inputSourceKind: analysis.inputSourceKind,
     entryHtml: analysis.inventory.entries[0] ?? null,
     sourceFiles: analysis.inventory.files.map((file) => file.path),
     scripts: analysis.inventory.scripts,
@@ -2653,12 +2659,16 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
       copiedSourceFiles.push(`public/original/${toPosix(safeRelative)}`);
     }
     const transformedSourceFiles: string[] = [];
+    const sourceTransformMap: Record<string, string> = {};
     for (const transform of plan.scriptTransforms) {
       const safeRelative = safeRelativePath(transform.filePath);
       const targetPath = path.join(projectRoot, "src", "transformed", safeRelative);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, transform.transformedSource, "utf8");
-      transformedSourceFiles.push(`src/transformed/${toPosix(safeRelative)}`);
+      const sourcePath = toPosix(safeRelative);
+      const transformedPath = `src/transformed/${sourcePath}`;
+      transformedSourceFiles.push(transformedPath);
+      sourceTransformMap[sourcePath] = transformedPath;
     }
     const analysisFiles = [
       "src/analysis/input-inventory.json",
@@ -2682,11 +2692,17 @@ export async function writeProject(plan: ReconstructionPlan, config: WriteProjec
     const manifest: GeneratedProjectManifest = {
       kind: "generated_project",
       jobId: plan.jobId,
+      sourceKind: (plan.inputSourceKind ?? normalized.sourceKind) === "single_script"
+        ? "single_script"
+        : (plan.inputSourceKind ?? normalized.sourceKind) === "directory"
+          ? "folder"
+          : "archive",
       projectPath: ".",
       entrypoint: "index.html",
       generatedFiles: [...GENERATED_PROJECT_FILES, ...dependencyPlaceholderFiles],
       copiedSourceFiles,
       transformedSourceFiles,
+      sourceTransformMap,
       generatedModuleFiles,
       entrypointFiles,
       typeDefinitionFiles,

@@ -11,6 +11,8 @@ import zipfile
 
 from apps.api.app.models import ArtifactRecord, FailureClass, JobRecord
 
+from .delivery import DeliveryPublisher, DeliveryResult
+
 DEFAULT_EVIDENCE_ATTACHMENT_KINDS = {
     "build_log",
     "runtime_comparison",
@@ -125,7 +127,11 @@ class PackagingResult:
     audit_report_artifact: ArtifactRecord
     html_report_artifact: ArtifactRecord
     evidence_index_artifact: ArtifactRecord
-    result_package_artifact: ArtifactRecord
+    evidence_package_artifact: ArtifactRecord
+    primary_result_artifact: ArtifactRecord | None
+    result_summary_artifact: ArtifactRecord
+    delivery_kind: str
+    downgrade_reason: str | None
     final_status: str
     failure_class: FailureClass
     failure_reason: str | None
@@ -133,16 +139,22 @@ class PackagingResult:
 
     @property
     def artifact_ids(self) -> list[str]:
-        return [
+        artifact_ids = [
             self.audit_report_artifact.id,
             self.html_report_artifact.id,
             self.evidence_index_artifact.id,
-            self.result_package_artifact.id,
+            self.evidence_package_artifact.id,
+            self.result_summary_artifact.id,
         ]
-
+        if self.primary_result_artifact is not None:
+            artifact_ids.append(self.primary_result_artifact.id)
+        return artifact_ids
 
 class PackagingRunner:
     """构建最终可下载包和可读审计报告。"""
+
+    def __init__(self, delivery_publisher: DeliveryPublisher | None = None) -> None:
+        self.delivery_publisher = delivery_publisher or DeliveryPublisher()
 
     def run(
         self,
@@ -175,6 +187,7 @@ class PackagingRunner:
             content_type="text/markdown; charset=utf-8",
             producer="worker.packaging",
             parent_artifact_ids=parents,
+            **self._user_file_retention_kwargs(job),
         )
 
         html_report_artifact = store.write_artifact(
@@ -186,6 +199,7 @@ class PackagingRunner:
             content_type="text/html; charset=utf-8",
             producer="worker.packaging",
             parent_artifact_ids=[*parents, audit_report_artifact.id],
+            **self._user_file_retention_kwargs(job),
         )
 
         evidence_index_artifact = store.write_artifact(
@@ -199,7 +213,7 @@ class PackagingRunner:
             parent_artifact_ids=parents,
         )
 
-        package_bytes = self._package_bytes(
+        package_bytes = self._evidence_package_bytes(
             audit_payload=audit_payload,
             report_markdown=report_markdown,
             report_html=report_html,
@@ -208,30 +222,258 @@ class PackagingRunner:
             artifacts=artifacts,
             store=store,
         )
-        result_package_artifact = store.write_artifact(
+        evidence_package_artifact = store.write_artifact(
             job_id,
-            kind="result_package",
+            kind="evidence_package",
             stage="packaging",
-            filename="result-package.zip",
+            filename="evidence-package.zip",
             content=package_bytes,
             content_type="application/zip",
             producer="worker.packaging",
             parent_artifact_ids=[*parents, audit_report_artifact.id, html_report_artifact.id, evidence_index_artifact.id],
+            retention_class="archive",
+        )
+
+        delivery = self.delivery_publisher.publish(
+            job=job,
+            store=store,
+            generated_project=self._latest_artifact(artifacts, "generated_project"),
+            parent_artifact_ids=parents,
+        )
+        summary_payload = self._result_summary(
+            job=job,
+            audit_payload=audit_payload,
+            decision=decision,
+            delivery=delivery,
+        )
+        result_summary_parents = [
+            *parents,
+            audit_report_artifact.id,
+            html_report_artifact.id,
+            evidence_index_artifact.id,
+            evidence_package_artifact.id,
+        ]
+        if delivery.artifact is not None:
+            result_summary_parents.append(delivery.artifact.id)
+        result_summary_artifact = store.write_artifact(
+            job_id,
+            kind="result_summary",
+            stage="packaging",
+            filename="result-summary.json",
+            content=self._json_text(summary_payload).encode("utf-8"),
+            content_type="application/json",
+            producer="worker.packaging",
+            parent_artifact_ids=result_summary_parents,
+            sensitivity_class="derived",
+            retention_class="archive",
         )
 
         return PackagingResult(
             audit_report_artifact=audit_report_artifact,
             html_report_artifact=html_report_artifact,
             evidence_index_artifact=evidence_index_artifact,
-            result_package_artifact=result_package_artifact,
+            evidence_package_artifact=evidence_package_artifact,
+            primary_result_artifact=delivery.artifact,
+            result_summary_artifact=result_summary_artifact,
+            delivery_kind=delivery.delivery_kind,
+            downgrade_reason=delivery.downgrade_reason,
             final_status=decision["status"],
             failure_class=decision["failureClass"],
             failure_reason=decision["reason"],
             message=(
-                "打包已生成 audit_report、html_report、evidence_index 和 result_package，"
+                "打包已分离生成用户结果、result_summary 和 evidence_package，"
                 f"最终状态为 {decision['status']}。"
             ),
         )
+
+    def _user_file_retention_kwargs(self, job: JobRecord) -> dict[str, Any]:
+        expires_at = getattr(job, "files_expires_at", None)
+        return {"retention_class": "project", "expires_at": expires_at} if expires_at else {"retention_class": "project"}
+
+    def _result_summary(
+        self,
+        *,
+        job: JobRecord,
+        audit_payload: dict[str, Any],
+        decision: dict[str, Any],
+        delivery: DeliveryResult,
+    ) -> dict[str, Any]:
+        report_sections = [item for item in audit_payload.get("reportSections", []) if isinstance(item, dict)]
+        review_runs = [item for item in audit_payload.get("reviewRuns", []) if isinstance(item, dict)]
+        build_artifacts = [item for item in audit_payload.get("buildArtifacts", []) if isinstance(item, dict)]
+        runtime_reports = [item for item in audit_payload.get("runtimeReports", []) if isinstance(item, dict)]
+
+        preferred_summary = next(
+            (
+                str(section.get("summary")).strip()
+                for section in report_sections
+                if isinstance(section.get("summary"), str)
+                and section.get("summary").strip()
+                and str(section.get("anchor") or "") in {"executive-summary", "summary", "overview"}
+            ),
+            None,
+        )
+        if preferred_summary is None:
+            preferred_summary = next(
+                (
+                    str(section.get("summary")).strip()
+                    for section in report_sections
+                    if isinstance(section.get("summary"), str) and section.get("summary").strip()
+                ),
+                None,
+            )
+        if preferred_summary is None:
+            preferred_summary = (
+                f"Processed {len(delivery.transformed_files)} JavaScript file(s). "
+                f"The final validation status is {decision['status']}."
+            )
+
+        limitations = self._summary_limitations(
+            audit_payload=audit_payload,
+            delivery=delivery,
+        )
+        risks = self._summary_risks(
+            report_sections=report_sections,
+            decision=decision,
+            audit_payload=audit_payload,
+        )
+        return {
+            "schemaVersion": "2026-07-26",
+            "kind": "result_summary",
+            "jobId": job.id,
+            "status": decision["status"],
+            "overview": {
+                "available": bool(report_sections),
+                "text": preferred_summary,
+                "source": "report_section" if report_sections else "deterministic_fallback",
+            },
+            "processingScope": {
+                "inputName": delivery.input_name,
+                "inputKind": delivery.input_kind,
+                "transformedFileCount": len(delivery.transformed_files),
+                "transformedFiles": delivery.transformed_files,
+            },
+            "majorChanges": [
+                {
+                    "file": file_path,
+                    "summary": "Replaced the original JavaScript with the deterministic transformed output.",
+                }
+                for file_path in delivery.transformed_files
+            ],
+            "delivery": {
+                "kind": delivery.delivery_kind,
+                "available": delivery.artifact is not None,
+                "artifactId": delivery.artifact.id if delivery.artifact is not None else None,
+                "filename": getattr(delivery.artifact, "filename", None) if delivery.artifact is not None else None,
+                "downgraded": delivery.downgrade_reason is not None,
+                "downgradeReason": delivery.downgrade_reason,
+            },
+            "validation": {
+                "build": self._latest_summary_records(build_artifacts, key="reviewType"),
+                "runtime": self._latest_summary_records(runtime_reports, key="target"),
+                "status": decision["status"],
+                "failureClass": decision["failureClass"],
+            },
+            "review": {
+                "runs": self._latest_summary_records(review_runs, key="reviewType"),
+                "reportSections": report_sections,
+            },
+            "risks": risks,
+            "limitations": limitations,
+            "fallbackReason": delivery.downgrade_reason
+            or ("AI-authored report sections were unavailable; a deterministic summary was generated." if not report_sections else None),
+        }
+
+    def _latest_summary_records(self, records: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for record in records:
+            group = str(record.get(key) or "default")
+            current = latest.get(group)
+            attempt = self._record_attempt(record)
+            if current is None or attempt >= self._record_attempt(current):
+                latest[group] = record
+        return [
+            {
+                key: record.get(key),
+                "attempt": record.get("attempt", 0),
+                "status": record.get("status", "unknown"),
+                "failureClass": record.get("failureClass", "unknown"),
+                "decision": record.get("decision") or record.get("message"),
+            }
+            for _, record in sorted(latest.items())
+        ]
+
+    def _summary_risks(
+        self,
+        *,
+        report_sections: list[dict[str, Any]],
+        decision: dict[str, Any],
+        audit_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        risks: list[dict[str, Any]] = []
+        for observation in decision.get("observations", []):
+            if isinstance(observation, dict):
+                risks.append(
+                    {
+                        "source": str(observation.get("group") or "validation"),
+                        "status": str(observation.get("status") or "unknown"),
+                        "failureClass": str(observation.get("failureClass") or "unknown"),
+                        "summary": str(observation.get("decision") or "Validation requires attention."),
+                    }
+                )
+        for section in report_sections:
+            anchor = str(section.get("anchor") or "")
+            if "risk" not in anchor and section.get("status") not in {"fail", "best_effort", "retry"}:
+                continue
+            summary = section.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                risks.append(
+                    {
+                        "source": anchor or "report_section",
+                        "status": str(section.get("status") or "unknown"),
+                        "failureClass": "unknown",
+                        "summary": summary.strip(),
+                    }
+                )
+        placeholders = self._dependency_placeholder_rows(audit_payload.get("reconstructionPlans", []))
+        if placeholders:
+            risks.append(
+                {
+                    "source": "dependency_placeholders",
+                    "status": "best_effort",
+                    "failureClass": "dependency_missing",
+                    "summary": f"{len(placeholders)} unresolved dependency placeholder(s) remain.",
+                }
+            )
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for risk in risks:
+            identity = (risk["source"], risk["summary"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            unique.append(risk)
+        return unique
+
+    def _summary_limitations(
+        self,
+        *,
+        audit_payload: dict[str, Any],
+        delivery: DeliveryResult,
+    ) -> list[str]:
+        limitations: list[str] = []
+        for reconstruction in audit_payload.get("reconstructionPlans", []):
+            if not isinstance(reconstruction, dict):
+                continue
+            plan = reconstruction.get("plan")
+            if not isinstance(plan, dict):
+                continue
+            for limitation in plan.get("limitations", []):
+                if isinstance(limitation, str) and limitation.strip():
+                    limitations.append(limitation.strip())
+        if delivery.downgrade_reason:
+            limitations.append(delivery.downgrade_reason)
+        return list(dict.fromkeys(limitations))
 
     def _audit_payload(self, *, job: JobRecord, artifacts: list[ArtifactRecord], store) -> dict[str, Any]:
         payload = {
@@ -1381,7 +1623,7 @@ class PackagingRunner:
                 path="evidence-index.json",
                 content_type="application/json",
                 source="evidence_index",
-                description="结果包、报告和证据附件的结构化索引。",
+                description="内部证据包、报告和证据附件的结构化索引。",
             ),
             self._package_content(
                 path="artifact-manifest.json",
@@ -1508,7 +1750,7 @@ class PackagingRunner:
                     path=attachment["packagePath"] or f"evidence/{attachment['kind']}/{attachment['artifactId']}",
                     content_type=str(attachment["contentType"]),
                     source=str(attachment["kind"]),
-                    description="已收集到结果包中的证据附件。",
+                    description="已收集到内部证据包中的证据附件。",
                     artifact_id=str(attachment["artifactId"]),
                     included=bool(attachment["included"]),
                     reason=str(attachment["reason"]),
@@ -1667,7 +1909,7 @@ class PackagingRunner:
             self._report_section(
                 title="证据附件索引",
                 anchor="evidence-attachment-index",
-                summary="结果包中包含或省略的证据文件。",
+                summary="内部证据包中包含或省略的证据文件。",
                 artifact_kinds=(),
                 artifact_ids_by_kind=artifact_ids_by_kind,
                 evidence_artifact_ids=attachment_ids,
@@ -1675,8 +1917,8 @@ class PackagingRunner:
             self._report_section(
                 title="复现方法",
                 anchor="reproduction",
-                summary="离线检查结果包所需的命令和文件。",
-                artifact_kinds=("result_package", "evidence_index"),
+                summary="离线检查内部证据包所需的命令和文件。",
+                artifact_kinds=("evidence_index",),
                 artifact_ids_by_kind=artifact_ids_by_kind,
             ),
         ]
@@ -2427,7 +2669,7 @@ class PackagingRunner:
             text = f"{text[:157]}..."
         return text
 
-    def _package_bytes(
+    def _evidence_package_bytes(
         self,
         *,
         audit_payload: dict[str, Any],

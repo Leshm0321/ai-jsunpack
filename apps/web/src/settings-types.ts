@@ -1,7 +1,7 @@
 import type { SettingsSection } from "./routes";
 import type { TranslationKey } from "./i18n";
 
-export type SettingSource = "built-in" | "file" | "environment" | "system" | "project" | "job";
+export type SettingSource = "built-in" | "file" | "environment" | "account" | "system" | "project" | "job";
 
 export interface EffectiveConfigResponse {
   config?: Record<string, unknown>;

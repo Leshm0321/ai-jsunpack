@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { CloudMode } from "@ai-jsunpack/shared";
 import type { ArtifactPreview, JobEvidence, WorkbenchData } from "./workbench-types";
@@ -13,7 +13,7 @@ import {
   fetchJobWorkspace,
   formatArtifactPreviewText
 } from "./workbench-logic";
-import { API_BASE_URL, createJob, fetchArtifactText, rerunJob, uploadSource } from "./api";
+import { API_BASE_URL, createJob, fetchArtifactText, rerunJob, uploadDirectory, uploadSource } from "./api";
 import type { JobSummary } from "./api";
 import { useLocalization } from "./i18n";
 import { workbenchPath } from "./routes";
@@ -24,12 +24,14 @@ export function AppContainer({
   route
 }: {
   onNavigate: (route: AppRoute) => void;
-  route: Extract<ParsedAppRoute, { kind: "workbench" | "workbench-new" }>;
+  route: Extract<ParsedAppRoute, { kind: "workbench" | "workbench-new" | "workbench-history" }>;
 }) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview>(() => emptyArtifactPreview());
   const [selectedCloudMode, setSelectedCloudMode] = useState<CloudMode>("local_only");
   const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
+  const [selectedDirectoryFiles, setSelectedDirectoryFiles] = useState<File[]>([]);
+  const [selectedInputMode, setSelectedInputMode] = useState<"file" | "folder">("file");
   const [jobSummary, setJobSummary] = useState<JobSummary | null>(null);
   const [evidence, setEvidence] = useState<JobEvidence>(() => emptyEvidence());
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -37,6 +39,7 @@ export function AppContainer({
   const [isRerunning, setIsRerunning] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
+  const autoOpenedResultJobRef = useRef<string | null>(null);
 
   const currentJob = jobSummary?.job ?? null;
   const routeJobId = route.kind === "workbench" ? route.jobId : null;
@@ -94,6 +97,19 @@ export function AppContainer({
   }, [routeJobId, currentJob?.id, t]);
 
   useEffect(() => {
+    if (
+      route.kind === "workbench" &&
+      route.section === "overview" &&
+      currentJob &&
+      (currentJob.status === "completed" || currentJob.status === "completed_best_effort") &&
+      autoOpenedResultJobRef.current !== currentJob.id
+    ) {
+      autoOpenedResultJobRef.current = currentJob.id;
+      onNavigate(workbenchPath(currentJob.id, "result"));
+    }
+  }, [currentJob, onNavigate, route]);
+
+  useEffect(() => {
     if (!currentJob?.id || !selectedArtifact || route.kind !== "workbench" || route.section !== "artifacts") {
       setArtifactPreview(emptyArtifactPreview());
       return;
@@ -144,8 +160,12 @@ export function AppContainer({
   const handleSubmitJob = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isSubmitting) return;
-    if (!selectedUploadFile) {
+    if (selectedInputMode === "file" && !selectedUploadFile) {
       setUploadError(t("upload.error.noFile"));
+      return;
+    }
+    if (selectedInputMode === "folder" && selectedDirectoryFiles.length === 0) {
+      setUploadError(t("upload.error.noFolder"));
       return;
     }
     setIsSubmitting(true);
@@ -156,10 +176,12 @@ export function AppContainer({
     try {
       const created = await createJob(selectedCloudMode);
       setJobSummary(created);
-      const uploaded = await uploadSource(created.job.id, selectedUploadFile);
+      const uploaded = selectedInputMode === "folder"
+        ? await uploadDirectory(created.job.id, selectedDirectoryFiles)
+        : await uploadSource(created.job.id, selectedUploadFile!);
       setJobSummary(uploaded);
       setEvidence(await fetchJobEvidence(created.job.id));
-      onNavigate(workbenchPath(uploaded.job.id, "overview"));
+      onNavigate(workbenchPath(uploaded.job.id, uploaded.job.status === "completed" || uploaded.job.status === "completed_best_effort" ? "result" : "overview"));
     } catch (error) {
       setUploadError(errorMessage(error, t));
     } finally {
@@ -221,18 +243,26 @@ export function AppContainer({
       isSubmitting={isSubmitting}
       onArtifactSelect={setSelectedArtifactId}
       onEvidenceArtifactSelect={handleArtifactEvidenceSelect}
+      onDirectoryChange={setSelectedDirectoryFiles}
       onFileChange={setSelectedUploadFile}
       onNavigate={onNavigate}
       onRefreshJob={handleRefreshJob}
       onRerunJob={handleRerunJob}
       onSelectCloudMode={setSelectedCloudMode}
+      onSelectInputMode={(mode) => {
+        setSelectedInputMode(mode);
+        setUploadError(null);
+      }}
       onSubmitJob={handleSubmitJob}
       pollError={pollError}
+      routeJobId={routeJobId}
       selectedArtifact={selectedArtifact}
       selectedCloudMode={selectedCloudMode}
+      selectedDirectoryFiles={selectedDirectoryFiles}
+      selectedInputMode={selectedInputMode}
       selectedUploadFile={selectedUploadFile}
       uploadError={uploadError}
-      view={route.kind === "workbench" ? route.section : "new"}
+      view={route.kind === "workbench" ? route.section : route.kind === "workbench-history" ? "history" : "new"}
     />
   );
 }

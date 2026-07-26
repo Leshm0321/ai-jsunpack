@@ -2,7 +2,7 @@ import { useRef } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import {
   Activity, Archive, Binary, Bot, Braces, CheckCircle2, ChevronRight, CircleAlert, FileCode2,
-  GitBranch, LayoutDashboard, Network, Plus, Radar, RefreshCw, SearchCode, Settings2, ShieldCheck,
+  FileCheck2, FolderOpen, GitBranch, History, LayoutDashboard, Network, Plus, Radar, RefreshCw, SearchCode, Settings2, ShieldCheck,
   Sparkles, Upload, Workflow, XCircle
 } from "lucide-react";
 import type { Artifact, CloudMode, Job } from "@ai-jsunpack/shared";
@@ -22,11 +22,13 @@ import { EmptyState, StatusBanner, StatusToken } from "./workbench-common";
 import { EvidenceGraphPanel } from "./workbench-graph";
 import { formatBytes, formatPercent } from "./workbench-logic";
 import { RuntimePanel } from "./workbench-runtime";
+import { WorkbenchHistory } from "./workbench-history";
+import { WorkbenchResult } from "./workbench-result";
 import { JobSummaryPanel, LanguageToggle, ModePill, PipelineMap, WorkspaceActions } from "./workbench-shell";
 import { workbenchPath } from "./routes";
 import type { AppRoute, WorkbenchSection } from "./routes";
 
-type WorkbenchView = WorkbenchSection | "new";
+type WorkbenchView = WorkbenchSection | "history" | "new";
 
 export function emptyEvidence(): JobEvidence {
   return { runtimeValidations: [], inferenceRecords: [], reviewRuns: [], toolCalls: [] };
@@ -47,22 +49,28 @@ interface AppViewProps {
   isRerunning: boolean;
   isSubmitting: boolean;
   onArtifactSelect: (artifactId: string) => void;
+  onDirectoryChange: (files: File[]) => void;
   onEvidenceArtifactSelect: (artifactId: string) => void;
   onFileChange: (file: File | null) => void;
   onNavigate: (route: AppRoute) => void;
   onRefreshJob: () => void;
   onRerunJob: () => void;
   onSelectCloudMode: (mode: CloudMode) => void;
+  onSelectInputMode: (mode: "file" | "folder") => void;
   onSubmitJob: (event: FormEvent<HTMLFormElement>) => void;
   pollError: string | null;
+  routeJobId: string | null;
   selectedArtifact: Artifact | null;
   selectedCloudMode: CloudMode;
+  selectedDirectoryFiles: File[];
+  selectedInputMode: "file" | "folder";
   selectedUploadFile: File | null;
   uploadError: string | null;
   view: WorkbenchView;
 }
 
 const viewMeta = {
+  result: { labelKey: "workbench.view.result.label", summaryKey: "workbench.view.result.summary", icon: FileCheck2 },
   overview: { labelKey: "workbench.view.overview.label", summaryKey: "workbench.view.overview.summary", icon: LayoutDashboard },
   artifacts: { labelKey: "workbench.view.artifacts.label", summaryKey: "workbench.view.artifacts.summary", icon: FileCode2 },
   evidence: { labelKey: "workbench.view.evidence.label", summaryKey: "workbench.view.evidence.summary", icon: GitBranch },
@@ -88,6 +96,8 @@ export function AppView(props: AppViewProps) {
   useMetricMotion(rootRef, metricKey);
   const activeMeta = props.view === "new"
     ? { labelKey: "workbench.new.label" as const, summaryKey: "workbench.new.summary" as const }
+    : props.view === "history"
+      ? { labelKey: "workbench.history.label" as const, summaryKey: "workbench.history.summary" as const }
     : viewMeta[props.view];
   return (
     <div className="application-frame" ref={rootRef}>
@@ -128,6 +138,9 @@ function WorkbenchSidebar({ currentJob, activeView, onNavigate }: { currentJob: 
       <button className={activeView === "new" ? "sidebar-link active" : "sidebar-link"} type="button" onClick={() => onNavigate("/workbench/new")}>
         <Plus size={17} aria-hidden="true" /><span><strong>{t("workbench.new.label")}</strong><small>{t("workbench.new.sidebarSummary")}</small></span><ChevronRight size={15} aria-hidden="true" />
       </button>
+      <button className={activeView === "history" ? "sidebar-link active" : "sidebar-link"} type="button" onClick={() => onNavigate("/workbench/history")}>
+        <History size={17} aria-hidden="true" /><span><strong>{t("workbench.history.label")}</strong><small>{t("workbench.history.sidebarSummary")}</small></span><ChevronRight size={15} aria-hidden="true" />
+      </button>
       <div className="sidebar-context"><span>{t("workbench.currentJob")}</span><strong>{currentJob?.id ?? t("workbench.noJobSelected")}</strong>{currentJob ? <StatusToken status={currentJob.status} /> : null}</div>
       <nav className="sidebar-nav">
         {(Object.entries(viewMeta) as Array<[WorkbenchSection, (typeof viewMeta)[WorkbenchSection]]>).map(([section, meta]) => {
@@ -143,6 +156,8 @@ function WorkbenchSidebar({ currentJob, activeView, onNavigate }: { currentJob: 
 function WorkbenchRouteContent(props: AppViewProps) {
   const { t } = useLocalization();
   if (props.view === "new") return <NewAnalysisView {...props} />;
+  if (props.view === "history") return <WorkbenchHistory onNavigate={props.onNavigate} />;
+  if (props.view === "result" && props.routeJobId) return <WorkbenchResult jobId={props.routeJobId} onNavigate={props.onNavigate} />;
   if (!props.currentJob) return <section className="route-panel"><EmptyState title={t("workbench.error.jobUnavailable.title")} detail={t("workbench.error.jobUnavailable.detail")} /></section>;
   if (props.view === "overview") return <OverviewView {...props} />;
   if (props.view === "artifacts") return <ArtifactsView {...props} />;
@@ -154,13 +169,25 @@ function WorkbenchRouteContent(props: AppViewProps) {
 
 function NewAnalysisView(props: AppViewProps) {
   const { t } = useLocalization();
+  const directorySize = props.selectedDirectoryFiles.reduce((total, file) => total + file.size, 0);
+  const directoryName = props.selectedDirectoryFiles[0]?.webkitRelativePath.split("/")[0] ?? t("upload.selectFolder");
+  const directoryInputProps = { directory: "", webkitdirectory: "" } as Record<string, string>;
   return (
     <div className="route-grid new-analysis-grid">
       <section className="route-panel upload-panel">
         <PanelHeading kicker={t("workbench.new.sourceKicker")} title={t("workbench.new.inputTitle")} icon={Archive} />
         <form className="upload-form" onSubmit={props.onSubmitJob}>
-          <label className="dropzone" htmlFor="source-upload"><Archive size={24} aria-hidden="true" /><div><strong>{props.selectedUploadFile?.name ?? t("upload.selectArtifact")}</strong><span>{props.selectedUploadFile ? formatBytes(props.selectedUploadFile.size) : t("upload.fileTypes")}</span></div></label>
-          <input className="visually-hidden" id="source-upload" type="file" onChange={(event: ChangeEvent<HTMLInputElement>) => props.onFileChange(event.currentTarget.files?.[0] ?? null)} />
+          <div className="upload-kind-switch" role="tablist" aria-label={t("upload.inputType")}>
+            <button aria-selected={props.selectedInputMode === "file"} className={props.selectedInputMode === "file" ? "upload-kind-option active" : "upload-kind-option"} role="tab" type="button" onClick={() => props.onSelectInputMode("file")}><Archive size={17} aria-hidden="true" /><span><strong>{t("upload.fileOrArchive")}</strong><small>{t("upload.fileOrArchiveDetail")}</small></span></button>
+            <button aria-selected={props.selectedInputMode === "folder"} className={props.selectedInputMode === "folder" ? "upload-kind-option active" : "upload-kind-option"} role="tab" type="button" onClick={() => props.onSelectInputMode("folder")}><FolderOpen size={17} aria-hidden="true" /><span><strong>{t("upload.folder")}</strong><small>{t("upload.folderDetail")}</small></span></button>
+          </div>
+          {props.selectedInputMode === "file" ? <>
+            <label className="dropzone" htmlFor="source-upload"><Archive size={24} aria-hidden="true" /><div><strong>{props.selectedUploadFile?.name ?? t("upload.selectArtifact")}</strong><span>{props.selectedUploadFile ? formatBytes(props.selectedUploadFile.size) : t("upload.fileTypes")}</span></div></label>
+            <input accept=".js,.mjs,.cjs,.zip,.tar,.tgz,.tar.gz" className="visually-hidden" id="source-upload" type="file" onChange={(event: ChangeEvent<HTMLInputElement>) => props.onFileChange(event.currentTarget.files?.[0] ?? null)} />
+          </> : <>
+            <label className="dropzone" htmlFor="directory-upload"><FolderOpen size={24} aria-hidden="true" /><div><strong>{directoryName}</strong><span>{props.selectedDirectoryFiles.length ? `${props.selectedDirectoryFiles.length} ${t("upload.files")} · ${formatBytes(directorySize)}` : t("upload.selectFolderDetail")}</span></div></label>
+            <input {...directoryInputProps} className="visually-hidden" id="directory-upload" multiple type="file" onChange={(event: ChangeEvent<HTMLInputElement>) => props.onDirectoryChange(Array.from(event.currentTarget.files ?? []))} />
+          </>}
           <div className="mode-grid" aria-label={t("app.aria.processingModes")}>{CLOUD_MODES.map((mode) => <ModePill active={mode === props.selectedCloudMode} key={mode} label={mode} onClick={() => props.onSelectCloudMode(mode)} />)}</div>
           <button className="primary-action" type="submit" disabled={props.isSubmitting}><Upload size={17} aria-hidden="true" />{props.isSubmitting ? t("workbench.new.creating") : t("workbench.new.create")}</button>
         </form>
