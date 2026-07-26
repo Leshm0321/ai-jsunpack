@@ -174,6 +174,48 @@ class ReconstructionFeedbackTest(unittest.TestCase):
             self.assertEqual(len(feedback["rejectedActions"]), 2)
             self.assertTrue(all("存在冲突" in item["reason"] for item in feedback["rejectedActions"]))
 
+    def test_runner_allows_review_approved_symbol_rename_map_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _FakeStore(Path(temp_dir))
+            repair = store.add_parent(
+                "repair_rename",
+                "repair_instruction",
+                {
+                    "id": "RepairAgent:repair:rename",
+                    "targetStage": "reconstructing",
+                    "status": "planned",
+                    "riskLevel": "low",
+                    "actions": [
+                        {
+                            "action": "apply_symbol_rename_map",
+                            "path": "src/transformed/assets/app.js",
+                            "value": json.dumps({"a": "bootstrapApp"}),
+                            "reason": "Accepted NamingAgent evidence maps a to bootstrapApp.",
+                        }
+                    ],
+                },
+            )
+            review = store.add_parent(
+                "review",
+                "review_run",
+                {
+                    "reviewType": "agent_review",
+                    "status": "pass",
+                    "failureClass": "none",
+                    "repairInstructionIds": ["RepairAgent:repair:rename"],
+                },
+            )
+
+            feedback = ReconstructionRunner()._writer_feedback_inputs(
+                job_id="job_feedback",
+                store=store,
+                parent_artifact_ids=[repair.id, review.id],
+            )
+
+            assert feedback is not None
+            self.assertEqual(feedback["approvedActions"][0]["action"], "apply_symbol_rename_map")
+            self.assertEqual(feedback["approvedActions"][0]["path"], "src/transformed/assets/app.js")
+
     def test_failed_agent_review_cannot_authorize_repairs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = _FakeStore(Path(temp_dir))

@@ -667,7 +667,10 @@ class CrewExecutionManager:
                 if name in executions_by_name
             ]
         dependency_outputs = {
-            name: self._structured_output_for_context(executions_by_name[name])
+            name: self._structured_output_for_context(
+                executions_by_name[name],
+                consumer_name=spec.name,
+            )
             for name in context_agent_names
             if name in executions_by_name
         }
@@ -689,13 +692,14 @@ class CrewExecutionManager:
             if stage.conflict_summary
         ]
         prompt = {
-            **context.prompt_context,
+            **self._context_value(context.prompt_context),
             "agent": {
                 "name": spec.name,
                 "stage": spec.stage,
                 "responsibility": spec.responsibility,
                 "dependencies": spec.dependencies,
             },
+            "roleConstraints": self._role_constraints(spec.name, context.request),
             "completedAgents": completed,
             "dependencyOutputs": dependency_outputs,
             "stageSummaries": [
@@ -716,7 +720,83 @@ class CrewExecutionManager:
                 "synthesis": [name for name in ("RepairAgent", "ReportAgent") if name in dependency_outputs],
                 "normalizedOutputsKey": "dependencyOutputs",
             }
+        self._tailor_source_context(prompt, spec.name)
         return prompt
+
+    def _tailor_source_context(self, prompt: dict[str, Any], agent_name: str) -> None:
+        input_summary = prompt.get("inputSummary")
+        if not isinstance(input_summary, dict):
+            return
+        transformed_sources = input_summary.get("transformedSources")
+        if not isinstance(transformed_sources, list):
+            return
+        if agent_name in {"NamingAgent", "AnalysisAgent", "TypeAgent", "DeadCodeAgent"}:
+            return
+        excerpt_limit = 0 if agent_name in {"RepairAgent", "ReviewAgent"} else 2_000
+        for item in transformed_sources:
+            if not isinstance(item, dict):
+                continue
+            excerpt = item.get("excerpt")
+            item["excerpt"] = excerpt[:excerpt_limit] if isinstance(excerpt, str) else ""
+
+    def _role_constraints(self, agent_name: str, request: AgentRuntimeRequest) -> list[dict[str, Any]]:
+        source_targets = [
+            item["targetPath"]
+            for item in AgentContextBuilder()._transformed_source_context(request.source_index_payload)
+        ]
+        if agent_name == "NamingAgent":
+            return [
+                {
+                    "rule": "naming_scope",
+                    "description": (
+                        "Only emit naming inferences for obfuscated bindings that appear in evidenceRefs or "
+                        "inputSummary.transformedSources."
+                    ),
+                },
+                {
+                    "rule": "target_value_contract",
+                    "description": (
+                        "Set target to exactly one old obfuscated binding name and value to exactly one legal readable "
+                        "replacement identifier. value must contain only the identifier, never prose."
+                    ),
+                },
+                {
+                    "rule": "accepted_threshold",
+                    "description": "Use validationStatus=accepted only for high-confidence evidence-backed renames.",
+                },
+            ]
+        if agent_name == "RepairAgent":
+            return [
+                {
+                    "rule": "rename_action_contract",
+                    "description": (
+                        "For each source target, create exactly one planned low-risk apply_symbol_rename_map repair action "
+                        "when obfuscatedBindings is non-empty. Start with every obfuscatedBindings name mapped to its "
+                        "fallbackName, then override only with accepted NamingAgent target/value pairs. The JSON map must "
+                        "cover every listed obfuscated binding exactly once, use unique destination identifiers, and omit "
+                        "all prose from the value string."
+                    ),
+                    "allowedSourceIndexTargetPaths": source_targets,
+                    "valueFormat": "JSON object string mapping old binding names to legal new identifiers",
+                    "targetStage": "reconstructing",
+                }
+            ]
+        if agent_name == "ReviewAgent":
+            return [
+                {
+                    "rule": "review_known_rename_repairs_only",
+                    "description": (
+                        "Approve only existing planned low-risk reconstructing RepairAgent IDs with one "
+                        "apply_symbol_rename_map action targeting an allowed source path and fully covering bindings with "
+                        "unique legal identifiers. If repairInstructionIds is non-empty, MUST return status=pass and "
+                        "failureClass=none. Put runtime/source-map/unrelated caveats in limitations or decision; do not "
+                        "downgrade the repair approval."
+                    ),
+                    "allowedSourceIndexTargetPaths": source_targets,
+                    "approvalStatusContract": "approved repair IDs + failureClass=none => status=pass",
+                }
+            ]
+        return []
 
     def _apply_context_budget(
         self,
@@ -795,7 +875,12 @@ class CrewExecutionManager:
         serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return math.ceil(len(serialized.encode("utf-8")) / 4)
 
-    def _structured_output_for_context(self, execution: CrewAgentExecution) -> dict[str, Any]:
+    def _structured_output_for_context(
+        self,
+        execution: CrewAgentExecution,
+        *,
+        consumer_name: str | None = None,
+    ) -> dict[str, Any]:
         raw_output = self._context_value(execution.raw_output)
         if isinstance(raw_output, dict):
             raw_output = dict(raw_output)
@@ -810,7 +895,7 @@ class CrewExecutionManager:
                 "review",
             ):
                 raw_output.pop(duplicated_key, None)
-        return {
+        structured = {
             "status": execution.status,
             "failureClass": execution.failure_class,
             "message": execution.message,
@@ -820,6 +905,77 @@ class CrewExecutionManager:
             "reportSections": self._context_value(execution.report_sections),
             "repairInstructions": self._context_value(execution.repair_instructions),
             "review": self._context_value(execution.review),
+        }
+        if consumer_name not in {"RepairAgent", "ReportAgent", "ReviewAgent"}:
+            return structured
+        projected_inferences = [
+            self._project_context_fields(
+                inference,
+                (
+                    "type",
+                    "agent_name",
+                    "confidence",
+                    "validation_status",
+                    "target",
+                    "value",
+                ),
+            )
+            for inference in structured["inferences"]
+            if isinstance(inference, dict)
+        ]
+        projected_diagnoses = [
+            self._project_context_fields(
+                diagnosis,
+                (
+                    "target_stage",
+                    "status",
+                    "failure_class",
+                    "diagnosis",
+                    "confidence",
+                ),
+            )
+            for diagnosis in structured["runtimeDiagnoses"]
+            if isinstance(diagnosis, dict)
+        ]
+        projected_report_sections = structured["reportSections"]
+        projected_repair_instructions = structured["repairInstructions"]
+        if consumer_name == "ReviewAgent":
+            if execution.spec.name != "NamingAgent":
+                projected_inferences = []
+            projected_diagnoses = []
+            projected_report_sections = (
+                [
+                    self._project_context_fields(
+                        section,
+                        ("title", "anchor", "status", "confidence"),
+                    )
+                    for section in structured["reportSections"]
+                    if isinstance(section, dict)
+                ]
+                if execution.spec.name == "ReportAgent"
+                else []
+            )
+            if execution.spec.name != "RepairAgent":
+                projected_repair_instructions = []
+        return {
+            "status": structured["status"],
+            "failureClass": structured["failureClass"],
+            "inferences": projected_inferences,
+            "runtimeDiagnoses": projected_diagnoses,
+            "reportSections": projected_report_sections,
+            "repairInstructions": projected_repair_instructions,
+            "review": structured["review"],
+        }
+
+    def _project_context_fields(
+        self,
+        value: dict[str, Any],
+        field_names: tuple[str, ...],
+    ) -> dict[str, Any]:
+        return {
+            field_name: value[field_name]
+            for field_name in field_names
+            if field_name in value and value[field_name] is not None
         }
 
     def _context_value(self, value: Any) -> Any:

@@ -3,13 +3,15 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from urllib.request import urlopen
 import zipfile
 from pathlib import Path
 
 from apps.api.app.models import CreateJobRequest
 from apps.api.app.store import create_store
-from apps.worker.worker.pipeline import WorkerPipeline
+from apps.worker.worker.core_bridge import CoreAnalysisResult
+from apps.worker.worker.pipeline import PipelineContext, PipelineRun, WorkerPipeline
 from apps.worker.worker.runtime_smoke import BrowserSmokeCapture, BrowserSmokeRequest, RuntimeSmokeRunner
 
 
@@ -55,6 +57,53 @@ class AlwaysDifferentBrowserAdapter:
                 "textLength": len(content),
                 "textSample": label,
             },
+        )
+
+
+class _SourceIndexCoreBridge:
+    def analyze_input_package(self, *, job_id: str, input_path: Path | str) -> CoreAnalysisResult:
+        del job_id, input_path
+        return CoreAnalysisResult(
+            inventory_artifact_payload={
+                "kind": "input_inventory",
+                "inventory": {"entries": ["index.html"], "scripts": ["assets/app.js"]},
+            },
+            ast_index_artifact_payload={
+                "kind": "ast_index",
+                "astIndexes": [{"filePath": "assets/app.js", "symbols": [{"name": "a"}]}],
+            },
+            source_index_artifact_payload={
+                "kind": "source_index",
+                "sources": [
+                    {
+                        "targetPath": "src/transformed/assets/app.js",
+                        "transformedSource": "function a(){return 1}",
+                    }
+                ],
+            },
+        )
+
+
+class _CapturingAgentRuntime:
+    def __init__(self) -> None:
+        self.request = None
+
+    def run(self, *, job_id: str, store, request):
+        del job_id, store
+        self.request = request
+        return SimpleNamespace(
+            plan_artifact=SimpleNamespace(id="agent_plan"),
+            memory_artifacts=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            tool_registry_artifact=SimpleNamespace(id="tool_registry"),
+            agent_execution_artifacts=[],
+            inference_artifacts=[],
+            runtime_diagnosis_artifacts=[],
+            report_section_artifacts=[],
+            repair_instruction_artifacts=[],
+            review_artifact=SimpleNamespace(id="review"),
+            tool_call_artifact=SimpleNamespace(id="tool_call"),
+            message="captured",
         )
 
 
@@ -131,6 +180,7 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertEqual(persisted_job.status, "completed_best_effort")
                 self.assertEqual(persisted_job.failure_class, "policy_denied")
                 self.assertIn("input_inventory", artifact_by_kind)
+                self.assertIn("source_index", artifact_by_kind)
                 self.assertIn("ast_index", artifact_by_kind)
                 self.assertIn("agent_plan", artifact_by_kind)
                 self.assertIn("agent_execution", artifact_by_kind)
@@ -164,6 +214,7 @@ class WorkerPipelineTest(unittest.TestCase):
 
                 inventory_artifact = artifact_by_kind["input_inventory"]
                 ast_index_artifact = artifact_by_kind["ast_index"]
+                source_index_artifact = artifact_by_kind["source_index"]
                 memory_artifacts = artifacts_by_kind["memory_record"]
                 memory_by_type = {
                     json.loads(Path(artifact.storage_uri).read_text(encoding="utf-8"))["memoryType"]: artifact
@@ -273,6 +324,7 @@ class WorkerPipelineTest(unittest.TestCase):
                     [
                         inventory_artifact.id,
                         ast_index_artifact.id,
+                        source_index_artifact.id,
                         *[artifact.id for artifact in memory_artifacts],
                         knowledge_artifact.id,
                         tool_registry_artifact.id,
@@ -403,6 +455,36 @@ class WorkerPipelineTest(unittest.TestCase):
                 self.assertIn(artifact_by_kind["audit_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
                 self.assertIn(artifact_by_kind["html_report"].id, artifact_by_kind["result_package"].parent_artifact_ids)
                 self.assertIn(artifact_by_kind["evidence_index"].id, artifact_by_kind["result_package"].parent_artifact_ids)
+            finally:
+                store.close()
+
+    def test_worker_pipeline_persists_source_index_and_passes_it_to_agent_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "dist"
+            input_root.mkdir(parents=True)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                agent_runtime = _CapturingAgentRuntime()
+                pipeline = WorkerPipeline(core_bridge=_SourceIndexCoreBridge(), agent_runtime=agent_runtime)
+                context_run = pipeline._run_core_and_agent  # exercise only the core-to-agent handoff
+
+                run = PipelineRun(job_id=job.id)
+                context_run(
+                    PipelineContext(job_id=job.id, input_path=input_root, store=store, run=run)
+                )
+                artifacts = store.list_artifacts(job.id)
+                source_index_artifact = next(artifact for artifact in artifacts if artifact.kind == "source_index")
+                payload = json.loads(Path(source_index_artifact.storage_uri).read_text(encoding="utf-8"))
+
+                self.assertEqual(payload["sources"][0]["targetPath"], "src/transformed/assets/app.js")
+                self.assertIsNotNone(agent_runtime.request)
+                self.assertEqual(agent_runtime.request.source_index_artifact_id, source_index_artifact.id)
+                self.assertIn(source_index_artifact.id, agent_runtime.request.input_artifact_ids)
             finally:
                 store.close()
 

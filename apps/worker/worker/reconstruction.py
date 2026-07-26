@@ -278,8 +278,18 @@ class ReconstructionRunner:
             "add_package_script",
             "replace_package_script",
             "mirror_original_static_entry",
+            "apply_symbol_rename_map",
         }:
             return None, f"不支持的修复动作：{payload['action']}。"
+        if payload["action"] == "apply_symbol_rename_map":
+            try:
+                rename_map = json.loads(payload["value"])
+            except json.JSONDecodeError:
+                return None, "apply_symbol_rename_map value must be a JSON object string."
+            if not isinstance(rename_map, dict) or not rename_map:
+                return None, "apply_symbol_rename_map value must be a non-empty JSON object string."
+            if not all(isinstance(key, str) and isinstance(value, str) for key, value in rename_map.items()):
+                return None, "apply_symbol_rename_map value must contain only string-to-string entries."
         normalized = {
             "sourceArtifactId": artifact_id,
             "action": payload["action"],

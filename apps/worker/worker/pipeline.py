@@ -190,6 +190,18 @@ class WorkerPipeline:
             producer="worker.core",
             parent_artifact_ids=[inventory_artifact.id],
         )
+        source_index_artifact = None
+        if result.source_index_artifact_payload is not None:
+            source_index_artifact = context.store.write_artifact(
+                context.job_id,
+                kind="source_index",
+                stage="indexing",
+                filename="source-index.json",
+                content=self._json_bytes(result.source_index_artifact_payload),
+                content_type="application/json",
+                producer="worker.core",
+                parent_artifact_ids=[inventory_artifact.id, ast_artifact.id],
+            )
         self._raise_if_cancelled(job_id=context.job_id, store=context.store)
         context.job = context.store.get_job(context.job_id)
         if context.job is None:
@@ -203,6 +215,8 @@ class WorkerPipeline:
             ast_index_artifact_id=ast_artifact.id,
             inventory_payload=result.inventory_artifact_payload,
             ast_index_payload=result.ast_index_artifact_payload,
+            source_index_artifact_id=source_index_artifact.id if source_index_artifact is not None else None,
+            source_index_payload=result.source_index_artifact_payload,
         )
         context.agent_result = self.agent_runtime.run(job_id=context.job_id, store=context.store, request=agent_request)
         context.run.transition("agent_planning", "CrewAI 规划上下文和证据已持久化。")
@@ -212,6 +226,7 @@ class WorkerPipeline:
         context.evidence_parent_ids = [
             inventory_artifact.id,
             ast_artifact.id,
+            *([source_index_artifact.id] if source_index_artifact is not None else []),
             context.agent_result.plan_artifact.id,
             *[artifact.id for artifact in context.agent_result.memory_artifacts],
             context.agent_result.knowledge_artifact.id,
@@ -724,10 +739,21 @@ class WorkerPipeline:
                 actions = [
                     item
                     for item in value
-                    if item in {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+                    if item
+                    in {
+                        "add_package_script",
+                        "replace_package_script",
+                        "mirror_original_static_entry",
+                        "apply_symbol_rename_map",
+                    }
                 ]
                 return list(dict.fromkeys(actions))
-        return ["add_package_script", "replace_package_script", "mirror_original_static_entry"]
+        return [
+            "add_package_script",
+            "replace_package_script",
+            "mirror_original_static_entry",
+            "apply_symbol_rename_map",
+        ]
 
     def _review_fix_failure_mapping(self, *, build_summary: dict, runtime_summary: dict) -> list[dict]:
         mappings = [

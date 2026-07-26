@@ -1476,7 +1476,13 @@ class RuntimeCompareRepairRunner:
         allowed = [
             item
             for item in value
-            if item in {"add_package_script", "replace_package_script", "mirror_original_static_entry"}
+            if item
+            in {
+                "add_package_script",
+                "replace_package_script",
+                "mirror_original_static_entry",
+                "apply_symbol_rename_map",
+            }
         ]
         return tuple(dict.fromkeys(allowed))
 

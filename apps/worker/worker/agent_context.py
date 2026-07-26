@@ -10,6 +10,10 @@ from packages.knowledge import KnowledgeHit
 from .agent_contracts import AgentModelPolicy, AgentRuntimeRequest
 
 
+MAX_SOURCE_EXCERPT_CHARS = 32_000
+MAX_SOURCE_CONTEXT_ITEMS = 4
+
+
 @dataclass(frozen=True)
 class AgentContextRedactionResult:
     input_summary: dict[str, Any]
@@ -74,8 +78,38 @@ class AgentContextRedactor:
                 redacted[key] = self._redact_string_list(value, "path", counts)
             elif key == "symbolSample":
                 redacted[key] = self._redact_string_list(value, "symbol", counts)
+            elif key == "transformedSources":
+                redacted[key] = self._redact_source_context(value, counts)
             else:
                 redacted[key] = value
+        return redacted
+
+    def _redact_source_context(self, value: Any, counts: dict[str, int]) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        redacted: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            redacted.append(
+                {
+                    "targetPath": self._redact_text(str(item.get("targetPath", "")), "path", counts),
+                    "excerpt": self._redact_text(str(item.get("excerpt", "")), "source", counts),
+                    "obfuscatedBindings": [
+                        {
+                            "name": self._redact_text(str(binding.get("name", "")), "symbol", counts),
+                            "kind": str(binding.get("kind", "variable")),
+                            "loc": self._redact_text(str(binding.get("loc", "")), "locator", counts),
+                            "references": binding.get("references", 0),
+                            "fallbackName": self._redact_text(
+                                str(binding.get("fallbackName", "")), "symbol", counts
+                            ),
+                        }
+                        for binding in item.get("obfuscatedBindings", [])
+                        if isinstance(binding, dict)
+                    ],
+                }
+            )
         return redacted
 
     def _redact_evidence_ref(self, ref: EvidenceRef, counts: dict[str, int]) -> EvidenceRef:
@@ -125,6 +159,8 @@ class AgentContextBuilder:
             "astIndexCount": len(ast_indexes) if isinstance(ast_indexes, list) else 0,
             "symbolCount": len(symbol_names),
             "symbolSample": symbol_names[:8],
+            "sourceIndexArtifactId": request.source_index_artifact_id,
+            "transformedSources": self._transformed_source_context(request.source_index_payload),
         }
 
     def evidence_refs(
@@ -149,6 +185,7 @@ class AgentContextBuilder:
                 locator="artifact:ast_index",
                 excerpt=self.ast_excerpt(request.ast_index_payload),
             ),
+            *self.source_index_evidence_refs(request),
             *[
                 EvidenceRef(
                     artifact_id=artifact.id,
@@ -179,10 +216,70 @@ class AgentContextBuilder:
         symbols = self._symbol_names(payload)
         return f"symbols={symbols[:5]}"
 
+    def source_index_evidence_refs(self, request: AgentRuntimeRequest) -> list[EvidenceRef]:
+        if not request.source_index_artifact_id:
+            return []
+        return [
+            EvidenceRef(
+                artifact_id=request.source_index_artifact_id,
+                label="Core transformed source",
+                locator=f"source_index:{item['targetPath']}",
+                excerpt=item["excerpt"],
+            )
+            for item in self._transformed_source_context(request.source_index_payload)
+        ]
+
     def _list_excerpt(self, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
         return [item for item in value[:8] if isinstance(item, str)]
+
+    def _transformed_source_context(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        candidates = payload.get("sources")
+        if not isinstance(candidates, list):
+            candidates = payload.get("scripts")
+        if not isinstance(candidates, list):
+            candidates = payload.get("sourceIndex")
+        if not isinstance(candidates, list):
+            candidates = payload.get("files")
+        if not isinstance(candidates, list):
+            return []
+        excerpts: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            target_path = item.get("targetPath")
+            transformed_source = item.get("transformedSource")
+            if not isinstance(target_path, str) or not target_path.strip():
+                continue
+            if not isinstance(transformed_source, str) or not transformed_source:
+                continue
+            raw_bindings = item.get("obfuscatedBindings")
+            obfuscated_bindings = [
+                {
+                    "name": binding["name"],
+                    "kind": binding.get("kind", "variable"),
+                    "loc": binding.get("loc"),
+                    "references": binding.get("references", 0),
+                    "fallbackName": binding["fallbackName"],
+                }
+                for binding in raw_bindings[:128]
+                if isinstance(binding, dict)
+                and isinstance(binding.get("name"), str)
+                and isinstance(binding.get("fallbackName"), str)
+            ] if isinstance(raw_bindings, list) else []
+            excerpts.append(
+                {
+                    "targetPath": target_path,
+                    "excerpt": transformed_source[:MAX_SOURCE_EXCERPT_CHARS],
+                    "obfuscatedBindings": obfuscated_bindings,
+                }
+            )
+            if len(excerpts) >= MAX_SOURCE_CONTEXT_ITEMS:
+                break
+        return excerpts
 
     def _symbol_names(self, payload: dict[str, Any]) -> list[str]:
         names: list[str] = []

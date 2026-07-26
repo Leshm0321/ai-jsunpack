@@ -84,10 +84,15 @@ class AgentRuntimeRequest:
     ast_index_artifact_id: str
     inventory_payload: dict[str, Any]
     ast_index_payload: dict[str, Any]
+    source_index_artifact_id: str | None = None
+    source_index_payload: dict[str, Any] | None = None
 
     @property
     def input_artifact_ids(self) -> list[str]:
-        return [self.inventory_artifact_id, self.ast_index_artifact_id]
+        ids = [self.inventory_artifact_id, self.ast_index_artifact_id]
+        if self.source_index_artifact_id:
+            ids.append(self.source_index_artifact_id)
+        return ids
 
 
 @dataclass(frozen=True)
@@ -156,6 +161,8 @@ class AgentInferenceDraft:
     uncertainty_reasons: list[str]
     alternatives: list[str]
     validation_status: InferenceValidationStatus = "needs_review"
+    target: str | None = None
+    value: str | None = None
     rollback_ref: str | None = None
 
 

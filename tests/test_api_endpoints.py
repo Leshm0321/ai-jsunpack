@@ -199,6 +199,8 @@ class ApiEndpointTest(unittest.TestCase):
             "uncertaintyReasons": ["stub output"],
             "alternatives": ["real provider"],
             "validationStatus": "needs_review",
+            "target": None,
+            "value": None,
             "rollbackRef": None,
         }
         review_payload = {

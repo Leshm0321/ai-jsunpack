@@ -867,11 +867,16 @@ class CrewAIExecutionAdapter:
     def _review_from_output(self, review: CrewReviewOutput | None) -> AgentReviewDraft | None:
         if review is None:
             return None
+        failure_class = self._failure_class(review.failure_class)
+        repair_instruction_ids = list(review.repair_instruction_ids)
+        status = self._run_status(review.status, default="best_effort")
+        if status == "best_effort" and failure_class == "none" and repair_instruction_ids:
+            status = "pass"
         return AgentReviewDraft(
-            status=self._run_status(review.status, default="best_effort"),
+            status=status,
             decision=review.decision,
-            failure_class=self._failure_class(review.failure_class),
-            repair_instruction_ids=list(review.repair_instruction_ids),
+            failure_class=failure_class,
+            repair_instruction_ids=repair_instruction_ids,
         )
 
     def _runtime_diagnosis_from_output(self, output: CrewRuntimeDiagnosisOutput) -> AgentRuntimeDiagnosisDraft:
@@ -921,6 +926,8 @@ class CrewAIExecutionAdapter:
             uncertainty_reasons=inference.uncertainty_reasons or ["CrewAI 输出未包含不确定性详情。"],
             alternatives=inference.alternatives or ["保持确定性 Core 证据不变"],
             validation_status=self._validation_status(inference.validation_status),
+            target=inference.target,
+            value=inference.value,
         )
 
     def _plan_payload(

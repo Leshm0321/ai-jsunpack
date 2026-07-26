@@ -91,10 +91,15 @@ ToolCallStatus = Literal["pass", "fail"]
 ToolRegistryCategory = Literal["code", "build", "runtime", "audit", "knowledge", "memory", "model"]
 MemoryScope = Literal["job", "project", "global"]
 MemoryType = Literal["short_term", "long_term", "entity", "scenario"]
-RepairTargetStage = Literal["building", "typechecking", "runtime_smoke", "runtime_compare"]
+RepairTargetStage = Literal["reconstructing", "building", "typechecking", "runtime_smoke", "runtime_compare"]
 RepairInstructionStatus = Literal["planned", "applied", "skipped"]
 RepairRiskLevel = Literal["low", "medium", "high"]
-RepairActionName = Literal["add_package_script", "replace_package_script", "mirror_original_static_entry"]
+RepairActionName = Literal[
+    "add_package_script",
+    "replace_package_script",
+    "mirror_original_static_entry",
+    "apply_symbol_rename_map",
+]
 BuildValidationStage = Literal["building", "typechecking"]
 BuildPhase = Literal["install", "build", "typecheck"]
 CommandSource = Literal["configured", "npm_script", "fallback_shim", "npm_install", "missing"]
@@ -294,6 +299,8 @@ class InferenceRecord(ContractModel):
     uncertainty_reasons: list[str]
     alternatives: list[str]
     validation_status: InferenceValidationStatus
+    target: str | None = None
+    value: str | None = None
     rollback_ref: str | None = None
 
 

@@ -183,6 +183,8 @@ class AgentArtifactWriter:
                 uncertainty_reasons=draft.uncertainty_reasons,
                 alternatives=draft.alternatives,
                 validation_status=draft.validation_status,
+                target=draft.target,
+                value=draft.value,
                 rollback_ref=draft.rollback_ref,
             )
             inference_artifacts.append(

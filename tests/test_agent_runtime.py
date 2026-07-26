@@ -19,11 +19,13 @@ from apps.worker.worker.agent_contracts import (
     AgentReviewDraft,
     CrewAgentExecution,
     CrewAgentSpec,
+    CrewReviewOutput,
     CrewStageExecution,
     crew_output_model_for_agent,
     validate_crew_output_for_agent,
 )
 from apps.worker.worker.agent_runtime import (
+    AgentContextBuilder,
     AgentContextRedactor,
     AgentRuntime,
     AgentRuntimeRequest,
@@ -98,6 +100,147 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertTrue(policy.allowed)
         self.assertEqual(policy.model_name, "provider/model-b")
         self.assertTrue(policy.sanitized_context)
+
+    def test_source_index_context_includes_transformed_source_and_redacts_for_desensitized(self):
+        builder = AgentContextBuilder()
+        source_index_payload = {
+            "kind": "source_index",
+            "scripts": [
+                {
+                    "targetPath": "src/transformed/assets/app.js",
+                    "transformedSource": "function a(){ return secretCustomerName; }",
+                    "obfuscatedBindings": [
+                        {
+                            "name": "_0x123abc",
+                            "kind": "parameter",
+                            "loc": "1:12",
+                            "references": 2,
+                            "fallbackName": "recoveredParameter1",
+                        }
+                    ],
+                }
+            ],
+        }
+        cloud_request = replace(
+            self._request(
+                cloud_mode="cloud_allowed",
+                config={"agentModel": "provider/model-a", "agentModelProvider": "provider"},
+            ),
+            source_index_artifact_id="artifact_source_index",
+            source_index_payload=source_index_payload,
+        )
+        evidence_refs = builder.evidence_refs(
+            request=cloud_request,
+            memory_artifacts=[],
+            memory_records=[],
+            knowledge_artifact=SimpleNamespace(id="knowledge"),
+            knowledge_hits=[],
+        )
+        source_ref = next(ref for ref in evidence_refs if ref.artifact_id == "artifact_source_index")
+
+        self.assertEqual(source_ref.locator, "source_index:src/transformed/assets/app.js")
+        self.assertIn("secretCustomerName", source_ref.excerpt)
+        self.assertEqual(
+            builder.input_summary(cloud_request)["transformedSources"][0]["targetPath"],
+            "src/transformed/assets/app.js",
+        )
+        self.assertEqual(
+            builder.input_summary(cloud_request)["transformedSources"][0]["obfuscatedBindings"][0]["fallbackName"],
+            "recoveredParameter1",
+        )
+
+        desensitized_request = replace(
+            cloud_request,
+            cloud_mode="desensitized",
+            job_config={"agentModel": "provider/model-a", "agentModelProvider": "provider"},
+        )
+        policy = ModelPolicyResolver().resolve(desensitized_request)
+        redaction = AgentContextRedactor().redact(
+            policy=policy,
+            input_summary=builder.input_summary(desensitized_request),
+            memory_excerpt="",
+            evidence_refs=evidence_refs,
+        )
+
+        self.assertNotIn("secretCustomerName", json.dumps(redaction.input_summary))
+        self.assertNotIn("_0x123abc", json.dumps(redaction.input_summary))
+        self.assertNotIn("secretCustomerName", json.dumps([ref.model_dump() for ref in redaction.evidence_refs]))
+        self.assertTrue(redaction.input_summary["transformedSources"][0]["excerpt"].startswith("redacted:source:"))
+
+    def test_inference_artifact_preserves_target_and_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = create_store(
+                database_url=f"sqlite:///{(root / 'metadata.db').as_posix()}",
+                artifact_root=root / "artifacts",
+            )
+            try:
+                job = store.create_job(CreateJobRequest(project_id="proj", owner_id="owner"))
+                request = self._request(cloud_mode="cloud_allowed")
+                knowledge_artifact = store.write_artifact(
+                    job.id,
+                    kind="knowledge_evidence",
+                    stage="agent_planning",
+                    filename="knowledge.json",
+                    content=b"{}",
+                    content_type="application/json",
+                    producer="tests",
+                )
+                tool_registry_artifact = store.write_artifact(
+                    job.id,
+                    kind="tool_registry",
+                    stage="agent_planning",
+                    filename="tool-registry.json",
+                    content=b"{}",
+                    content_type="application/json",
+                    producer="tests",
+                )
+                provider_draft = AgentProviderDraft(
+                    plan_payload={"kind": "agent_plan"},
+                    evidence_refs=[EvidenceRef(artifact_id="artifact_source_index", label="source", locator="x")],
+                    inferences=[
+                        AgentInferenceDraft(
+                            type="naming",
+                            agent_name="NamingAgent",
+                            confidence=0.91,
+                            uncertainty_reasons=["high-confidence binding evidence"],
+                            alternatives=["keep a"],
+                            validation_status="accepted",
+                            target="a",
+                            value="bootstrapApp",
+                        )
+                    ],
+                    runtime_diagnoses=[],
+                    report_sections=[],
+                    repair_instructions=[],
+                    review=AgentReviewDraft(status="pass", decision="ok", failure_class="none"),
+                    model_provider="test",
+                    model_name="model",
+                    prompt_version="test",
+                    tool_name="test.agent",
+                    tool_version="1",
+                    tool_status="pass",
+                    tool_failure_class="none",
+                    message="ok",
+                )
+
+                outputs = AgentArtifactWriter().persist_runtime_outputs(
+                    job_id=job.id,
+                    store=store,
+                    request=request,
+                    provider_draft=provider_draft,
+                    stages=[],
+                    memory_artifact_ids=[],
+                    knowledge_artifact=knowledge_artifact,
+                    tool_registry_artifact=tool_registry_artifact,
+                    started_at=time.monotonic(),
+                )
+                payload = json.loads(store.read_artifact(job.id, outputs.inference_artifacts[0].id))
+
+                self.assertEqual(payload["target"], "a")
+                self.assertEqual(payload["value"], "bootstrapApp")
+            finally:
+                store.close()
 
     def test_cloud_policy_reads_openai_compatible_endpoint_from_worker_env(self):
         with patch.object(ModelPolicyResolver, "_hostname_is_private", return_value=False):
@@ -598,6 +741,17 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         review_prompt = adapter.prompts["ReviewAgent"]
         self.assertEqual(set(review_prompt["reviewInputs"]["specialists"]), {"NamingAgent", "RuntimeAgent"})
         self.assertEqual(set(review_prompt["reviewInputs"]["synthesis"]), {"RepairAgent", "ReportAgent"})
+        self.assertEqual(adapter.prompts["NamingAgent"]["roleConstraints"][0]["rule"], "naming_scope")
+        self.assertEqual(adapter.prompts["RepairAgent"]["roleConstraints"][0]["rule"], "rename_action_contract")
+        self.assertEqual(review_prompt["roleConstraints"][0]["rule"], "review_known_rename_repairs_only")
+        self.assertEqual(
+            review_prompt["roleConstraints"][0]["approvalStatusContract"],
+            "approved repair IDs + failureClass=none => status=pass",
+        )
+        self.assertIn(
+            "MUST return status=pass and failureClass=none",
+            review_prompt["roleConstraints"][0]["description"],
+        )
         self.assertEqual(
             set(review_prompt["dependencyOutputs"]),
             {"NamingAgent", "RuntimeAgent", "RepairAgent", "ReportAgent"},
@@ -629,6 +783,27 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             ["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
         )
         self.assertEqual(aggregate.call_args.kwargs["planner_fallback_reason"], "planner_selection_outside_allowlist")
+
+    def test_review_output_explicit_repair_approval_is_not_downgraded_by_global_caveats(self):
+        adapter = CrewAIExecutionAdapter(backend=SimpleNamespace())
+
+        review = adapter._review_from_output(
+            CrewReviewOutput(
+                status="best_effort",
+                decision=(
+                    "Approve RepairAgent:repair:1 for deterministic symbol renaming; "
+                    "this does not establish runtime equivalence."
+                ),
+                failureClass="none",
+                repairInstructionIds=["RepairAgent:repair:1"],
+                limitations=["Runtime equivalence remains unproven."],
+            )
+        )
+
+        self.assertIsNotNone(review)
+        self.assertEqual(review.status, "pass")
+        self.assertEqual(review.failure_class, "none")
+        self.assertEqual(review.repair_instruction_ids, ["RepairAgent:repair:1"])
 
     def test_repair_ids_are_assigned_before_review_and_can_be_explicitly_approved(self):
         class ApprovalAdapter:
@@ -905,7 +1080,16 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             input_artifact_ids=[],
             evidence_refs=[],
             message="done",
-            raw_output={"decision": "x" * 20_000},
+            raw_output={},
+            repair_instructions=[
+                AgentRepairInstructionDraft(
+                    target_stage="reconstructing",
+                    failure_class="none",
+                    decision="x" * 20_000,
+                    status="planned",
+                    risk_level="low",
+                )
+            ],
         )
         review_spec = CrewRuntimePlanner().build_specs()[-1]
 
@@ -964,6 +1148,225 @@ class AgentRuntimePolicyTest(unittest.TestCase):
 
         self.assertEqual(compact["rawOutput"], {"agent": "NamingAgent"})
         self.assertEqual(compact["inferences"][0]["agent_name"], "NamingAgent")
+
+    def test_repair_context_projects_specialist_outputs_and_fits_default_budget(self):
+        manager = CrewExecutionManager(adapter=_RecordingExecutionAdapter(planned_agents=[]))
+        specs = {spec.name: spec for spec in CrewRuntimePlanner().build_specs()}
+        bindings = [
+            {
+                "name": f"_0x{index:06x}",
+                "kind": "variable",
+                "loc": f"{index}:1",
+                "references": index % 5,
+                "fallbackName": f"recoveredValue{index}",
+            }
+            for index in range(1, 96)
+        ]
+        request = replace(
+            self._request(
+                cloud_mode="cloud_allowed",
+                config={"agents": {"contextBudget": 16_000}},
+            ),
+            source_index_artifact_id="artifact_source_index",
+            source_index_payload={
+                "kind": "source_index",
+                "scripts": [
+                    {
+                        "targetPath": "src/transformed/agentApi.js",
+                        "transformedSource": "const opaqueValue = 1;\n" * 1000,
+                        "obfuscatedBindings": bindings,
+                    }
+                ],
+            },
+        )
+
+        def specialist_execution(name: str, count: int) -> CrewAgentExecution:
+            inferences = [
+                AgentInferenceDraft(
+                    type="naming",
+                    agent_name=name,
+                    confidence=0.99,
+                    uncertainty_reasons=["u" * 500],
+                    alternatives=["a" * 250, "b" * 250],
+                    validation_status="accepted",
+                    target=f"_0x{index:06x}",
+                    value=f"readableValue{index}",
+                )
+                for index in range(1, count + 1)
+            ]
+            return CrewAgentExecution(
+                spec=specs[name],
+                status="pass",
+                failure_class="none",
+                attempt=0,
+                duration_ms=0,
+                input_artifact_ids=[],
+                evidence_refs=[],
+                message="done",
+                raw_output={
+                    "inferences": [{"duplicated": "x" * 1000}],
+                    "notes": ["n" * 3000],
+                },
+                inferences=inferences,
+            )
+
+        executions = {
+            "NamingAgent": specialist_execution("NamingAgent", 95),
+            "TypeAgent": specialist_execution("TypeAgent", 11),
+            "FrameworkAgent": specialist_execution("FrameworkAgent", 5),
+            "DeadCodeAgent": specialist_execution("DeadCodeAgent", 1),
+            "RuntimeAgent": specialist_execution("RuntimeAgent", 4),
+        }
+        context = SimpleNamespace(
+            request=request,
+            prompt_context={
+                "inputSummary": AgentContextBuilder().input_summary(request),
+                "memory": "m" * 5000,
+                "knowledgeHits": [
+                    {
+                        "category": "historical_repair_case",
+                        "locator": "knowledge:historical",
+                        "excerpt": "h" * 3000,
+                    }
+                ],
+                "evidenceRefs": [
+                    {
+                        "artifactId": f"artifact_{index}",
+                        "locator": f"artifact:evidence:{index}",
+                        "excerpt": "e" * 1000,
+                    }
+                    for index in range(16)
+                ],
+            },
+        )
+
+        for consumer_name, expected_excerpt_length in (("RepairAgent", 0), ("ReportAgent", 2000)):
+            with self.subTest(consumer_name=consumer_name):
+                prompt = manager._prompt_context_for_agent(
+                    context=context,
+                    spec=specs[consumer_name],
+                    stages=[],
+                    executions_by_name=executions,
+                )
+                trimmed, audit = manager._apply_context_budget(
+                    context=context,
+                    spec=specs[consumer_name],
+                    prompt_context=prompt,
+                )
+
+                self.assertTrue(audit["withinBudget"], audit)
+                self.assertEqual(
+                    set(trimmed["dependencyOutputs"]),
+                    {"NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"},
+                )
+                naming_context = trimmed["dependencyOutputs"]["NamingAgent"]
+                self.assertEqual(len(naming_context["inferences"]), 95)
+                self.assertNotIn("rawOutput", naming_context)
+                self.assertNotIn("uncertainty_reasons", naming_context["inferences"][0])
+                self.assertNotIn("alternatives", naming_context["inferences"][0])
+                self.assertEqual(
+                    len(trimmed["inputSummary"]["transformedSources"][0]["obfuscatedBindings"]),
+                    95,
+                )
+                self.assertEqual(
+                    len(trimmed["inputSummary"]["transformedSources"][0]["excerpt"]),
+                    expected_excerpt_length,
+                )
+
+        repair_map = {binding["name"]: binding["fallbackName"] for binding in bindings}
+        executions["RepairAgent"] = CrewAgentExecution(
+            spec=specs["RepairAgent"],
+            status="pass",
+            failure_class="none",
+            attempt=0,
+            duration_ms=0,
+            input_artifact_ids=[],
+            evidence_refs=[],
+            message="done",
+            raw_output={},
+            repair_instructions=[
+                AgentRepairInstructionDraft(
+                    target_stage="reconstructing",
+                    failure_class="none",
+                    decision="Apply the complete reviewed rename map.",
+                    status="planned",
+                    risk_level="low",
+                    id="repair_rename",
+                    actions=[
+                        {
+                            "action": "apply_symbol_rename_map",
+                            "path": "src/transformed/agentApi.js",
+                            "value": json.dumps(repair_map, separators=(",", ":")),
+                            "reason": "Complete fallback rename map.",
+                        }
+                    ],
+                )
+            ],
+        )
+        executions["ReportAgent"] = CrewAgentExecution(
+            spec=specs["ReportAgent"],
+            status="pass",
+            failure_class="none",
+            attempt=0,
+            duration_ms=0,
+            input_artifact_ids=[],
+            evidence_refs=[],
+            message="done",
+            raw_output={},
+            report_sections=[
+                {
+                    "title": f"Section {index}",
+                    "anchor": f"section-{index}",
+                    "summary": "summary " * 20,
+                    "content": "content " * 2500,
+                    "status": "pass",
+                    "confidence": 0.9,
+                }
+                for index in range(6)
+            ],
+        )
+        review_prompt = manager._prompt_context_for_agent(
+            context=context,
+            spec=specs["ReviewAgent"],
+            stages=[],
+            executions_by_name=executions,
+        )
+        review_trimmed, review_audit = manager._apply_context_budget(
+            context=context,
+            spec=specs["ReviewAgent"],
+            prompt_context=review_prompt,
+        )
+
+        self.assertTrue(review_audit["withinBudget"], review_audit)
+        self.assertEqual(
+            set(review_trimmed["dependencyOutputs"]),
+            {
+                "NamingAgent",
+                "TypeAgent",
+                "FrameworkAgent",
+                "DeadCodeAgent",
+                "RuntimeAgent",
+                "RepairAgent",
+                "ReportAgent",
+            },
+        )
+        self.assertEqual(
+            len(review_trimmed["dependencyOutputs"]["NamingAgent"]["inferences"]),
+            95,
+        )
+        self.assertEqual(review_trimmed["dependencyOutputs"]["RuntimeAgent"]["inferences"], [])
+        self.assertEqual(
+            len(review_trimmed["dependencyOutputs"]["RepairAgent"]["repairInstructions"]),
+            1,
+        )
+        self.assertNotIn(
+            "content",
+            review_trimmed["dependencyOutputs"]["ReportAgent"]["reportSections"][0],
+        )
+        self.assertNotIn(
+            "summary",
+            review_trimmed["dependencyOutputs"]["ReportAgent"]["reportSections"][0],
+        )
 
     def test_parallel_stage_audit_records_actual_worker_counts(self):
         adapter = _RecordingExecutionAdapter(planned_agents=["NamingAgent", "RuntimeAgent"])
@@ -1121,7 +1524,9 @@ class AgentRuntimePolicyTest(unittest.TestCase):
             stages=stages,
             executions_by_name={dependency.spec.name: dependency},
         )
-        self.assertEqual(prompt["dependencyOutputs"][dependency.spec.name]["rawOutput"]["agent"], dependency.spec.name)
+        dependency_context = prompt["dependencyOutputs"][dependency.spec.name]
+        self.assertEqual(dependency_context["status"], "pass")
+        self.assertNotIn("rawOutput", dependency_context)
 
     def test_agent_execution_artifact_records_endpoint_metadata_without_secret(self):
         with tempfile.TemporaryDirectory() as temp_dir:

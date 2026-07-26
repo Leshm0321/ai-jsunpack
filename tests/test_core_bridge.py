@@ -17,6 +17,8 @@ class CoreBridgeTest(unittest.TestCase):
 
         self.assertEqual(result.inventory_artifact_payload["kind"], "input_inventory")
         self.assertEqual(result.ast_index_artifact_payload["kind"], "ast_index")
+        self.assertEqual(result.source_index_artifact_payload["kind"], "source_index")
+        self.assertEqual(result.source_index_artifact_payload["sources"][0]["targetPath"], "src/transformed/app.js")
 
     def test_reconstruct_decodes_utf8_cli_output_without_windows_codepage_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -58,6 +60,7 @@ class CoreBridgeTest(unittest.TestCase):
                     "    payload = {",
                     "        'inventoryArtifactPayload': {'kind': 'input_inventory', 'inventory': {'entries': [], 'scripts': []}},",
                     "        'astIndexArtifactPayload': {'kind': 'ast_index', 'astIndexes': [], 'detectedRuntime': []},",
+                    "        'sourceIndexArtifactPayload': {'kind': 'source_index', 'sources': [{'targetPath': 'src/transformed/app.js', 'transformedSource': 'const a = 1;'}]},",
                     "    }",
                     "elif command == 'reconstruct':",
                     "    payload = {",

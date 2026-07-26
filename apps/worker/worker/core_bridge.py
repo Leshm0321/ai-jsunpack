@@ -17,6 +17,7 @@ CORE_CLI_PATH_ENV = "AI_JSUNPACK_CORE_CLI_PATH"
 class CoreAnalysisResult:
     inventory_artifact_payload: dict[str, Any]
     ast_index_artifact_payload: dict[str, Any]
+    source_index_artifact_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -60,12 +61,16 @@ class CoreBridge:
 
         inventory_payload = payload.get("inventoryArtifactPayload")
         ast_index_payload = payload.get("astIndexArtifactPayload")
+        source_index_payload = payload.get("sourceIndexArtifactPayload")
         if not isinstance(inventory_payload, dict) or not isinstance(ast_index_payload, dict):
             raise CoreBridgeError("Core CLI 响应缺少 artifact payload。")
+        if source_index_payload is not None and not isinstance(source_index_payload, dict):
+            raise CoreBridgeError("Core CLI source index artifact payload 无效。")
 
         return CoreAnalysisResult(
             inventory_artifact_payload=inventory_payload,
             ast_index_artifact_payload=ast_index_payload,
+            source_index_artifact_payload=source_index_payload,
         )
 
     def reconstruct_input_package(
