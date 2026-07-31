@@ -302,31 +302,29 @@ class PackagingRunner:
         review_runs = [item for item in audit_payload.get("reviewRuns", []) if isinstance(item, dict)]
         build_artifacts = [item for item in audit_payload.get("buildArtifacts", []) if isinstance(item, dict)]
         runtime_reports = [item for item in audit_payload.get("runtimeReports", []) if isinstance(item, dict)]
+        inference_records = [item for item in audit_payload.get("inferenceRecords", []) if isinstance(item, dict)]
+        repair_instructions = [item for item in audit_payload.get("repairInstructions", []) if isinstance(item, dict)]
 
-        preferred_summary = next(
-            (
-                str(section.get("summary")).strip()
-                for section in report_sections
-                if isinstance(section.get("summary"), str)
-                and section.get("summary").strip()
-                and str(section.get("anchor") or "") in {"executive-summary", "summary", "overview"}
-            ),
-            None,
+        executive_summary = self._executive_summary_text(report_sections)
+        deterministic_summary = self._deterministic_result_summary(
+            delivery=delivery,
+            decision=decision,
+            review_runs=review_runs,
+            build_artifacts=build_artifacts,
+            runtime_reports=runtime_reports,
+            inference_records=inference_records,
+            repair_instructions=repair_instructions,
+            audit_payload=audit_payload,
         )
-        if preferred_summary is None:
-            preferred_summary = next(
-                (
-                    str(section.get("summary")).strip()
-                    for section in report_sections
-                    if isinstance(section.get("summary"), str) and section.get("summary").strip()
-                ),
-                None,
-            )
-        if preferred_summary is None:
+        if executive_summary is not None:
             preferred_summary = (
-                f"Processed {len(delivery.transformed_files)} JavaScript file(s). "
-                f"The final validation status is {decision['status']}."
+                f"{executive_summary.rstrip('。.!！？?')}。"
+                f"{self._deterministic_result_outcome(delivery=delivery, decision=decision, review_runs=review_runs, build_artifacts=build_artifacts, runtime_reports=runtime_reports, audit_payload=audit_payload)}"
             )
+            overview_source = "ai_executive_summary"
+        else:
+            preferred_summary = deterministic_summary
+            overview_source = "deterministic_result_summary"
 
         limitations = self._summary_limitations(
             audit_payload=audit_payload,
@@ -343,9 +341,9 @@ class PackagingRunner:
             "jobId": job.id,
             "status": decision["status"],
             "overview": {
-                "available": bool(report_sections),
+                "available": True,
                 "text": preferred_summary,
-                "source": "report_section" if report_sections else "deterministic_fallback",
+                "source": overview_source,
             },
             "processingScope": {
                 "inputName": delivery.input_name,
@@ -381,8 +379,181 @@ class PackagingRunner:
             "risks": risks,
             "limitations": limitations,
             "fallbackReason": delivery.downgrade_reason
-            or ("AI-authored report sections were unavailable; a deterministic summary was generated." if not report_sections else None),
+            or (
+                "ReportAgent 未提供 executive-summary；已根据处理、验证、交付与限制证据生成确定性摘要。"
+                if executive_summary is None
+                else None
+            ),
         }
+
+    def _executive_summary_text(self, report_sections: list[dict[str, Any]]) -> str | None:
+        for section in report_sections:
+            if str(section.get("anchor") or "").strip().lower() != "executive-summary":
+                continue
+            for field_name in ("content", "summary"):
+                value = section.get(field_name)
+                if isinstance(value, str) and value.strip() and not self._agent_status_boilerplate(value):
+                    return value.strip()
+        return None
+
+    def _agent_status_boilerplate(self, value: str) -> bool:
+        normalized = " ".join(value.strip().split()).lower()
+        return (
+            "agent 已完成" in normalized and "没有明确的审查决策" in normalized
+        ) or (
+            "agent completed" in normalized and "review decision" in normalized
+        )
+
+    def _deterministic_result_summary(
+        self,
+        *,
+        delivery: DeliveryResult,
+        decision: dict[str, Any],
+        review_runs: list[dict[str, Any]],
+        build_artifacts: list[dict[str, Any]],
+        runtime_reports: list[dict[str, Any]],
+        inference_records: list[dict[str, Any]],
+        repair_instructions: list[dict[str, Any]],
+        audit_payload: dict[str, Any],
+    ) -> str:
+        input_name = delivery.input_name or "输入文件"
+        transformed_count = len(delivery.transformed_files)
+        sentences = [f"本次对 {input_name} 完成反混淆处理，并生成 {transformed_count} 个转换文件。"]
+
+        naming_records = [
+            record
+            for record in inference_records
+            if record.get("type") == "naming" or record.get("agentName") == "NamingAgent"
+        ]
+        if naming_records:
+            naming_sentence = f"NamingAgent 生成 {len(naming_records)} 条命名推断"
+            accepted_count = sum(record.get("validationStatus") == "accepted" for record in naming_records)
+            if accepted_count and self._naming_rename_applied(review_runs, repair_instructions):
+                naming_sentence += "，高置信度 accepted 映射已用于确定性符号重命名"
+            elif accepted_count:
+                naming_sentence += f"，其中 {accepted_count} 条为高置信度 accepted 结果"
+            sentences.append(f"{naming_sentence}。")
+
+        sentences.append(
+            self._deterministic_result_outcome(
+                delivery=delivery,
+                decision=decision,
+                review_runs=review_runs,
+                build_artifacts=build_artifacts,
+                runtime_reports=runtime_reports,
+                audit_payload=audit_payload,
+            )
+        )
+        return "".join(sentences)
+
+    def _deterministic_result_outcome(
+        self,
+        *,
+        delivery: DeliveryResult,
+        decision: dict[str, Any],
+        review_runs: list[dict[str, Any]],
+        build_artifacts: list[dict[str, Any]],
+        runtime_reports: list[dict[str, Any]],
+        audit_payload: dict[str, Any],
+    ) -> str:
+        validation_sentence = self._validation_summary_sentence(
+            decision=decision,
+            review_runs=review_runs,
+            build_artifacts=build_artifacts,
+            runtime_reports=runtime_reports,
+        )
+        delivery_sentence = self._delivery_summary_sentence(delivery)
+        limitation_sentence = self._limitation_summary_sentence(audit_payload=audit_payload, delivery=delivery)
+        return f"{validation_sentence}{delivery_sentence}{limitation_sentence}"
+
+    def _naming_rename_applied(
+        self,
+        review_runs: list[dict[str, Any]],
+        repair_instructions: list[dict[str, Any]],
+    ) -> bool:
+        for review in review_runs:
+            if review.get("reviewType") != "agent_review" or review.get("status") != "pass":
+                continue
+            decision = str(review.get("decision") or "").lower()
+            if any(token in decision for token in ("apply_symbol_rename_map", "符号重命名", "重命名映射", "rename map")):
+                return True
+        for instruction in repair_instructions:
+            if instruction.get("status") not in {"applied", "completed", "pass"}:
+                continue
+            actions = instruction.get("actions")
+            if isinstance(actions, list) and any(
+                isinstance(action, dict) and action.get("action") == "apply_symbol_rename_map"
+                for action in actions
+            ):
+                return True
+        return False
+
+    def _validation_summary_sentence(
+        self,
+        *,
+        decision: dict[str, Any],
+        review_runs: list[dict[str, Any]],
+        build_artifacts: list[dict[str, Any]],
+        runtime_reports: list[dict[str, Any]],
+    ) -> str:
+        validation_records = [*build_artifacts, *review_runs]
+        checks = [
+            ("构建", self._latest_review_status(validation_records, "build")),
+            ("类型检查", self._latest_review_status(validation_records, "typecheck")),
+            ("运行时对比", self._latest_review_status(review_runs, "runtime_compare")),
+        ]
+        if checks[2][1] is None and runtime_reports:
+            latest_runtime = max(runtime_reports, key=self._record_attempt)
+            checks[2] = ("运行时验证", str(latest_runtime.get("status") or "unknown"))
+        present_checks = [(label, status) for label, status in checks if status is not None]
+        if len(present_checks) == 3 and all(status == "pass" for _, status in present_checks):
+            return "构建、类型检查和运行时对比均通过。"
+        if present_checks:
+            status_labels = {
+                "pass": "通过",
+                "fail": "未通过",
+                "best_effort": "按 best effort 完成",
+                "retry": "需要重试",
+                "skipped": "已跳过",
+                "unknown": "状态未知",
+            }
+            details = "、".join(f"{label}{status_labels.get(status, status)}" for label, status in present_checks)
+            return f"验证结果：{details}。"
+        final_status = {
+            "completed": "已完成",
+            "completed_best_effort": "已按 best effort 完成",
+            "failed": "未完成",
+            "cancelled": "已取消",
+        }.get(str(decision.get("status") or ""), str(decision.get("status") or "状态未知"))
+        return f"最终任务状态为{final_status}。"
+
+    def _latest_review_status(self, records: list[dict[str, Any]], review_type: str) -> str | None:
+        candidates = [record for record in records if record.get("reviewType") == review_type]
+        if not candidates:
+            return None
+        latest = max(candidates, key=self._record_attempt)
+        return str(latest.get("status") or "unknown")
+
+    def _delivery_summary_sentence(self, delivery: DeliveryResult) -> str:
+        if delivery.delivery_kind == "single_file":
+            return "结果以独立 JavaScript 文件交付。"
+        if delivery.delivery_kind == "project_package":
+            return "结果以可运行项目 ZIP 交付。"
+        if delivery.artifact is None:
+            return "当前未生成可下载的主要结果。"
+        return "主要结果已生成。"
+
+    def _limitation_summary_sentence(self, *, audit_payload: dict[str, Any], delivery: DeliveryResult) -> str:
+        placeholders = self._dependency_placeholder_rows(audit_payload.get("reconstructionPlans", []))
+        if placeholders:
+            return (
+                f"仍有 {len(placeholders)} 个缺失的静态相对 ESM 依赖使用显式占位模块，"
+                "因此模块语义恢复仍应按 best effort 理解，不能视为绝对行为等价。"
+            )
+        limitations = self._summary_limitations(audit_payload=audit_payload, delivery=delivery)
+        if limitations:
+            return f"仍有 {len(limitations)} 项已知限制，结果不应视为完整模块语义恢复或绝对行为等价。"
+        return ""
 
     def _latest_summary_records(self, records: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}

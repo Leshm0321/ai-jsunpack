@@ -743,6 +743,8 @@ class AgentRuntimePolicyTest(unittest.TestCase):
         self.assertEqual(set(review_prompt["reviewInputs"]["synthesis"]), {"RepairAgent", "ReportAgent"})
         self.assertEqual(adapter.prompts["NamingAgent"]["roleConstraints"][0]["rule"], "naming_scope")
         self.assertEqual(adapter.prompts["RepairAgent"]["roleConstraints"][0]["rule"], "rename_action_contract")
+        self.assertEqual(adapter.prompts["ReportAgent"]["roleConstraints"][0]["rule"], "executive_summary_contract")
+        self.assertEqual(adapter.prompts["ReportAgent"]["roleConstraints"][0]["requiredAnchor"], "executive-summary")
         self.assertEqual(review_prompt["roleConstraints"][0]["rule"], "review_known_rename_repairs_only")
         self.assertEqual(
             review_prompt["roleConstraints"][0]["approvalStatusContract"],

@@ -159,10 +159,15 @@ class CrewRuntimePlanner:
             CrewAgentSpec(
                 name="ReportAgent",
                 stage="synthesis",
-                responsibility="仅输出报告章节。",
+                responsibility="输出面向用户的执行摘要与可审计报告章节。",
                 role="Report Agent",
-                goal="将跨 Agent 发现总结为用于打包和审计的报告章节。",
-                backstory="你生成结构化报告章节，并保留审计可追溯性。",
+                goal=(
+                    "将跨 Agent 发现总结为用于打包和审计的报告章节，并且必须提供 anchor=executive-summary 的用户结果摘要。"
+                ),
+                backstory=(
+                    "你生成结构化报告章节并保留审计可追溯性；执行摘要描述本次反混淆做了什么、取得了什么效果、"
+                    "有哪些风险与限制，绝不使用某个 Agent 的完成状态代替结果总结。"
+                ),
                 output_kind="report_section",
                 allow_parallel=True,
                 dependencies=["NamingAgent", "TypeAgent", "FrameworkAgent", "DeadCodeAgent", "RuntimeAgent"],
@@ -779,6 +784,20 @@ class CrewExecutionManager:
                     "allowedSourceIndexTargetPaths": source_targets,
                     "valueFormat": "JSON object string mapping old binding names to legal new identifiers",
                     "targetStage": "reconstructing",
+                }
+            ]
+        if agent_name == "ReportAgent":
+            return [
+                {
+                    "rule": "executive_summary_contract",
+                    "description": (
+                        "MUST emit at least one reportSections item whose anchor is exactly executive-summary. "
+                        "Its content must be a user-facing natural-language summary of the deobfuscation result: "
+                        "processing scope, material changes or high-confidence findings, observed effect, and key risks or limitations. "
+                        "Do not use an Agent completion/status sentence as the executive summary."
+                    ),
+                    "requiredAnchor": "executive-summary",
+                    "requiredContent": ["processing_scope", "material_changes", "observed_effect", "risks_or_limitations"],
                 }
             ]
         if agent_name == "ReviewAgent":

@@ -7,7 +7,7 @@ from pathlib import Path
 from apps.api.app.artifact_store import InMemoryObjectStorageClient, S3CompatibleArtifactStore
 from apps.api.app.models import CreateJobRequest, OpsAlert, OpsAlertDelivery, OpsAlertEvent, OpsAlertRule
 from apps.api.app.store import artifacts_table, create_store
-from apps.worker.worker.delivery import DeliveryError, DeliveryPublisher
+from apps.worker.worker.delivery import DeliveryError, DeliveryPublisher, DeliveryResult
 from apps.worker.worker.packaging import PackagingRunner
 
 
@@ -284,6 +284,23 @@ class PackagingRunnerTest(unittest.TestCase):
                     producer="test",
                     parent_artifact_ids=[source.id],
                 )
+                store.write_artifact(
+                    job.id,
+                    kind="report_section",
+                    stage="agent_pass",
+                    filename="naming-recovery.json",
+                    content=json.dumps(
+                        {
+                            "anchor": "naming-recovery",
+                            "summary": "NamingAgent 已完成，但没有明确的审查决策。",
+                            "content": "NamingAgent 生成了命名推断。",
+                            "status": "best_effort",
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    content_type="application/json",
+                    producer="test",
+                )
 
                 result = PackagingRunner().run(job_id=job.id, store=store)
                 summary = json.loads(store.read_artifact_record(result.result_summary_artifact))
@@ -291,7 +308,10 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertEqual(result.primary_result_artifact.kind, "result_file")
                 self.assertEqual(result.evidence_package_artifact.kind, "evidence_package")
                 self.assertEqual(result.result_summary_artifact.kind, "result_summary")
-                self.assertEqual(summary["overview"]["source"], "deterministic_fallback")
+                self.assertEqual(summary["overview"]["source"], "deterministic_result_summary")
+                self.assertIn("source.js", summary["overview"]["text"])
+                self.assertIn("1 个转换文件", summary["overview"]["text"])
+                self.assertNotIn("没有明确的审查决策", summary["overview"]["text"])
                 self.assertIn("processingScope", summary)
                 self.assertIn("majorChanges", summary)
                 self.assertIn("validation", summary)
@@ -305,6 +325,50 @@ class PackagingRunnerTest(unittest.TestCase):
                 self.assertIn("evidence-index.json", names)
             finally:
                 store.close()
+
+    def test_result_summary_prefers_executive_summary_content(self):
+        runner = PackagingRunner()
+        summary = runner._result_summary(
+            job=type("Job", (), {"id": "job_summary_test"})(),
+            audit_payload={
+                "reportSections": [
+                    {
+                        "anchor": "naming-recovery",
+                        "summary": "NamingAgent 已完成，但没有明确的审查决策。",
+                        "content": "命名恢复细节。",
+                    },
+                    {
+                        "anchor": "executive-summary",
+                        "summary": "执行摘要",
+                        "content": "本次已完成关键标识符恢复，并保留不确定项供人工复核。",
+                    },
+                ],
+                "reviewRuns": [
+                    {"reviewType": "build", "status": "pass", "attempt": 0},
+                    {"reviewType": "typecheck", "status": "pass", "attempt": 0},
+                    {"reviewType": "runtime_compare", "status": "pass", "attempt": 1},
+                ],
+                "buildArtifacts": [],
+                "runtimeReports": [],
+                "inferenceRecords": [],
+                "repairInstructions": [],
+                "reconstructionPlans": [],
+            },
+            decision={"status": "completed", "failureClass": "none", "observations": []},
+            delivery=DeliveryResult(
+                artifact=None,
+                delivery_kind="project_package",
+                input_kind="single_script",
+                input_name="source.js",
+                transformed_files=["source.js"],
+            ),
+        )
+
+        self.assertEqual(summary["overview"]["source"], "ai_executive_summary")
+        self.assertTrue(summary["overview"]["text"].startswith("本次已完成关键标识符恢复"))
+        self.assertIn("构建、类型检查和运行时对比均通过", summary["overview"]["text"])
+        self.assertIn("可运行项目 ZIP", summary["overview"]["text"])
+        self.assertNotIn("没有明确的审查决策", summary["overview"]["text"])
 
     def _generated_project(
         self,

@@ -4,7 +4,7 @@ import { gsap } from "gsap";
 import { AlertTriangle, CheckCircle2, Download, FileCheck2, FileText, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { deleteJob, downloadArtifactFile, downloadJobResult, fetchJobResult } from "./api";
 import { appMotion } from "./app-motion";
-import { useLocalization } from "./i18n";
+import { useLocalization, type Language } from "./i18n";
 import type { AppRoute } from "./routes";
 import { EmptyState, StatusBanner, StatusToken } from "./workbench-common";
 import { formatBytes } from "./workbench-logic";
@@ -18,7 +18,7 @@ interface SummarySection {
 }
 
 export function WorkbenchResult({ jobId, onNavigate }: { jobId: string; onNavigate: (route: AppRoute) => void }) {
-  const { t } = useLocalization();
+  const { language, t } = useLocalization();
   const rootRef = useRef<HTMLDivElement>(null);
   const [result, setResult] = useState<JobResultResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,7 +65,7 @@ export function WorkbenchResult({ jobId, onNavigate }: { jobId: string; onNaviga
     };
   }, [jobId, result?.job.status]);
 
-  const sections = useMemo(() => normalizeSummary(result?.summary, t), [result?.summary, t]);
+  const sections = useMemo(() => normalizeSummary(result?.summary, t, language), [language, result?.summary, t]);
 
   useGSAP(
     () => {
@@ -204,7 +204,7 @@ function reportLabel(artifact: ProductArtifact, t: (key: string) => string): str
   return t("result.report.other");
 }
 
-function normalizeSummary(value: unknown, t: (key: string) => string): SummarySection[] {
+function normalizeSummary(value: unknown, t: (key: string) => string, language: Language): SummarySection[] {
   const record = isRecord(value) ? value : {};
   const sectionDefinitions: Array<{ keys: string[]; label: string; tone: SummarySection["tone"] }> = [
     { keys: ["aiSummary", "summary", "overview", "executiveSummary"], label: t("result.summary.ai"), tone: "neutral" },
@@ -218,12 +218,201 @@ function normalizeSummary(value: unknown, t: (key: string) => string): SummarySe
   ];
   const sections = sectionDefinitions.flatMap((definition, index) => {
     const selected = definition.keys.map((key) => record[key]).find((item) => item !== undefined && item !== null && item !== "");
-    const text = summaryLines(selected);
+    const text = index === 0 ? overviewLines(record, selected, language) : summaryLines(selected);
     return text.length ? [{ key: `${definition.keys[0]}-${index}`, label: definition.label, tone: definition.tone, value: text }] : [];
   });
   if (sections.length > 0) return sections;
   const fallback = summaryLines(value);
   return [{ key: "fallback", label: t("result.summary.ai"), tone: "neutral", value: fallback.length ? fallback : [t("result.summary.pending")] }];
+}
+
+function overviewLines(record: Record<string, unknown>, selected: unknown, language: Language): string[] {
+  const direct = directSummaryText(selected);
+  if (direct && !isAgentStatusBoilerplate(direct)) return [direct];
+  const synthesized = synthesizeResultOverview(record, language);
+  return synthesized ? [synthesized] : [];
+}
+
+function directSummaryText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (!isRecord(value)) return undefined;
+  for (const key of ["text", "content", "summary", "value"]) {
+    const child = value[key];
+    if (typeof child === "string" && child.trim()) return child.trim();
+  }
+  return undefined;
+}
+
+function isAgentStatusBoilerplate(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return (
+    /\b[A-Za-z]+Agent\s*已完成.*(?:没有明确的审查决策|未给出明确结论)/i.test(normalized)
+    || /\b[A-Za-z]+Agent\s+(?:has\s+)?completed.*(?:without|no).*(?:review decision|conclusion)/i.test(normalized)
+  );
+}
+
+function synthesizeResultOverview(record: Record<string, unknown>, language: Language): string | undefined {
+  const scope = firstRecord(record, ["processingScope", "processedScope", "scope"]);
+  const inputName = stringField(scope, "inputName") || stringField(record, "inputName");
+  const transformedFiles = arrayValue(scope?.transformedFiles);
+  const transformedFileCount = numberField(scope, "transformedFileCount") ?? transformedFiles.length;
+
+  const review = firstRecord(record, ["review", "reviewSummary"]);
+  const reportSections = recordArray(review?.reportSections);
+  const reviewRuns = recordArray(review?.runs);
+  const namingSection = reportSections.find((section) => stringField(section, "anchor") === "naming-recovery");
+  const namingCount = namingInferenceCount(namingSection);
+  const acceptedNamingCount = namingSection
+    ? recordArray(namingSection.details).filter((detail) => /(?:^|\|\s*)accepted(?:\s*\||$)/i.test(stringField(detail, "label") || "")).length
+    : 0;
+  const agentReview = latestReviewRecord(reviewRuns, "agent_review");
+  const namingApplied = agentReview?.status === "pass"
+    && /apply_symbol_rename_map|符号重命名|重命名映射|rename map/i.test(agentReview.decision || "");
+
+  const validation = firstRecord(record, ["validation", "validationSummary", "verification"]);
+  const buildRecords = [...recordArray(validation?.build), ...reviewRuns];
+  const runtimeRecords = recordArray(validation?.runtime);
+  const buildStatus = latestReviewRecord(buildRecords, "build")?.status;
+  const typecheckStatus = latestReviewRecord(buildRecords, "typecheck")?.status;
+  const latestRuntime = latestAttemptRecord(runtimeRecords);
+  const runtimeStatus = latestReviewRecord(reviewRuns, "runtime_compare")?.status
+    || stringField(latestRuntime, "status");
+
+  const delivery = firstRecord(record, ["delivery"]);
+  const deliveryKind = stringField(delivery, "kind");
+  const downgraded = delivery?.downgraded === true;
+  const risks = recordArray(record.risks);
+  const limitations = arrayValue(record.limitations).filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+  const placeholderCount = dependencyPlaceholderCount(risks, limitations);
+
+  const hasResultEvidence = Boolean(
+    inputName
+    || transformedFileCount
+    || namingCount
+    || buildStatus
+    || typecheckStatus
+    || runtimeStatus
+    || deliveryKind
+    || placeholderCount
+    || limitations.length
+  );
+  if (!hasResultEvidence) return undefined;
+
+  if (language === "en") {
+    const sentences: string[] = [];
+    if (inputName) {
+      sentences.push(`This run deobfuscated ${inputName} and produced ${transformedFileCount} transformed file${transformedFileCount === 1 ? "" : "s"}.`);
+    } else {
+      sentences.push(`This run completed deobfuscation and produced ${transformedFileCount} transformed file${transformedFileCount === 1 ? "" : "s"}.`);
+    }
+    if (namingCount) {
+      if (namingApplied) sentences.push(`NamingAgent produced ${namingCount} naming inferences, and high-confidence mappings were applied through deterministic symbol renaming.`);
+      else if (acceptedNamingCount) sentences.push(`NamingAgent produced ${namingCount} naming inferences, including ${acceptedNamingCount} high-confidence accepted results.`);
+      else sentences.push(`NamingAgent produced ${namingCount} naming inferences.`);
+    }
+    sentences.push(validationOverviewSentence("en", buildStatus, typecheckStatus, runtimeStatus));
+    sentences.push(deliveryOverviewSentence("en", deliveryKind));
+    if (placeholderCount) sentences.push(`${placeholderCount} missing static relative ESM dependenc${placeholderCount === 1 ? "y remains" : "ies remain"} represented by explicit placeholder modules, so module-semantic recovery is still best effort and must not be treated as absolute behavioral equivalence.`);
+    else if (downgraded || limitations.length) sentences.push(`${limitations.length || 1} known limitation${limitations.length === 1 ? " remains" : "s remain"}; the result should not be treated as complete module-semantic recovery or absolute behavioral equivalence.`);
+    return sentences.filter(Boolean).join(" ");
+  }
+
+  const sentences: string[] = [];
+  if (inputName) sentences.push(`本次对 ${inputName} 完成反混淆并生成 ${transformedFileCount} 个转换文件。`);
+  else sentences.push(`本次已完成反混淆并生成 ${transformedFileCount} 个转换文件。`);
+  if (namingCount) {
+    if (namingApplied) sentences.push(`NamingAgent 生成 ${namingCount} 条命名推断，高置信度映射已用于确定性符号重命名。`);
+    else if (acceptedNamingCount) sentences.push(`NamingAgent 生成 ${namingCount} 条命名推断，其中 ${acceptedNamingCount} 条为高置信度 accepted 结果。`);
+    else sentences.push(`NamingAgent 生成 ${namingCount} 条命名推断。`);
+  }
+  sentences.push(validationOverviewSentence("zh", buildStatus, typecheckStatus, runtimeStatus));
+  sentences.push(deliveryOverviewSentence("zh", deliveryKind));
+  if (placeholderCount) sentences.push(`仍有 ${placeholderCount} 个缺失的静态相对 ESM 依赖使用显式占位模块，因此模块语义恢复仍应按 best effort 理解，不能视为绝对行为等价。`);
+  else if (downgraded || limitations.length) sentences.push(`仍有 ${limitations.length || 1} 项已知限制，结果不应视为完整模块语义恢复或绝对行为等价。`);
+  return sentences.filter(Boolean).join("");
+}
+
+function validationOverviewSentence(language: Language, build?: string, typecheck?: string, runtime?: string): string {
+  const checks = [["build", build], ["typecheck", typecheck], ["runtime", runtime]] as const;
+  if (checks.every(([, status]) => status === "pass")) {
+    return language === "zh" ? "构建、类型检查和运行时对比均通过。" : "Build, typecheck, and runtime comparison all passed.";
+  }
+  const available = checks.filter(([, status]) => Boolean(status));
+  if (!available.length) return "";
+  const labels = language === "zh"
+    ? { build: "构建", typecheck: "类型检查", runtime: "运行时对比" }
+    : { build: "Build", typecheck: "typecheck", runtime: "runtime comparison" };
+  const statuses = language === "zh"
+    ? { pass: "通过", fail: "未通过", best_effort: "按 best effort 完成", retry: "需要重试", skipped: "已跳过", unknown: "状态未知" }
+    : { pass: "passed", fail: "failed", best_effort: "completed best effort", retry: "needs retry", skipped: "was skipped", unknown: "has unknown status" };
+  const details = available.map(([key, status]) => `${labels[key]}${language === "zh" ? "" : " "}${statuses[status as keyof typeof statuses] || status}`);
+  return language === "zh" ? `验证结果：${details.join("、")}。` : `Validation: ${details.join(", ")}.`;
+}
+
+function deliveryOverviewSentence(language: Language, kind?: string): string {
+  if (kind === "single_file") return language === "zh" ? "结果以独立 JavaScript 文件交付。" : "The result is delivered as a standalone JavaScript file.";
+  if (kind === "project_package") return language === "zh" ? "结果以可运行项目 ZIP 交付。" : "The result is delivered as a runnable project ZIP.";
+  if (kind === "unavailable") return language === "zh" ? "当前未生成可下载的主要结果。" : "No downloadable primary result was generated.";
+  return kind ? (language === "zh" ? "主要结果已生成。" : "The primary result is ready.") : "";
+}
+
+function namingInferenceCount(section: Record<string, unknown> | undefined): number {
+  if (!section) return 0;
+  const narrative = [stringField(section, "content"), stringField(section, "summary")].filter(Boolean).join(" ");
+  const match = narrative.match(/(?:生成|generated)\s*(\d+)\s*(?:条|naming)/i)
+    || narrative.match(/(\d+)\s*(?:条\s*)?(?:命名推断|naming inferences?)/i);
+  if (match) return Number(match[1]);
+  return recordArray(section.details).length;
+}
+
+function dependencyPlaceholderCount(risks: Array<Record<string, unknown>>, limitations: string[]): number {
+  for (const risk of risks) {
+    if (stringField(risk, "source") !== "dependency_placeholders") continue;
+    const match = (stringField(risk, "summary") || "").match(/\d+/);
+    if (match) return Number(match[0]);
+  }
+  for (const limitation of limitations) {
+    if (!/(?:ESM|dependency|依赖)/i.test(limitation) || !/(?:placeholder|占位)/i.test(limitation)) continue;
+    const match = limitation.match(/\d+/);
+    if (match) return Number(match[0]);
+  }
+  return 0;
+}
+
+function latestReviewRecord(records: Array<Record<string, unknown>>, reviewType: string): { status?: string; decision?: string } | undefined {
+  const matching = records.filter((record) => stringField(record, "reviewType") === reviewType);
+  const latest = latestAttemptRecord(matching);
+  if (!latest) return undefined;
+  return { status: stringField(latest, "status"), decision: stringField(latest, "decision") };
+}
+
+function latestAttemptRecord(records: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  return records.reduce<Record<string, unknown> | undefined>((latest, record) => {
+    if (!latest) return record;
+    return (numberField(record, "attempt") || 0) >= (numberField(latest, "attempt") || 0) ? record : latest;
+  }, undefined);
+}
+
+function firstRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
+  return keys.map((key) => record[key]).find(isRecord);
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function summaryLines(value: unknown): string[] {

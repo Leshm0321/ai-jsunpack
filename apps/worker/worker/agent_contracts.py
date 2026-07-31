@@ -481,7 +481,14 @@ class CrewRepairAgentOutput(_CrewRoleOutput):
 
 
 class CrewReportAgentOutput(_CrewRoleOutput):
-    report_sections: list[CrewReportSectionOutput] = Field(min_length=1, alias="reportSections")
+    report_sections: list[CrewReportSectionOutput] = Field(
+        min_length=1,
+        alias="reportSections",
+        description=(
+            "报告章节；必须包含 anchor=executive-summary 的面向用户结果摘要，概括处理范围、主要效果和风险限制，"
+            "不能只描述 Agent 执行状态。"
+        ),
+    )
 
 
 class CrewReviewAgentOutput(_CrewRoleOutput):
