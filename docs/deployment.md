@@ -63,7 +63,7 @@ graph LR
 构建并启动完整本地拓扑：
 
 ```powershell
-docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
+docker compose --env-file .env -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
 docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml ps
 ```
 

@@ -61,7 +61,7 @@ node scripts/dev.mjs worker --use-browser-runner --config config/ai-jsunpack.yam
 也可以使用 Docker 启动完整本地拓扑：
 
 ```powershell
-docker compose -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
+docker compose --env-file .env -p ai-jsunpack-dev -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up --build -d
 ```
 
 打开 `http://127.0.0.1:5173`。生产环境变量与启动方式见 [部署指南](docs/deployment.md)。
