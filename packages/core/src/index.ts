@@ -1544,6 +1544,37 @@ function transformScriptSource(
       transforms.add("computed_property_literal_restore");
       logAppliedTransform(filePath, "computed_property_literal_restore", originalLoc, originalSnippet, codeForNode(path.node), transformLog, rollbackMap);
     },
+    OptionalMemberExpression(path: NodePath<t.OptionalMemberExpression>) {
+      if (!path.node.computed || !t.isStringLiteral(path.node.property) || !isIdentifierName(path.node.property.value)) {
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      path.node.property = t.identifier(path.node.property.value);
+      path.node.computed = false;
+      transforms.add("computed_property_literal_restore");
+      logAppliedTransform(filePath, "computed_property_literal_restore", originalLoc, originalSnippet, codeForNode(path.node), transformLog, rollbackMap);
+    },
+    ObjectProperty(path: NodePath<t.ObjectProperty>) {
+      if (path.node.computed || !t.isStringLiteral(path.node.key) || !isIdentifierName(path.node.key.value)) {
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      path.node.key = t.identifier(path.node.key.value);
+      transforms.add("object_property_literal_restore");
+      logAppliedTransform(filePath, "object_property_literal_restore", originalLoc, originalSnippet, codeForNode(path.node), transformLog, rollbackMap);
+    },
+    ObjectMethod(path: NodePath<t.ObjectMethod>) {
+      if (path.node.computed || !t.isStringLiteral(path.node.key) || !isIdentifierName(path.node.key.value)) {
+        return;
+      }
+      const originalSnippet = codeForNode(path.node);
+      const originalLoc = formatNodeLoc(path.node);
+      path.node.key = t.identifier(path.node.key.value);
+      transforms.add("object_property_literal_restore");
+      logAppliedTransform(filePath, "object_property_literal_restore", originalLoc, originalSnippet, codeForNode(path.node), transformLog, rollbackMap);
+    },
     BinaryExpression(path: NodePath<t.BinaryExpression>) {
       const literal = evaluateLowRiskBinaryExpression(path.node);
       if (!literal) {
@@ -1558,7 +1589,9 @@ function transformScriptSource(
     }
   });
 
-  const transformedSource = generate.default(ast, { comments: true }, source).code;
+  normalizeRawLiteralNotation(filePath, ast, transforms, transformLog, rollbackMap);
+
+  const transformedSource = generate.default(ast, { comments: true, jsescOption: { minimal: true } }, source).code;
 
   return {
     record: {
@@ -1572,6 +1605,82 @@ function transformScriptSource(
     transformLog,
     rollbackMap
   };
+}
+
+function normalizeRawLiteralNotation(
+  filePath: string,
+  ast: ReturnType<typeof parse>,
+  transforms: Set<string>,
+  transformLog: TransformLogEntry[],
+  rollbackMap: RollbackMapEntry[]
+): void {
+  const originalSamples: string[] = [];
+  const transformedSamples: string[] = [];
+  let firstLoc: string | undefined;
+  let stringLiteralCount = 0;
+  let numericLiteralCount = 0;
+
+  const normalizeNode = (path: NodePath<t.StringLiteral | t.NumericLiteral>, kind: "string" | "number"): void => {
+    const raw = path.node.extra?.raw;
+    if (typeof raw !== "string") {
+      return;
+    }
+    if (kind === "string" && !/\\(?:x[0-9a-f]{2}|u(?:[0-9a-f]{4}|\{[0-9a-f]+\}))/i.test(raw)) {
+      return;
+    }
+    if (kind === "number" && !/^0[xob][0-9a-f_]+$/i.test(raw)) {
+      return;
+    }
+
+    const originalExtra = path.node.extra;
+    const originalSnippet = codeForNode(path.node);
+    const normalizedExtra = { ...originalExtra };
+    delete normalizedExtra.raw;
+    delete normalizedExtra.rawValue;
+    path.node.extra = Object.keys(normalizedExtra).length > 0 ? normalizedExtra : undefined;
+    const transformedSnippet = codeForNode(path.node);
+    if (transformedSnippet === originalSnippet) {
+      path.node.extra = originalExtra;
+      return;
+    }
+
+    firstLoc ??= formatNodeLoc(path.node);
+    if (originalSamples.length < 5) {
+      originalSamples.push(originalSnippet);
+      transformedSamples.push(transformedSnippet);
+    }
+    if (kind === "string") {
+      stringLiteralCount += 1;
+    } else {
+      numericLiteralCount += 1;
+    }
+  };
+
+  getTraverse()(ast, {
+    StringLiteral(path: NodePath<t.StringLiteral>) {
+      normalizeNode(path, "string");
+    },
+    NumericLiteral(path: NodePath<t.NumericLiteral>) {
+      normalizeNode(path, "number");
+    }
+  });
+
+  if (stringLiteralCount === 0 && numericLiteralCount === 0) {
+    return;
+  }
+
+  transforms.add("literal_notation_normalize");
+  logAppliedTransform(
+    filePath,
+    "literal_notation_normalize",
+    firstLoc,
+    originalSamples.join(" | "),
+    transformedSamples.join(" | "),
+    transformLog,
+    rollbackMap
+  );
+  const detail = `Normalized ${stringLiteralCount} escaped string literal(s) and ${numericLiteralCount} non-decimal numeric literal(s) to readable notation.`;
+  transformLog[transformLog.length - 1].detail = detail;
 }
 
 export function collectObfuscatedBindings(source: string): ObfuscatedBindingCandidate[] {
@@ -2557,7 +2666,7 @@ function logAppliedTransform(
 }
 
 function codeForNode(node: t.Node): string {
-  return generate.default(node, { comments: false, compact: true }).code;
+  return generate.default(node, { comments: false, compact: true, jsescOption: { minimal: true } }).code;
 }
 
 function isIdentifierName(value: string): boolean {
@@ -3150,7 +3259,11 @@ async function applyAgentSymbolRenameMap(
       renamedBindings += 1;
     }
   }
-  const transformedSource = generate.default(ast, { comments: true, retainLines: true }, source).code;
+  const transformedSource = generate.default(
+    ast,
+    { comments: true, retainLines: true, jsescOption: { minimal: true } },
+    source
+  ).code;
   await fs.writeFile(targetPath, transformedSource, "utf8");
   return { renamedBindings, renamedSymbols: Object.keys(renameMap).sort() };
 }
